@@ -543,7 +543,8 @@ impl ConfigBuilder {
             cloud_requirements,
         )
         .await?;
-        let merged_toml = config_layer_stack.effective_config();
+        let mut merged_toml = config_layer_stack.effective_config();
+        merge_codexn_extra_config_from_env(&mut merged_toml)?;
 
         // Note that each layer in ConfigLayerStack should have resolved
         // relative paths to absolute paths based on the parent folder of the
@@ -642,7 +643,8 @@ pub async fn load_config_as_toml_with_cli_overrides(
     )
     .await?;
 
-    let merged_toml = config_layer_stack.effective_config();
+    let mut merged_toml = config_layer_stack.effective_config();
+    merge_codexn_extra_config_from_env(&mut merged_toml)?;
     let cfg = deserialize_config_toml_with_base(merged_toml, codex_home).map_err(|e| {
         tracing::error!("Failed to deserialize overridden config: {e}");
         e
@@ -661,6 +663,49 @@ pub(crate) fn deserialize_config_toml_with_base(
     root_value
         .try_into()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+const CODEXN_CONFIG_NERO_PATH_ENV: &str = "CODEXN_CONFIG_NERO_PATH";
+
+fn merge_codexn_extra_config_from_env(merged_toml: &mut TomlValue) -> std::io::Result<()> {
+    let Some(extra_path) = std::env::var_os(CODEXN_CONFIG_NERO_PATH_ENV).map(PathBuf::from) else {
+        return Ok(());
+    };
+
+    if !extra_path.exists() {
+        tracing::debug!(
+            path = %extra_path.display(),
+            "codexn extra config path is set but file does not exist; skipping overlay"
+        );
+        return Ok(());
+    }
+
+    let extra_contents = std::fs::read_to_string(&extra_path).map_err(|err| {
+        std::io::Error::new(
+            err.kind(),
+            format!(
+                "failed to read extra fork config from {}: {err}",
+                extra_path.display()
+            ),
+        )
+    })?;
+
+    let extra_toml: TomlValue = toml::from_str(&extra_contents).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "failed to parse extra fork config TOML from {}: {err}",
+                extra_path.display()
+            ),
+        )
+    })?;
+
+    tracing::debug!(
+        path = %extra_path.display(),
+        "merging codexn extra config overlay from CODEXN_CONFIG_NERO_PATH"
+    );
+    crate::config_loader::merge_toml_values(merged_toml, &extra_toml);
+    Ok(())
 }
 
 fn load_catalog_json(path: &AbsolutePathBuf) -> std::io::Result<ModelsResponse> {
@@ -801,7 +846,8 @@ pub async fn load_global_mcp_servers(
         CloudRequirementsLoader::default(),
     )
     .await?;
-    let merged_toml = config_layer_stack.effective_config();
+    let mut merged_toml = config_layer_stack.effective_config();
+    merge_codexn_extra_config_from_env(&mut merged_toml)?;
     let Some(servers_value) = merged_toml.get("mcp_servers") else {
         return Ok(BTreeMap::new());
     };
