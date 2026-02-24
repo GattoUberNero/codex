@@ -10,7 +10,16 @@ use futures::future::BoxFuture;
 use serde::Serialize;
 use serde::Serializer;
 
-pub type HookFn = Arc<dyn for<'a> Fn(&'a HookPayload) -> BoxFuture<'a, HookResult> + Send + Sync>;
+use crate::response::HookAction;
+
+pub type HookFn =
+    Arc<dyn for<'a> Fn(&'a HookPayload) -> BoxFuture<'a, HookExecution> + Send + Sync>;
+
+#[derive(Debug)]
+pub struct HookExecution {
+    pub result: HookResult,
+    pub actions: Vec<HookAction>,
+}
 
 #[derive(Debug)]
 pub enum HookResult {
@@ -30,10 +39,17 @@ impl HookResult {
     }
 }
 
+impl Default for HookResult {
+    fn default() -> Self {
+        Self::Success
+    }
+}
+
 #[derive(Debug)]
 pub struct HookResponse {
     pub hook_name: String,
     pub result: HookResult,
+    pub actions: Vec<HookAction>,
 }
 
 #[derive(Clone)]
@@ -46,16 +62,25 @@ impl Default for Hook {
     fn default() -> Self {
         Self {
             name: "default".to_string(),
-            func: Arc::new(|_| Box::pin(async { HookResult::Success })),
+            func: Arc::new(|_| {
+                Box::pin(async {
+                    HookExecution {
+                        result: HookResult::Success,
+                        actions: Vec::new(),
+                    }
+                })
+            }),
         }
     }
 }
 
 impl Hook {
     pub async fn execute(&self, payload: &HookPayload) -> HookResponse {
+        let execution = (self.func)(payload).await;
         HookResponse {
             hook_name: self.name.clone(),
-            result: (self.func)(payload).await,
+            result: execution.result,
+            actions: execution.actions,
         }
     }
 }

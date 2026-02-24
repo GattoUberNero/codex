@@ -221,6 +221,7 @@ impl Session {
             last_agent_message,
         });
         self.send_event(turn_context.as_ref(), event).await;
+        self.mark_turn_terminal_event_emitted(&turn_context.sub_id).await;
     }
 
     async fn register_new_active_task(&self, task: RunningTask) {
@@ -303,6 +304,8 @@ impl Session {
             reason,
         });
         self.send_event(task.turn_context.as_ref(), event).await;
+        self.mark_turn_terminal_event_emitted(&task.turn_context.sub_id)
+            .await;
     }
 }
 

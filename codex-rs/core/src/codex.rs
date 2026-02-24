@@ -4,7 +4,9 @@ use std::fmt::Debug;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use crate::AuthManager;
 use crate::CodexAuth;
@@ -50,6 +52,7 @@ use async_channel::Receiver;
 use async_channel::Sender;
 use codex_hooks::HookEvent;
 use codex_hooks::HookEventAfterAgent;
+use codex_hooks::HookAction;
 use codex_hooks::HookPayload;
 use codex_hooks::HookResult;
 use codex_hooks::Hooks;
@@ -291,6 +294,8 @@ pub struct CodexSpawnOk {
 
 pub(crate) const INITIAL_SUBMIT_ID: &str = "";
 pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
+const HOOK_AUTO_REPLY_SUBMISSION_PREFIX: &str = "hook-auto-";
+const HOOK_AUTO_REPLY_MAX_CHAIN_DEPTH: u32 = 1;
 const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
 const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyber-safety";
 
@@ -430,6 +435,7 @@ impl Codex {
             auth_manager.clone(),
             models_manager.clone(),
             exec_policy,
+            tx_sub.clone(),
             tx_event.clone(),
             agent_status_tx.clone(),
             conversation_history,
@@ -524,6 +530,7 @@ impl Codex {
 /// A session has at most 1 running task at a time, and can be interrupted by user input.
 pub(crate) struct Session {
     pub(crate) conversation_id: ThreadId,
+    tx_sub: Sender<Submission>,
     tx_event: Sender<Event>,
     agent_status: watch::Sender<AgentStatus>,
     state: Mutex<SessionState>,
@@ -535,6 +542,8 @@ pub(crate) struct Session {
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) services: SessionServices,
     js_repl: Arc<JsReplHandle>,
+    hook_seen_terminal_turn_ids: Mutex<HashSet<String>>,
+    hook_auto_reply_chain_depth: AtomicU32,
     next_internal_sub_id: AtomicU64,
 }
 
@@ -1006,6 +1015,7 @@ impl Session {
         auth_manager: Arc<AuthManager>,
         models_manager: Arc<ModelsManager>,
         exec_policy: ExecPolicyManager,
+        tx_sub: Sender<Submission>,
         tx_event: Sender<Event>,
         agent_status: watch::Sender<AgentStatus>,
         initial_history: InitialHistory,
@@ -1360,6 +1370,7 @@ impl Session {
 
         let sess = Arc::new(Session {
             conversation_id,
+            tx_sub,
             tx_event: tx_event.clone(),
             agent_status,
             state: Mutex::new(state),
@@ -1369,6 +1380,8 @@ impl Session {
             active_turn: Mutex::new(None),
             services,
             js_repl,
+            hook_seen_terminal_turn_ids: Mutex::new(HashSet::new()),
+            hook_auto_reply_chain_depth: AtomicU32::new(0),
             next_internal_sub_id: AtomicU64::new(0),
         });
         if let Some(network_policy_decider_session) = network_policy_decider_session {
@@ -1517,6 +1530,115 @@ impl Session {
             .next_internal_sub_id
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         format!("auto-compact-{id}")
+    }
+
+    fn next_internal_sub_id_with_prefix(&self, prefix: &str) -> String {
+        let id = self
+            .next_internal_sub_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        format!("{prefix}{id}")
+    }
+
+    async fn enqueue_internal_op_with_prefix(&self, prefix: &str, op: Op) -> CodexResult<String> {
+        let id = self.next_internal_sub_id_with_prefix(prefix);
+        self.tx_sub
+            .send(Submission { id: id.clone(), op })
+            .await
+            .map_err(|_| CodexErr::InternalAgentDied)?;
+        Ok(id)
+    }
+
+    fn reset_hook_auto_reply_chain_depth(&self) {
+        self.hook_auto_reply_chain_depth.store(0, Ordering::SeqCst);
+    }
+
+    pub(crate) async fn mark_turn_terminal_event_emitted(&self, turn_id: &str) {
+        self.hook_seen_terminal_turn_ids
+            .lock()
+            .await
+            .insert(turn_id.to_string());
+    }
+
+    async fn clear_turn_terminal_marker(&self, turn_id: &str) {
+        self.hook_seen_terminal_turn_ids.lock().await.remove(turn_id);
+    }
+
+    fn try_reserve_hook_auto_reply_chain_slot(&self) -> Option<u32> {
+        self.hook_auto_reply_chain_depth
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                if current >= HOOK_AUTO_REPLY_MAX_CHAIN_DEPTH {
+                    None
+                } else {
+                    Some(current + 1)
+                }
+            })
+            .ok()
+            .map(|previous| previous + 1)
+    }
+
+    fn release_hook_auto_reply_chain_slot(&self) {
+        let _ = self.hook_auto_reply_chain_depth.fetch_update(
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+            |current| current.checked_sub(1),
+        );
+    }
+
+    fn spawn_deferred_auto_user_reply(self: &Arc<Self>, source_turn_id: String, hook_name: String, text: String) {
+        let Some(chain_depth) = self.try_reserve_hook_auto_reply_chain_slot() else {
+            info!(
+                turn_id = %source_turn_id,
+                hook_name = %hook_name,
+                max_chain_depth = HOOK_AUTO_REPLY_MAX_CHAIN_DEPTH,
+                "skipping synthetic user reply from hook action (auto-reply chain depth exhausted)"
+            );
+            return;
+        };
+
+        let sess = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                let source_turn_terminal_event_emitted = {
+                    let guard = sess.hook_seen_terminal_turn_ids.lock().await;
+                    guard.contains(source_turn_id.as_str())
+                };
+                if source_turn_terminal_event_emitted {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            sess.clear_turn_terminal_marker(&source_turn_id).await;
+
+            match sess
+                .enqueue_internal_op_with_prefix(HOOK_AUTO_REPLY_SUBMISSION_PREFIX, Op::UserInput {
+                    items: vec![UserInput::Text {
+                        text,
+                        text_elements: Vec::new(),
+                    }],
+                    final_output_json_schema: None,
+                })
+                .await
+            {
+                Ok(submission_id) => {
+                    info!(
+                        turn_id = %source_turn_id,
+                        hook_name = %hook_name,
+                        chain_depth,
+                        %submission_id,
+                        "queued synthetic user reply from hook action"
+                    );
+                }
+                Err(err) => {
+                    sess.release_hook_auto_reply_chain_slot();
+                    warn!(
+                        turn_id = %source_turn_id,
+                        hook_name = %hook_name,
+                        error = %err,
+                        "failed to queue synthetic user reply from hook action"
+                    );
+                }
+            }
+        });
     }
 
     pub(crate) async fn route_realtime_text_input(self: &Arc<Self>, text: String) {
@@ -3427,6 +3549,17 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                 .await;
             }
             Op::UserInput { .. } | Op::UserTurn { .. } => {
+                let is_hook_auto_reply = sub.id.starts_with(HOOK_AUTO_REPLY_SUBMISSION_PREFIX);
+                if !is_hook_auto_reply {
+                    sess.reset_hook_auto_reply_chain_depth();
+                } else if sess.active_turn.lock().await.is_some() {
+                    sess.release_hook_auto_reply_chain_slot();
+                    info!(
+                        submission_id = %sub.id,
+                        "skipping hook synthetic user reply because another turn is already active"
+                    );
+                    continue;
+                }
                 handlers::user_input_or_turn(&sess, sub.id.clone(), sub.op).await;
             }
             Op::ExecApproval {
@@ -4791,9 +4924,33 @@ pub(crate) async fn run_turn(
                         .await;
 
                     let mut abort_message = None;
+                    let mut deferred_auto_user_replies: Vec<(String, String)> = Vec::new();
                     for hook_outcome in hook_outcomes {
                         let hook_name = hook_outcome.hook_name;
-                        match hook_outcome.result {
+                        let result = hook_outcome.result;
+                        let actions = hook_outcome.actions;
+                        if matches!(&result, HookResult::Success) {
+                            for action in actions {
+                                match action {
+                                    HookAction::VisibleNote { message } => {
+                                        let message = if message.starts_with("[nero-hook]") {
+                                            message
+                                        } else {
+                                            format!("[nero-hook] {message}")
+                                        };
+                                        sess.send_event(
+                                            &turn_context,
+                                            EventMsg::Warning(WarningEvent { message }),
+                                        )
+                                        .await;
+                                    }
+                                    HookAction::AutoUserReply { message } => {
+                                        deferred_auto_user_replies.push((hook_name.clone(), message));
+                                    }
+                                }
+                            }
+                        }
+                        match result {
                             HookResult::Success => {}
                             HookResult::FailedContinue(error) => {
                                 warn!(
@@ -4829,6 +4986,13 @@ pub(crate) async fn run_turn(
                         )
                         .await;
                         return None;
+                    }
+                    for (hook_name, message) in deferred_auto_user_replies {
+                        sess.spawn_deferred_auto_user_reply(
+                            turn_context.sub_id.clone(),
+                            hook_name,
+                            message,
+                        );
                     }
                     break;
                 }
@@ -7791,6 +7955,7 @@ mod tests {
         };
 
         let (tx_event, _rx_event) = async_channel::unbounded();
+        let (tx_sub, _rx_sub) = async_channel::bounded::<Submission>(SUBMISSION_CHANNEL_CAPACITY);
         let (agent_status_tx, _agent_status_rx) = watch::channel(AgentStatus::PendingInit);
         let result = Session::new(
             session_configuration,
@@ -7798,6 +7963,7 @@ mod tests {
             auth_manager,
             models_manager,
             ExecPolicyManager::default(),
+            tx_sub,
             tx_event,
             agent_status_tx,
             InitialHistory::New,
@@ -7819,6 +7985,7 @@ mod tests {
     // todo: use online model info
     pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         let (tx_event, _rx_event) = async_channel::unbounded();
+        let (tx_sub, _rx_sub) = async_channel::bounded::<Submission>(SUBMISSION_CHANNEL_CAPACITY);
         let codex_home = tempfile::tempdir().expect("create temp dir");
         let config = build_test_config(codex_home.path()).await;
         let config = Arc::new(config);
@@ -7949,6 +8116,7 @@ mod tests {
 
         let session = Session {
             conversation_id,
+            tx_sub,
             tx_event,
             agent_status: agent_status_tx,
             state: Mutex::new(state),
@@ -7958,6 +8126,8 @@ mod tests {
             active_turn: Mutex::new(None),
             services,
             js_repl,
+            hook_seen_terminal_turn_ids: Mutex::new(HashSet::new()),
+            hook_auto_reply_chain_depth: AtomicU32::new(0),
             next_internal_sub_id: AtomicU64::new(0),
         };
 
@@ -7972,6 +8142,7 @@ mod tests {
         async_channel::Receiver<Event>,
     ) {
         let (tx_event, rx_event) = async_channel::unbounded();
+        let (tx_sub, _rx_sub) = async_channel::bounded::<Submission>(SUBMISSION_CHANNEL_CAPACITY);
         let codex_home = tempfile::tempdir().expect("create temp dir");
         let config = build_test_config(codex_home.path()).await;
         let config = Arc::new(config);
@@ -8102,6 +8273,7 @@ mod tests {
 
         let session = Arc::new(Session {
             conversation_id,
+            tx_sub,
             tx_event,
             agent_status: agent_status_tx,
             state: Mutex::new(state),
@@ -8111,6 +8283,8 @@ mod tests {
             active_turn: Mutex::new(None),
             services,
             js_repl,
+            hook_seen_terminal_turn_ids: Mutex::new(HashSet::new()),
+            hook_auto_reply_chain_depth: AtomicU32::new(0),
             next_internal_sub_id: AtomicU64::new(0),
         });
 
@@ -8707,6 +8881,35 @@ mod tests {
             }
             other => panic!("expected FunctionCallError::Fatal, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn hook_auto_reply_guard_state_transitions_are_stable() {
+        let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
+
+        assert_eq!(sess.try_reserve_hook_auto_reply_chain_slot(), Some(1));
+        assert_eq!(sess.try_reserve_hook_auto_reply_chain_slot(), None);
+
+        sess.release_hook_auto_reply_chain_slot();
+        assert_eq!(sess.try_reserve_hook_auto_reply_chain_slot(), Some(1));
+
+        sess.mark_turn_terminal_event_emitted("turn-a").await;
+        {
+            let seen = sess.hook_seen_terminal_turn_ids.lock().await;
+            assert!(seen.contains("turn-a"));
+        }
+        sess.clear_turn_terminal_marker("turn-a").await;
+        {
+            let seen = sess.hook_seen_terminal_turn_ids.lock().await;
+            assert!(!seen.contains("turn-a"));
+        }
+
+        sess.reset_hook_auto_reply_chain_depth();
+        assert_eq!(
+            sess.hook_auto_reply_chain_depth
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
     }
 
     async fn sample_rollout(

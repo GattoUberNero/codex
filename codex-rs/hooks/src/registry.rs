@@ -92,10 +92,12 @@ mod tests {
 
     use super::*;
     use crate::types::HookEventAfterAgent;
+    use crate::types::HookExecution;
     use crate::types::HookEventAfterToolUse;
     use crate::types::HookResult;
     use crate::types::HookToolInput;
     use crate::types::HookToolKind;
+    use crate::HookAction;
 
     const CWD: &str = "/tmp";
     const INPUT_MESSAGE: &str = "hello";
@@ -128,7 +130,10 @@ mod tests {
                 let calls = Arc::clone(&calls);
                 Box::pin(async move {
                     calls.fetch_add(1, Ordering::SeqCst);
-                    HookResult::Success
+                    HookExecution {
+                        result: HookResult::Success,
+                        actions: Vec::new(),
+                    }
                 })
             }),
         }
@@ -145,7 +150,10 @@ mod tests {
                 let message = message.clone();
                 Box::pin(async move {
                     calls.fetch_add(1, Ordering::SeqCst);
-                    HookResult::FailedContinue(std::io::Error::other(message).into())
+                    HookExecution {
+                        result: HookResult::FailedContinue(std::io::Error::other(message).into()),
+                        actions: Vec::new(),
+                    }
                 })
             }),
         }
@@ -162,7 +170,26 @@ mod tests {
                 let message = message.clone();
                 Box::pin(async move {
                     calls.fetch_add(1, Ordering::SeqCst);
-                    HookResult::FailedAbort(std::io::Error::other(message).into())
+                    HookExecution {
+                        result: HookResult::FailedAbort(std::io::Error::other(message).into()),
+                        actions: Vec::new(),
+                    }
+                })
+            }),
+        }
+    }
+
+    fn success_hook_with_actions(name: &str, actions: Vec<HookAction>) -> Hook {
+        let hook_name = name.to_string();
+        Hook {
+            name: hook_name,
+            func: Arc::new(move |_| {
+                let actions = actions.clone();
+                Box::pin(async move {
+                    HookExecution {
+                        result: HookResult::Success,
+                        actions,
+                    }
                 })
             }),
         }
@@ -312,6 +339,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_preserves_action_order_within_hook_response() {
+        let hooks = Hooks {
+            after_agent: vec![success_hook_with_actions(
+                "actions",
+                vec![
+                    HookAction::VisibleNote {
+                        message: "note".to_string(),
+                    },
+                    HookAction::AutoUserReply {
+                        message: "continue".to_string(),
+                    },
+                ],
+            )],
+            ..Hooks::default()
+        };
+
+        let outcomes = hooks.dispatch(hook_payload("actions")).await;
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(
+            outcomes[0].actions,
+            vec![
+                HookAction::VisibleNote {
+                    message: "note".to_string()
+                },
+                HookAction::AutoUserReply {
+                    message: "continue".to_string()
+                }
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn dispatch_executes_after_tool_use_hooks() {
         let calls = Arc::new(AtomicUsize::new(0));
         let hooks = Hooks {
@@ -387,7 +446,10 @@ mod tests {
                     ])
                     .expect("build command");
                     command.status().await.expect("run hook command");
-                    HookResult::Success
+                    HookExecution {
+                        result: HookResult::Success,
+                        actions: Vec::new(),
+                    }
                 })
             }),
         };
@@ -448,7 +510,10 @@ mod tests {
                     ])
                     .expect("build command");
                     command.status().await.expect("run hook command");
-                    HookResult::Success
+                    HookExecution {
+                        result: HookResult::Success,
+                        actions: Vec::new(),
+                    }
                 })
             }),
         };

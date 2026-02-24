@@ -1,14 +1,22 @@
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Serialize;
+use tokio::io::AsyncReadExt;
+use tracing::warn;
 
 use crate::Hook;
+use crate::HookExecution;
 use crate::HookEvent;
 use crate::HookPayload;
 use crate::HookResult;
 use crate::command_from_argv;
+use crate::parse_hook_actions_from_stdout;
+
+const LEGACY_NOTIFY_TIMEOUT: Duration = Duration::from_millis(1500);
+const LEGACY_NOTIFY_KILL_REAP_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Legacy notify payload appended as the final argv argument for backward compatibility.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -54,21 +62,127 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
             Box::pin(async move {
                 let mut command = match command_from_argv(&argv) {
                     Some(command) => command,
-                    None => return HookResult::Success,
+                    None => {
+                        return HookExecution {
+                            result: HookResult::Success,
+                            actions: Vec::new(),
+                        };
+                    }
                 };
                 if let Ok(notify_payload) = legacy_notify_json(&payload.hook_event, &payload.cwd) {
                     command.arg(notify_payload);
                 }
 
-                // Backwards-compat: match legacy notify behavior (argv + JSON arg, fire-and-forget).
+                // Backwards-compat payload shape is preserved (argv + JSON arg).
+                // We await completion so hooks can optionally emit JSON actions on stdout.
                 command
                     .stdin(Stdio::null())
-                    .stdout(Stdio::null())
                     .stderr(Stdio::null());
 
-                match command.spawn() {
-                    Ok(_) => HookResult::Success,
-                    Err(err) => HookResult::FailedContinue(err.into()),
+                command.stdout(Stdio::piped());
+
+                let mut child = match command.spawn() {
+                    Ok(child) => child,
+                    Err(err) => {
+                        return HookExecution {
+                            result: HookResult::FailedContinue(err.into()),
+                            actions: Vec::new(),
+                        };
+                    }
+                };
+
+                let stdout_task = child.stdout.take().map(|mut stdout| {
+                    tokio::spawn(async move {
+                        let mut buf = Vec::new();
+                        let _ = stdout.read_to_end(&mut buf).await;
+                        buf
+                    })
+                });
+
+                let status = match tokio::time::timeout(LEGACY_NOTIFY_TIMEOUT, child.wait()).await {
+                    Ok(Ok(status)) => status,
+                    Ok(Err(err)) => {
+                        if let Some(task) = stdout_task {
+                            task.abort();
+                        }
+                        return HookExecution {
+                            result: HookResult::FailedContinue(err.into()),
+                            actions: Vec::new(),
+                        };
+                    }
+                    Err(_) => {
+                        let _ = child.start_kill();
+                        let _ = tokio::time::timeout(LEGACY_NOTIFY_KILL_REAP_TIMEOUT, child.wait())
+                            .await;
+                        if let Some(task) = stdout_task {
+                            task.abort();
+                        }
+                        warn!(
+                            timeout_ms = LEGACY_NOTIFY_TIMEOUT.as_millis() as u64,
+                            kill_reap_timeout_ms = LEGACY_NOTIFY_KILL_REAP_TIMEOUT.as_millis() as u64,
+                            "legacy_notify hook timed out; attempted to kill/reap direct child and continuing without actions"
+                        );
+                        return HookExecution {
+                            result: HookResult::Success,
+                            actions: Vec::new(),
+                        };
+                    }
+                };
+
+                let stdout_bytes = match stdout_task {
+                    Some(task) => {
+                        let mut task = task;
+                        match tokio::time::timeout(LEGACY_NOTIFY_TIMEOUT, &mut task).await {
+                            Ok(Ok(buf)) => buf,
+                            Ok(Err(_join_err)) => Vec::new(),
+                            Err(_) => {
+                                task.abort();
+                                warn!(
+                                    timeout_ms = LEGACY_NOTIFY_TIMEOUT.as_millis() as u64,
+                                    "legacy_notify stdout reader timed out; continuing without actions"
+                                );
+                                Vec::new()
+                            }
+                        }
+                    }
+                    None => Vec::new(),
+                };
+
+                let actions = match String::from_utf8(stdout_bytes) {
+                    Ok(stdout) => match parse_hook_actions_from_stdout(&stdout) {
+                        Ok(parsed) => parsed.actions,
+                        Err(err) if stdout.trim_start().starts_with('{') => {
+                            return HookExecution {
+                                result: HookResult::FailedContinue(err.into()),
+                                actions: Vec::new(),
+                            };
+                        }
+                        Err(_) => Vec::new(),
+                    },
+                    Err(err) => {
+                        return HookExecution {
+                            result: HookResult::FailedContinue(err.into()),
+                            actions: Vec::new(),
+                        };
+                    }
+                };
+
+                if status.success() {
+                    HookExecution {
+                        result: HookResult::Success,
+                        actions,
+                    }
+                } else {
+                    HookExecution {
+                        result: HookResult::FailedContinue(
+                            std::io::Error::other(format!(
+                                "hook command exited with status {}",
+                                status
+                            ))
+                            .into(),
+                        ),
+                        actions,
+                    }
                 }
             })
         }),
@@ -82,6 +196,7 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde_json::Value;
     use serde_json::json;
+    use tempfile::tempdir;
 
     use super::*;
 
@@ -131,6 +246,104 @@ mod tests {
         let actual: Value = serde_json::from_str(&serialized)?;
         assert_eq!(actual, expected_notification_json());
 
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn notify_hook_parses_actions_from_stdout() -> Result<()> {
+        let hook = notify_hook(vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf '%s' '{\"actions\":[{\"type\":\"visible_note\",\"message\":\"hello\"}]}'"
+                .to_string(),
+        ]);
+
+        let payload = HookPayload {
+            session_id: ThreadId::new(),
+            cwd: tempdir()?.path().to_path_buf(),
+            triggered_at: chrono::Utc::now(),
+            hook_event: HookEvent::AfterAgent {
+                event: crate::HookEventAfterAgent {
+                    thread_id: ThreadId::new(),
+                    turn_id: "turn-x".to_string(),
+                    input_messages: vec!["hi".to_string()],
+                    last_assistant_message: Some("done".to_string()),
+                },
+            },
+        };
+
+        let outcome = hook.execute(&payload).await;
+        assert!(matches!(outcome.result, HookResult::Success));
+        assert_eq!(
+            outcome.actions,
+            vec![crate::HookAction::VisibleNote {
+                message: "hello".to_string()
+            }]
+        );
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn notify_hook_ignores_plain_stdout_for_compat() -> Result<()> {
+        let hook = notify_hook(vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf '%s' 'legacy-notifier-ok'".to_string(),
+        ]);
+
+        let payload = HookPayload {
+            session_id: ThreadId::new(),
+            cwd: tempdir()?.path().to_path_buf(),
+            triggered_at: chrono::Utc::now(),
+            hook_event: HookEvent::AfterAgent {
+                event: crate::HookEventAfterAgent {
+                    thread_id: ThreadId::new(),
+                    turn_id: "turn-y".to_string(),
+                    input_messages: vec!["hi".to_string()],
+                    last_assistant_message: Some("done".to_string()),
+                },
+            },
+        };
+
+        let outcome = hook.execute(&payload).await;
+        assert!(matches!(outcome.result, HookResult::Success));
+        assert!(outcome.actions.is_empty());
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn notify_hook_times_out_fail_open() -> Result<()> {
+        let hook = notify_hook(vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "sleep 3; printf '%s' '{\"actions\":[{\"type\":\"visible_note\",\"message\":\"late\"}]}'"
+                .to_string(),
+        ]);
+
+        let payload = HookPayload {
+            session_id: ThreadId::new(),
+            cwd: tempdir()?.path().to_path_buf(),
+            triggered_at: chrono::Utc::now(),
+            hook_event: HookEvent::AfterAgent {
+                event: crate::HookEventAfterAgent {
+                    thread_id: ThreadId::new(),
+                    turn_id: "turn-timeout".to_string(),
+                    input_messages: vec!["hi".to_string()],
+                    last_assistant_message: Some("done".to_string()),
+                },
+            },
+        };
+
+        let started = std::time::Instant::now();
+        let outcome = hook.execute(&payload).await;
+        let elapsed = started.elapsed();
+
+        assert!(matches!(outcome.result, HookResult::Success));
+        assert!(outcome.actions.is_empty());
+        assert!(elapsed < Duration::from_secs(3));
         Ok(())
     }
 }
