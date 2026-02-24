@@ -4979,6 +4979,40 @@ pub(crate) async fn run_turn(
                                             "recorded context_note developer message"
                                         );
                                     }
+                                    HookAction::DualNote {
+                                        tui_message,
+                                        agent_message,
+                                    } => {
+                                        let tui_message = if tui_message.starts_with("[nero-hook]") {
+                                            tui_message
+                                        } else {
+                                            format!("[nero-hook] {tui_message}")
+                                        };
+                                        sess.send_event(
+                                            &turn_context,
+                                            EventMsg::Warning(WarningEvent {
+                                                message: tui_message,
+                                            }),
+                                        )
+                                        .await;
+                                        let agent_text = if agent_message.starts_with("[nero-hook]") {
+                                            agent_message
+                                        } else {
+                                            format!("[nero-hook] {agent_message}")
+                                        };
+                                        let response_item: ResponseItem =
+                                            DeveloperInstructions::new(agent_text).into();
+                                        sess.record_conversation_items(
+                                            &turn_context,
+                                            std::slice::from_ref(&response_item),
+                                        )
+                                        .await;
+                                        debug!(
+                                            turn_id = %turn_context.sub_id,
+                                            hook_name = %hook_name,
+                                            "executed dual_note (tui warning + developer context)"
+                                        );
+                                    }
                                     HookAction::AutoUserReply { message } => {
                                         debug!(
                                             turn_id = %turn_context.sub_id,
