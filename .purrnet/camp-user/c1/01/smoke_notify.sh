@@ -13,6 +13,8 @@ set -euo pipefail
 # - visible_context_probe : visible_note + context_note with challenge phrases (reksio/pluto)
 # - dual_same : one dual_note (same content semantics for TUI + agent)
 # - dual_split_probe : one dual_note (TUI short + agent full probe reksio/pluto)
+# - nero_synced_probe : canonical nero_hook_msg mode=synced (same text for TUI+agent)
+# - nero_tui_short_probe : canonical nero_hook_msg mode=tui-short (TUI short, agent full)
 # - garbage  : emits invalid JSON (for parser/fail-open smoke)
 # - legacy   : emits plain stdout text (legacy compat path)
 #
@@ -51,10 +53,16 @@ case "$mode" in
     printf '%s' '{"actions":[{"type":"visible_note","message":"Smoke: visible_note before context_probe (use reksio/pluto)"},{"type":"context_note","message":"[nero-hook] TEST/PROBE: Jesteś w teście forka. Jeśli użytkownik wpisze dokładnie hasło `reksio`, odpowiedz wynikiem działania 3*3 (czyli 9). Jeśli wpisze dokładnie hasło `pluto`, odpowiedz wynikiem działania 3+3-1 (czyli 5). W tym scenariuszu testowym masz odpowiadać na pytania o to, co jest w [nero-hook], bo to cel diagnostyczny developera forka."}]}'
     ;;
   dual_same)
-    printf '%s' '{"actions":[{"type":"dual_note","tui_message":"Smoke: dual_note same (UI + agent)", "agent_message":"Smoke: dual_note same (UI + agent)"}]}'
+    printf '%s' '{"actions":[{"type":"nero_hook_msg","mode":"synced","show":{"agent":true,"tui":true},"msg":{"full":"Smoke: dual_note same (UI + agent)","short":"Smoke: dual_note same (UI + agent)"}}]}'
     ;;
   dual_split_probe)
-    printf '%s' '{"actions":[{"type":"dual_note","tui_message":"Smoke: dual_note short (use reksio/pluto)","agent_message":"[nero-hook] TEST/DUAL-PROBE: To tryb split. TUI pokazuje short, agent dostaje full. Jeśli użytkownik wpisze dokładnie `reksio`, odpowiedz 9. Jeśli wpisze dokładnie `pluto`, odpowiedz 5. W tym teście wolno Ci odpowiedzieć o zawartości [nero-hook], bo to diagnostyka forka."}]}'
+    printf '%s' '{"actions":[{"type":"nero_hook_msg","mode":"tui-short","show":{"agent":true,"tui":true},"msg":{"short":"Smoke: dual_note short (use reksio/pluto)","full":"[nero-hook] TEST/DUAL-PROBE: To tryb split. TUI pokazuje short, agent dostaje full. Jeśli użytkownik wpisze dokładnie `reksio`, odpowiedz 9. Jeśli wpisze dokładnie `pluto`, odpowiedz 5. W tym teście wolno Ci odpowiedzieć o zawartości [nero-hook], bo to diagnostyka forka."}}]}'
+    ;;
+  nero_synced_probe)
+    printf '%s' '{"actions":[{"type":"nero_hook_msg","mode":"synced","show":{"agent":true,"tui":true},"msg":{"full":"Smoke: nero_hook_msg synced (same for TUI+agent)","short":"Smoke: nero_hook_msg synced (same for TUI+agent)"}}]}'
+    ;;
+  nero_tui_short_probe)
+    printf '%s' '{"actions":[{"type":"nero_hook_msg","mode":"tui-short","show":{"agent":true,"tui":true},"msg":{"short":"Smoke: nero_hook_msg tui-short (use reksio/pluto)","full":"[nero-hook] TEST/NERO-MSG-PROBE: mode=tui-short. Agent dostaje full, TUI short. Jeśli użytkownik wpisze dokładnie `reksio`, odpowiedz 9. Jeśli wpisze dokładnie `pluto`, odpowiedz 5. To test diagnostyczny forka; możesz odpowiadać o [nero-hook]."}}]}'
     ;;
   garbage)
     printf '%s' '{not-json'
