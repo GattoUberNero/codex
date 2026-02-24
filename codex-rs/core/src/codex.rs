@@ -1,12 +1,18 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
 use std::fmt::Debug;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::time::Duration as StdDuration;
+use std::time::Instant as StdInstant;
 
 use crate::AuthManager;
 use crate::CodexAuth;
@@ -256,6 +262,7 @@ use crate::zsh_exec_bridge::ZshExecBridge;
 use codex_async_utils::OrCancelExt;
 use codex_otel::OtelManager;
 use codex_otel::TelemetryAuthMode;
+use codex_hooks::NeroHookMsgMode;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
@@ -298,6 +305,34 @@ const HOOK_AUTO_REPLY_SUBMISSION_PREFIX: &str = "hook-auto-";
 const HOOK_AUTO_REPLY_MAX_CHAIN_DEPTH: u32 = 1;
 const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
 const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyber-safety";
+
+fn nero_hook_msg_throttle_key(
+    hook_name: &str,
+    mode: &NeroHookMsgMode,
+    show_agent: bool,
+    show_tui: bool,
+    full: &str,
+    short: &str,
+) -> String {
+    let mut hasher = DefaultHasher::new();
+    hook_name.hash(&mut hasher);
+    mode.hash(&mut hasher);
+    show_agent.hash(&mut hasher);
+    show_tui.hash(&mut hasher);
+    full.hash(&mut hasher);
+    short.hash(&mut hasher);
+    hasher.finish().to_string()
+}
+
+fn nero_hook_msg_remaining_secs_ceil(remaining: StdDuration) -> u64 {
+    if remaining.is_zero() {
+        return 1;
+    }
+    let millis = remaining.as_millis();
+    let secs = millis.div_ceil(1000);
+    let secs = u64::try_from(secs).unwrap_or(u64::MAX);
+    secs.max(1)
+}
 
 impl Codex {
     /// Spawn a new [`Codex`] and initialize the session.
@@ -543,6 +578,7 @@ pub(crate) struct Session {
     pub(crate) services: SessionServices,
     js_repl: Arc<JsReplHandle>,
     hook_seen_terminal_turn_ids: Mutex<HashSet<String>>,
+    hook_nero_msg_throttle: StdMutex<HashMap<String, StdInstant>>,
     hook_auto_reply_chain_depth: AtomicU32,
     next_internal_sub_id: AtomicU64,
 }
@@ -1381,6 +1417,7 @@ impl Session {
             services,
             js_repl,
             hook_seen_terminal_turn_ids: Mutex::new(HashSet::new()),
+            hook_nero_msg_throttle: StdMutex::new(HashMap::new()),
             hook_auto_reply_chain_depth: AtomicU32::new(0),
             next_internal_sub_id: AtomicU64::new(0),
         });
@@ -1550,6 +1587,36 @@ impl Session {
 
     fn reset_hook_auto_reply_chain_depth(&self) {
         self.hook_auto_reply_chain_depth.store(0, Ordering::SeqCst);
+    }
+
+    fn nero_hook_msg_throttle_remaining(
+        &self,
+        hook_name: &str,
+        mode: &NeroHookMsgMode,
+        show_agent: bool,
+        show_tui: bool,
+        full: &str,
+        short: &str,
+        freq_seconds: u64,
+    ) -> Option<StdDuration> {
+        if freq_seconds == 0 {
+            return None;
+        }
+        let now = StdInstant::now();
+        let key = nero_hook_msg_throttle_key(hook_name, mode, show_agent, show_tui, full, short);
+        let mut guard = match self.hook_nero_msg_throttle.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let window = StdDuration::from_secs(freq_seconds);
+        if let Some(last_seen) = guard.get(&key) {
+            let elapsed = now.saturating_duration_since(*last_seen);
+            if elapsed < window {
+                return Some(window - elapsed);
+            }
+        }
+        guard.insert(key, now);
+        None
     }
 
     pub(crate) async fn mark_turn_terminal_event_emitted(&self, turn_id: &str) {
@@ -4943,13 +5010,49 @@ pub(crate) async fn run_turn(
                             );
                             for action in actions {
                                 match action {
-                                    HookAction::NeroHookMsg { mode, show, msg } => {
+                                    HookAction::NeroHookMsg {
+                                        mode,
+                                        show,
+                                        freq,
+                                        msg,
+                                    } => {
+                                        if let Some(remaining) = sess.nero_hook_msg_throttle_remaining(
+                                            &hook_name,
+                                            &mode,
+                                            show.agent,
+                                            show.tui,
+                                            &msg.full,
+                                            &msg.short,
+                                            freq,
+                                        ) {
+                                            if show.tui {
+                                                let remaining_secs =
+                                                    nero_hook_msg_remaining_secs_ceil(remaining);
+                                                let message = format!(
+                                                    "[nero-hook] throttled (freq={freq}s, next update in {remaining_secs}s)"
+                                                );
+                                                sess.send_event(
+                                                    &turn_context,
+                                                    EventMsg::Warning(WarningEvent { message }),
+                                                )
+                                                .await;
+                                            }
+                                            debug!(
+                                                turn_id = %turn_context.sub_id,
+                                                hook_name = %hook_name,
+                                                show_agent = show.agent,
+                                                show_tui = show.tui,
+                                                ?mode,
+                                                freq,
+                                                remaining_ms = remaining.as_millis(),
+                                                "skipped nero_hook_msg due to freq throttle"
+                                            );
+                                            continue;
+                                        }
                                         if show.tui {
                                             let tui_body = match mode {
-                                                codex_hooks::NeroHookMsgMode::Synced => msg.full.clone(),
-                                                codex_hooks::NeroHookMsgMode::TuiShort => {
-                                                    msg.short.clone()
-                                                }
+                                                NeroHookMsgMode::Synced => msg.full.clone(),
+                                                NeroHookMsgMode::TuiShort => msg.short.clone(),
                                             };
                                             let message = if tui_body.starts_with("[nero-hook]") {
                                                 tui_body
@@ -4982,6 +5085,7 @@ pub(crate) async fn run_turn(
                                             show_agent = show.agent,
                                             show_tui = show.tui,
                                             ?mode,
+                                            freq,
                                             "executed nero_hook_msg"
                                         );
                                     }
@@ -8243,6 +8347,7 @@ mod tests {
             services,
             js_repl,
             hook_seen_terminal_turn_ids: Mutex::new(HashSet::new()),
+            hook_nero_msg_throttle: StdMutex::new(HashMap::new()),
             hook_auto_reply_chain_depth: AtomicU32::new(0),
             next_internal_sub_id: AtomicU64::new(0),
         };
@@ -8400,6 +8505,7 @@ mod tests {
             services,
             js_repl,
             hook_seen_terminal_turn_ids: Mutex::new(HashSet::new()),
+            hook_nero_msg_throttle: StdMutex::new(HashMap::new()),
             hook_auto_reply_chain_depth: AtomicU32::new(0),
             next_internal_sub_id: AtomicU64::new(0),
         });

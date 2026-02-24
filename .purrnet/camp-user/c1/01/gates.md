@@ -42,6 +42,8 @@
 - [ ] Hook failure w trybie continue nie psuje zakończenia turnu
 - [ ] Hook failure w trybie abort nadal działa zgodnie z obecnym kontraktem
 - [x] Kolejność wykonania akcji jest deterministyczna (`visible_note` przed `auto_user_reply`) w obecnym `after_agent` flow (auto-reply defer po batchu hooków)
+- [x] `nero_hook_msg.freq` (optional, default `0`) wspiera throttling reminderów/statusów z jawnym komunikatem TUI przy skipie (countdown)
+- [ ] Reset throttlingu `nero_hook_msg.freq` po compaction (planowany etap po praktyce)
 
 ## Gate 5: Manual Smoke (MVP)
 

@@ -218,10 +218,30 @@ Mitigacja:
 
 ## Następny krok po PoC (nie w tym tasku)
 
+## Upgrade backlog (nero_hook_msg ergonomia)
+
+### Upgrade U1: Throttling / frequency (`freq`)
+
+Cel:
+- ograniczyć bombardowanie agenta i TUI tym samym reminderem/status message przy szybkich wymianach.
+
+Kontrakt (canonical `nero_hook_msg`):
+- opcjonalne pole `freq` (sekundy)
+- `freq = 0` (domyślnie) => bez throttlingu, emituj zawsze
+- `freq > 0` => nie emituj częściej niż co `freq` sekund dla tego samego komunikatu (per sesja)
+
+Semantyka PoC upgrade:
+- throttling kluczowany per sesja + treść/ustawienia wiadomości (`hook_name`, `mode`, `show.*`, `msg.full`, `msg.short`)
+- gdy komunikat jest stłumiony przez `freq` i `show.tui=true`:
+  - TUI dostaje jawny wpis `[nero-hook] throttled (...)` z countdownem (`next update in Ns`)
+  - agentowa notka (`show.agent`) jest pomijana dla tego cyklu
+
+Planowany etap następny (po praktyce):
+- reset throttlingu po compaction (wysoka wartość praktyczna po zmianie układu kontekstu)
+
 - Rozszerzyć ten sam mechanizm na `after_tool_use`
 - Dodać workflow server/MCP:
   - np. `basic_status(campaign_id)`
   - dynamiczne progi (`threshold`)
   - orkiestracja `dev/review`
 - Dodać config `~/.codex/config-nero.toml` realnie czytany przez fork
-
