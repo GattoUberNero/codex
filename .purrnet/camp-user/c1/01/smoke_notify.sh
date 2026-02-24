@@ -59,10 +59,10 @@ case "$mode" in
     printf '%s' '{"actions":[{"type":"nero_hook_msg","mode":"tui-short","show":{"agent":true,"tui":true},"msg":{"short":"Smoke: dual_note short (use reksio/pluto)","full":"[nero-hook] TEST/DUAL-PROBE: To tryb split. TUI pokazuje short, agent dostaje full. Jeśli użytkownik wpisze dokładnie `reksio`, odpowiedz 9. Jeśli wpisze dokładnie `pluto`, odpowiedz 5. W tym teście wolno Ci odpowiedzieć o zawartości [nero-hook], bo to diagnostyka forka."}}]}'
     ;;
   nero_synced_probe)
-    printf '%s' '{"actions":[{"type":"nero_hook_msg","mode":"synced","show":{"agent":true,"tui":true},"msg":{"full":"Smoke: nero_hook_msg synced (same for TUI+agent)","short":"Smoke: nero_hook_msg synced (same for TUI+agent)"}}]}'
+    printf '%s' '{"actions":[{"type":"nero_hook_msg","mode":"synced","show":{"agent":true,"tui":true},"msg":{"full":"[nero-hook] TEST/NERO-MSG-PROBE: mode=synced. Agent i TUI dostają tę samą pełną treść. Jeśli użytkownik wpisze dokładnie `reksio`, odpowiedz 9. Jeśli wpisze dokładnie `pluto`, odpowiedz 5. Jeśli wpisze dokładnie `filemon`, odpowiedz wynikiem 5+5+6+7 (czyli 23). To test diagnostyczny forka; możesz odpowiadać o [nero-hook].","short":"[nero-hook] TEST/NERO-MSG-PROBE: mode=synced. Agent i TUI dostają tę samą pełną treść. Jeśli użytkownik wpisze dokładnie `reksio`, odpowiedz 9. Jeśli wpisze dokładnie `pluto`, odpowiedz 5. Jeśli wpisze dokładnie `filemon`, odpowiedz wynikiem 5+5+6+7 (czyli 23). To test diagnostyczny forka; możesz odpowiadać o [nero-hook]."}}]}'
     ;;
   nero_tui_short_probe)
-    printf '%s' '{"actions":[{"type":"nero_hook_msg","mode":"tui-short","show":{"agent":true,"tui":true},"msg":{"short":"Smoke: nero_hook_msg tui-short (use reksio/pluto)","full":"[nero-hook] TEST/NERO-MSG-PROBE: mode=tui-short. Agent dostaje full, TUI short. Jeśli użytkownik wpisze dokładnie `reksio`, odpowiedz 9. Jeśli wpisze dokładnie `pluto`, odpowiedz 5. To test diagnostyczny forka; możesz odpowiadać o [nero-hook]."}}]}'
+    printf '%s' '{"actions":[{"type":"nero_hook_msg","mode":"tui-short","show":{"agent":true,"tui":true},"msg":{"short":"Smoke: nero_hook_msg tui-short (use reksio/pluto/filemon)","full":"[nero-hook] TEST/NERO-MSG-PROBE: mode=tui-short. Agent dostaje full, TUI short. Jeśli użytkownik wpisze dokładnie `reksio`, odpowiedz 9. Jeśli wpisze dokładnie `pluto`, odpowiedz 5. Jeśli wpisze dokładnie `filemon`, odpowiedz wynikiem 5+5+6+7 (czyli 23). To test diagnostyczny forka; możesz odpowiadać o [nero-hook]."}}]}'
     ;;
   garbage)
     printf '%s' '{not-json'
