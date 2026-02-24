@@ -1616,6 +1616,83 @@ pub(crate) fn new_warning_event(message: String) -> PrefixedWrappedHistoryCell {
     PrefixedWrappedHistoryCell::new(message.yellow(), "⚠ ".yellow(), "  ")
 }
 
+#[derive(Debug, Clone)]
+struct NeroHookTuiBlockStatusPayload {
+    kind: String,
+    text: String,
+}
+
+#[derive(Debug)]
+pub(crate) struct NeroHookBlockCell {
+    content: String,
+    status: Option<NeroHookTuiBlockStatusPayload>,
+}
+
+impl HistoryCell for NeroHookBlockCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let inner_width = width.saturating_sub(4).max(1) as usize;
+        let mut lines: Vec<Line<'static>> = vec![
+            vec!["nero-hook".yellow().bold()].into(),
+            vec!["content".bold()].into(),
+        ];
+
+        let mut content_lines = adaptive_wrap_lines(
+            self.content
+                .split('\n')
+                .map(|line| Line::from(line.to_string()).yellow()),
+            RtOptions::new(inner_width)
+                .initial_indent("  ".into())
+                .subsequent_indent("  ".into()),
+        );
+        lines.append(&mut content_lines);
+
+        if let Some(status) = &self.status {
+            let kind_style = match status.kind.as_str() {
+                "countdown" => Style::default().yellow(),
+                "error" => Style::default().red(),
+                "success" => Style::default().green(),
+                _ => Style::default().cyan(),
+            };
+            lines.push(Line::from(""));
+            lines.push(vec!["status".bold()].into());
+            let mut status_lines = adaptive_wrap_lines(
+                vec![Line::from(vec![
+                    "  ".into(),
+                    status.kind.clone().set_style(kind_style),
+                    ": ".dim(),
+                    status.text.clone().into(),
+                ])],
+                RtOptions::new(inner_width),
+            );
+            lines.append(&mut status_lines);
+        }
+
+        with_border_with_inner_width(lines, inner_width)
+    }
+}
+
+pub(crate) fn try_new_nero_hook_warning_event(message: &str) -> Option<NeroHookBlockCell> {
+    const CONTENT_PREFIX: &str = "[nero-hook]\n------------\ncontent = ";
+    const STATUS_SEPARATOR: &str = "\n------------\nstatus = ";
+
+    let body = message.strip_prefix(CONTENT_PREFIX)?;
+    let (content, status) = if let Some((content, status_payload)) = body.split_once(STATUS_SEPARATOR)
+    {
+        let (kind, text) = status_payload
+            .split_once(": ")
+            .map(|(kind, text)| (kind.to_string(), text.to_string()))
+            .unwrap_or_else(|| ("info".to_string(), status_payload.to_string()));
+        (
+            content.to_string(),
+            Some(NeroHookTuiBlockStatusPayload { kind, text }),
+        )
+    } else {
+        (body.to_string(), None)
+    };
+
+    Some(NeroHookBlockCell { content, status })
+}
+
 #[derive(Debug)]
 pub(crate) struct DeprecationNoticeCell {
     summary: String,

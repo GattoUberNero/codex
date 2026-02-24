@@ -23,6 +23,62 @@ pub struct NeroHookMsgContent {
     pub short: String,
 }
 
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum NeroHookMsgFormat {
+    #[default]
+    Block,
+    Inline,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NeroHookMsgStatus {
+    pub kind: String,
+    pub text: String,
+}
+
+fn deserialize_nero_hook_msg_format_or_default<'de, D>(
+    deserializer: D,
+) -> Result<NeroHookMsgFormat, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(raw) = raw else {
+        return Ok(NeroHookMsgFormat::Block);
+    };
+    match raw.as_str() {
+        Some("block") => Ok(NeroHookMsgFormat::Block),
+        Some("inline") => Ok(NeroHookMsgFormat::Inline),
+        _ => Ok(NeroHookMsgFormat::Block),
+    }
+}
+
+fn deserialize_optional_nero_hook_msg_status_lossy<'de, D>(
+    deserializer: D,
+) -> Result<Option<NeroHookMsgStatus>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let Some(obj) = raw.as_object() else {
+        return Ok(None);
+    };
+    let Some(kind) = obj.get("kind").and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    let Some(text) = obj.get("text").and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    Ok(Some(NeroHookMsgStatus {
+        kind: kind.to_string(),
+        text: text.to_string(),
+    }))
+}
+
 fn deserialize_u64_or_default<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: Deserializer<'de>,
@@ -38,6 +94,10 @@ pub enum HookAction {
         show: NeroHookMsgShow,
         #[serde(default, deserialize_with = "deserialize_u64_or_default")]
         freq: u64,
+        #[serde(default, deserialize_with = "deserialize_nero_hook_msg_format_or_default")]
+        format: NeroHookMsgFormat,
+        #[serde(default, deserialize_with = "deserialize_optional_nero_hook_msg_status_lossy")]
+        status: Option<NeroHookMsgStatus>,
         msg: NeroHookMsgContent,
     },
     VisibleNote { message: String },
@@ -153,6 +213,8 @@ mod tests {
                         tui: true
                     },
                     freq: 0,
+                    format: NeroHookMsgFormat::Block,
+                    status: None,
                     msg: NeroHookMsgContent {
                         full: "FULL".to_string(),
                         short: "SHORT".to_string()
@@ -233,6 +295,8 @@ mod tests {
                     tui: true
                 },
                 freq: 0,
+                format: NeroHookMsgFormat::Block,
+                status: None,
                 msg: NeroHookMsgContent {
                     full: "f".to_string(),
                     short: "s".to_string()
@@ -267,6 +331,8 @@ mod tests {
                     tui: true
                 },
                 freq: 120,
+                format: NeroHookMsgFormat::Block,
+                status: None,
                 msg: NeroHookMsgContent {
                     full: "f".to_string(),
                     short: "s".to_string()
@@ -301,6 +367,156 @@ mod tests {
                     tui: true
                 },
                 freq: 0,
+                format: NeroHookMsgFormat::Block,
+                status: None,
+                msg: NeroHookMsgContent {
+                    full: "f".to_string(),
+                    short: "s".to_string()
+                }
+            }]
+        );
+    }
+
+    #[test]
+    fn nero_hook_msg_parses_format_and_status_when_present() {
+        let parsed = parse_hook_actions_from_stdout(
+            r#"{
+              "actions": [
+                {
+                  "type": "nero_hook_msg",
+                  "mode": "tui-short",
+                  "show": {"agent": true, "tui": true},
+                  "format": "inline",
+                  "status": {"kind": "countdown", "text": "next update in 7s"},
+                  "msg": {"full": "f", "short": "s"}
+                }
+              ]
+            }"#,
+        )
+        .expect("parse");
+
+        assert_eq!(
+            parsed.actions,
+            vec![HookAction::NeroHookMsg {
+                mode: NeroHookMsgMode::TuiShort,
+                show: NeroHookMsgShow {
+                    agent: true,
+                    tui: true
+                },
+                freq: 0,
+                format: NeroHookMsgFormat::Inline,
+                status: Some(NeroHookMsgStatus {
+                    kind: "countdown".to_string(),
+                    text: "next update in 7s".to_string(),
+                }),
+                msg: NeroHookMsgContent {
+                    full: "f".to_string(),
+                    short: "s".to_string()
+                }
+            }]
+        );
+    }
+
+    #[test]
+    fn nero_hook_msg_unknown_format_defaults_to_block() {
+        let parsed = parse_hook_actions_from_stdout(
+            r#"{
+              "actions": [
+                {
+                  "type": "nero_hook_msg",
+                  "mode": "tui-short",
+                  "show": {"agent": true, "tui": true},
+                  "format": "future-fancy",
+                  "msg": {"full": "f", "short": "s"}
+                }
+              ]
+            }"#,
+        )
+        .expect("parse");
+
+        assert_eq!(
+            parsed.actions,
+            vec![HookAction::NeroHookMsg {
+                mode: NeroHookMsgMode::TuiShort,
+                show: NeroHookMsgShow {
+                    agent: true,
+                    tui: true
+                },
+                freq: 0,
+                format: NeroHookMsgFormat::Block,
+                status: None,
+                msg: NeroHookMsgContent {
+                    full: "f".to_string(),
+                    short: "s".to_string()
+                }
+            }]
+        );
+    }
+
+    #[test]
+    fn nero_hook_msg_non_string_format_defaults_to_block() {
+        let parsed = parse_hook_actions_from_stdout(
+            r#"{
+              "actions": [
+                {
+                  "type": "nero_hook_msg",
+                  "mode": "tui-short",
+                  "show": {"agent": true, "tui": true},
+                  "format": 123,
+                  "msg": {"full": "f", "short": "s"}
+                }
+              ]
+            }"#,
+        )
+        .expect("parse");
+
+        assert_eq!(
+            parsed.actions,
+            vec![HookAction::NeroHookMsg {
+                mode: NeroHookMsgMode::TuiShort,
+                show: NeroHookMsgShow {
+                    agent: true,
+                    tui: true
+                },
+                freq: 0,
+                format: NeroHookMsgFormat::Block,
+                status: None,
+                msg: NeroHookMsgContent {
+                    full: "f".to_string(),
+                    short: "s".to_string()
+                }
+            }]
+        );
+    }
+
+    #[test]
+    fn nero_hook_msg_malformed_status_is_ignored() {
+        let parsed = parse_hook_actions_from_stdout(
+            r#"{
+              "actions": [
+                {
+                  "type": "nero_hook_msg",
+                  "mode": "tui-short",
+                  "show": {"agent": true, "tui": true},
+                  "status": {"kind": "countdown", "text": 7},
+                  "msg": {"full": "f", "short": "s"}
+                }
+              ]
+            }"#,
+        )
+        .expect("parse");
+
+        assert_eq!(
+            parsed.actions,
+            vec![HookAction::NeroHookMsg {
+                mode: NeroHookMsgMode::TuiShort,
+                show: NeroHookMsgShow {
+                    agent: true,
+                    tui: true
+                },
+                freq: 0,
+                format: NeroHookMsgFormat::Block,
+                status: None,
                 msg: NeroHookMsgContent {
                     full: "f".to_string(),
                     short: "s".to_string()

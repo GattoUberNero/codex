@@ -1697,7 +1697,11 @@ impl ChatWidget {
                 "tui chatwidget rendering nero-hook warning into history"
             );
         }
-        self.add_to_history(history_cell::new_warning_event(message));
+        if let Some(cell) = history_cell::try_new_nero_hook_warning_event(&message) {
+            self.add_to_history(cell);
+        } else {
+            self.add_to_history(history_cell::new_warning_event(message));
+        }
         self.request_redraw();
     }
 

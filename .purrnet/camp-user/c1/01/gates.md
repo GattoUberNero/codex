@@ -43,6 +43,9 @@
 - [ ] Hook failure w trybie abort nadal działa zgodnie z obecnym kontraktem
 - [x] Kolejność wykonania akcji jest deterministyczna (`visible_note` przed `auto_user_reply`) w obecnym `after_agent` flow (auto-reply defer po batchu hooków)
 - [x] `nero_hook_msg.freq` (optional, default `0`) wspiera throttling reminderów/statusów z jawnym komunikatem TUI przy skipie (countdown)
+- [x] `nero_hook_msg` obsługuje opcjonalne `format` + `status` (wstecznie kompatybilnie)
+- [x] Domyślny render TUI `nero_hook_msg` używa structured block (`content` + opcjonalny `status`)
+- [x] Skip przez `freq` emituje countdown jako semantykę statusu TUI (nie tylko raw warning string)
 - [ ] Reset throttlingu `nero_hook_msg.freq` po compaction (planowany etap po praktyce)
 
 ## Gate 5: Manual Smoke (MVP)
@@ -93,4 +96,5 @@ Task `c1/01` uznajemy za domknięty, gdy:
 
 - [ ] Gates 0-6 przechodzą
 - [x] Jest krótki przykład hook response JSON w kodzie/testach lub docs
+- [x] Smoke harness ma tryb `nero_hook_msg` z `format/status` (structured block)
 - [ ] Jest jasne miejsce rozszerzenia na `after_tool_use` w kolejnym kroku

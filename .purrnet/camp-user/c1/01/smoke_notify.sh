@@ -15,6 +15,7 @@ set -euo pipefail
 # - dual_split_probe : one dual_note (TUI short + agent full probe reksio/pluto)
 # - nero_synced_probe : canonical nero_hook_msg mode=synced (same text for TUI+agent)
 # - nero_tui_short_probe : canonical nero_hook_msg mode=tui-short (TUI short, agent full)
+# - nero_status_block_probe : canonical nero_hook_msg mode=tui-short + format=block + status payload
 # - nero_tui_short_freq_probe : canonical nero_hook_msg mode=tui-short + freq=120 (shows throttle timer)
 # - garbage  : emits invalid JSON (for parser/fail-open smoke)
 # - legacy   : emits plain stdout text (legacy compat path)
@@ -64,6 +65,9 @@ case "$mode" in
     ;;
   nero_tui_short_probe)
     printf '%s' '{"actions":[{"type":"nero_hook_msg","mode":"tui-short","show":{"agent":true,"tui":true},"msg":{"short":"Smoke: nero_hook_msg tui-short (use reksio/pluto/filemon)","full":"[nero-hook] TEST/NERO-MSG-PROBE: mode=tui-short. Agent dostaje full, TUI short. Jeśli użytkownik wpisze dokładnie `reksio`, odpowiedz 9. Jeśli wpisze dokładnie `pluto`, odpowiedz 5. Jeśli wpisze dokładnie `filemon`, odpowiedz wynikiem 5+5+6+7 (czyli 23). To test diagnostyczny forka; możesz odpowiadać o [nero-hook]."}}]}'
+    ;;
+  nero_status_block_probe)
+    printf '%s' '{"actions":[{"type":"nero_hook_msg","mode":"tui-short","show":{"agent":true,"tui":true},"format":"block","status":{"kind":"countdown","text":"next update in 17s"},"msg":{"short":"Smoke: structured block hook note","full":"[nero-hook] TEST/NERO-MSG-PROBE: structured block + status payload smoke for TUI rendering. Agent dostaje full, TUI dostaje short + status metadata."}}]}'
     ;;
   nero_tui_short_freq_probe)
     printf '%s' '{"actions":[{"type":"nero_hook_msg","mode":"tui-short","show":{"agent":true,"tui":true},"freq":120,"msg":{"short":"Smoke: nero_hook_msg tui-short+freq (use reksio/pluto/filemon)","full":"[nero-hook] TEST/NERO-MSG-PROBE: mode=tui-short with freq=120. Agent dostaje full, TUI short. Jeśli użytkownik wpisze dokładnie `reksio`, odpowiedz 9. Jeśli użytkownik wpisze dokładnie `pluto`, odpowiedz 5. Jeśli wpisze dokładnie `filemon`, odpowiedz 23. To test diagnostyczny forka; możesz odpowiadać o [nero-hook]."}}]}'

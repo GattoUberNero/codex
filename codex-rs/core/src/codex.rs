@@ -63,6 +63,7 @@ use codex_hooks::HookPayload;
 use codex_hooks::HookResult;
 use codex_hooks::Hooks;
 use codex_hooks::HooksConfig;
+use codex_hooks::NeroHookMsgFormat;
 use codex_network_proxy::NetworkProxy;
 use codex_protocol::ThreadId;
 use codex_protocol::approvals::ExecPolicyAmendment;
@@ -305,22 +306,27 @@ const HOOK_AUTO_REPLY_SUBMISSION_PREFIX: &str = "hook-auto-";
 const HOOK_AUTO_REPLY_MAX_CHAIN_DEPTH: u32 = 1;
 const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
 const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyber-safety";
-
 fn nero_hook_msg_throttle_key(
     hook_name: &str,
     mode: &NeroHookMsgMode,
+    format: &NeroHookMsgFormat,
     show_agent: bool,
     show_tui: bool,
     full: &str,
     short: &str,
+    status_kind: Option<&str>,
+    status_text: Option<&str>,
 ) -> String {
     let mut hasher = DefaultHasher::new();
     hook_name.hash(&mut hasher);
     mode.hash(&mut hasher);
+    format.hash(&mut hasher);
     show_agent.hash(&mut hasher);
     show_tui.hash(&mut hasher);
     full.hash(&mut hasher);
     short.hash(&mut hasher);
+    status_kind.hash(&mut hasher);
+    status_text.hash(&mut hasher);
     hasher.finish().to_string()
 }
 
@@ -332,6 +338,45 @@ fn nero_hook_msg_remaining_secs_ceil(remaining: StdDuration) -> u64 {
     let secs = millis.div_ceil(1000);
     let secs = u64::try_from(secs).unwrap_or(u64::MAX);
     secs.max(1)
+}
+
+fn nero_hook_prefixed_message(message: String) -> String {
+    if message.starts_with("[nero-hook]") {
+        message
+    } else {
+        format!("[nero-hook] {message}")
+    }
+}
+
+fn nero_hook_tui_warning_message(
+    content: &str,
+    format: NeroHookMsgFormat,
+    status: Option<(&str, &str)>,
+) -> String {
+    match format {
+        NeroHookMsgFormat::Inline => {
+            let mut line = content.to_string();
+            if let Some((kind, text)) = status {
+                line.push_str(" [");
+                line.push_str(kind);
+                line.push_str(": ");
+                line.push_str(text);
+                line.push(']');
+            }
+            nero_hook_prefixed_message(line)
+        }
+        NeroHookMsgFormat::Block => {
+            let mut out = String::from("[nero-hook]\n------------\ncontent = ");
+            out.push_str(content);
+            if let Some((kind, text)) = status {
+                out.push_str("\n------------\nstatus = ");
+                out.push_str(kind);
+                out.push_str(": ");
+                out.push_str(text);
+            }
+            out
+        }
+    }
 }
 
 impl Codex {
@@ -1593,17 +1638,29 @@ impl Session {
         &self,
         hook_name: &str,
         mode: &NeroHookMsgMode,
+        format: &NeroHookMsgFormat,
         show_agent: bool,
         show_tui: bool,
         full: &str,
         short: &str,
+        status: Option<&codex_hooks::NeroHookMsgStatus>,
         freq_seconds: u64,
     ) -> Option<StdDuration> {
         if freq_seconds == 0 {
             return None;
         }
         let now = StdInstant::now();
-        let key = nero_hook_msg_throttle_key(hook_name, mode, show_agent, show_tui, full, short);
+        let key = nero_hook_msg_throttle_key(
+            hook_name,
+            mode,
+            format,
+            show_agent,
+            show_tui,
+            full,
+            short,
+            status.map(|s| s.kind.as_str()),
+            status.map(|s| s.text.as_str()),
+        );
         let mut guard = match self.hook_nero_msg_throttle.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -5014,22 +5071,33 @@ pub(crate) async fn run_turn(
                                         mode,
                                         show,
                                         freq,
+                                        format,
+                                        status,
                                         msg,
                                     } => {
                                         if let Some(remaining) = sess.nero_hook_msg_throttle_remaining(
                                             &hook_name,
                                             &mode,
+                                            &format,
                                             show.agent,
                                             show.tui,
                                             &msg.full,
                                             &msg.short,
+                                            status.as_ref(),
                                             freq,
                                         ) {
                                             if show.tui {
                                                 let remaining_secs =
                                                     nero_hook_msg_remaining_secs_ceil(remaining);
-                                                let message = format!(
-                                                    "[nero-hook] throttled (freq={freq}s, next update in {remaining_secs}s)"
+                                                let content = format!(
+                                                    "throttled (freq={freq}s)"
+                                                );
+                                                let countdown =
+                                                    format!("next update in {remaining_secs}s");
+                                                let message = nero_hook_tui_warning_message(
+                                                    &content,
+                                                    NeroHookMsgFormat::Block,
+                                                    Some(("countdown", &countdown)),
                                                 );
                                                 sess.send_event(
                                                     &turn_context,
@@ -5054,11 +5122,13 @@ pub(crate) async fn run_turn(
                                                 NeroHookMsgMode::Synced => msg.full.clone(),
                                                 NeroHookMsgMode::TuiShort => msg.short.clone(),
                                             };
-                                            let message = if tui_body.starts_with("[nero-hook]") {
-                                                tui_body
-                                            } else {
-                                                format!("[nero-hook] {tui_body}")
-                                            };
+                                            let message = nero_hook_tui_warning_message(
+                                                &tui_body,
+                                                format,
+                                                status
+                                                    .as_ref()
+                                                    .map(|s| (s.kind.as_str(), s.text.as_str())),
+                                            );
                                             sess.send_event(
                                                 &turn_context,
                                                 EventMsg::Warning(WarningEvent { message }),
@@ -5066,11 +5136,7 @@ pub(crate) async fn run_turn(
                                             .await;
                                         }
                                         if show.agent {
-                                            let text = if msg.full.starts_with("[nero-hook]") {
-                                                msg.full
-                                            } else {
-                                                format!("[nero-hook] {}", msg.full)
-                                            };
+                                            let text = nero_hook_prefixed_message(msg.full);
                                             let response_item: ResponseItem =
                                                 DeveloperInstructions::new(text).into();
                                             sess.record_conversation_items(
