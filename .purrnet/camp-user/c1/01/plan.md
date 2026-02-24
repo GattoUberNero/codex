@@ -238,6 +238,16 @@ Semantyka PoC upgrade:
 
 Planowany etap następny (po praktyce):
 - reset throttlingu po compaction (wysoka wartość praktyczna po zmianie układu kontekstu)
+- (DONE) reset throttlingu po compaction: cache `nero_hook_msg.freq` czyszczony po udanym `RolloutItem::Compacted`
+
+### Upgrade U1a: Diagnostyka TUI log path (wrapper `codexn`)
+
+Cel:
+- zlikwidować fałszywą diagnozę "brak logu" gdy TUI log trafia do innej ścieżki (`~/.codex/log/...` vs `~/.codex/logs/...`).
+
+Zakres:
+- `codexn --hook-debug --check` autodetekuje realny plik logu TUI w `CODEX_HOME`
+- wypisuje źródło (`default` / `autodetected`) i gotową komendę `tail -f ...`
 
 ### Upgrade U2: TUI structured hook note (`format` + `status`)
 

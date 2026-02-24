@@ -121,6 +121,53 @@ async fn after_agent_visible_note_emits_warning_and_turn_completes() -> Result<(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_agent_nero_hook_msg_block_status_emits_structured_warning_and_turn_completes(
+) -> Result<()> {
+    init_test_tracing();
+    if skip_if_no_linux_sandbox_bin() {
+        return Ok(());
+    }
+    let hook_dir = TempDir::new()?;
+    let marker = hook_dir.path().join("nero_hook_msg_block.marker");
+    let marker_str = marker.to_string_lossy().to_string();
+    let script = write_notify_script(&format!(
+        "#!/bin/bash\n: > \"{marker}\"\nprintf '%s' '{{\"actions\":[{{\"type\":\"nero_hook_msg\",\"mode\":\"tui-short\",\"show\":{{\"agent\":false,\"tui\":true}},\"format\":\"block\",\"msg\":{{\"full\":\"unused full\",\"short\":\"Structured e2e block\"}},\"status\":{{\"kind\":\"countdown\",\"text\":\"next update in 17s\"}}}}]}}'\n",
+        marker = marker_str
+    ))?;
+
+    let test = TestCodexHarness::with_builder(
+        core_test_support::test_codex::test_codex().with_config(move |cfg| {
+            cfg.notify = Some(vec![script.clone()]);
+        }),
+    )
+    .await?;
+    responses::mount_sse_once(
+        test.server(),
+        sse(vec![ev_assistant_message("m1", "Done"), ev_completed("r1")]),
+    )
+    .await;
+
+    submit_user_turn_no_wait(&test, "hello nero_hook_msg block").await?;
+    fs_wait::wait_for_path_exists(&marker, Duration::from_secs(5)).await?;
+
+    let warning = wait_for_event(&test.test().codex, |ev| {
+        matches!(ev, EventMsg::Warning(w)
+            if w.message.contains("[nero-hook]\n------------\ncontent = Structured e2e block")
+                && w.message.contains("\n------------\nstatus = countdown: next update in 17s"))
+    })
+    .await;
+    assert!(
+        matches!(warning, EventMsg::Warning(_)),
+        "expected structured [nero-hook] warning with content+status"
+    );
+
+    let complete = wait_for_event(&test.test().codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    assert!(matches!(complete, EventMsg::TurnComplete(_)));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn after_agent_legacy_plain_stdout_keeps_normal_flow() -> Result<()> {
     init_test_tracing();
     if skip_if_no_linux_sandbox_bin() {
