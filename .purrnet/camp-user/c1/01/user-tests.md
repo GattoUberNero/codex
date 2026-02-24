@@ -55,6 +55,21 @@ cd /workspace/purrnet/apps/codex-nero/codex-rs
 cargo test -p codex-core --test all hook_actions_notify::after_agent_ -- --nocapture
 ```
 
+Debug handoff logs (opcjonalnie, opt-in):
+
+```bash
+RUST_LOG=codex_core=debug,codex_hooks=debug \
+cargo test -p codex-core --test all hook_actions_notify::after_agent_ -- --nocapture
+```
+
+To pokazuje m.in.:
+- inicjalizację hook registry
+- dispatch hooków `after_agent`
+- spawn `legacy_notify`
+- parse `actions[]`
+- wykonanie `visible_note`
+- defer/queue `auto_user_reply`
+
 Scenariusze AUTO (mapa):
 - `visible_note` -> warning + completion
 - `legacy stdout` -> brak akcji + normalny flow

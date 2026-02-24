@@ -61,14 +61,19 @@ AUTO campaign execution status:
 Latest AUTO e2e result snapshot (local):
 - `hook_actions_notify::after_agent_legacy_plain_stdout_keeps_normal_flow` ✅
 - `hook_actions_notify::after_agent_garbage_json_does_not_crash_turn_flow` ✅
-- `hook_actions_notify::after_agent_visible_note_emits_warning_and_turn_completes` ❌ (timeout waiting for `WarningEvent`)
-- `hook_actions_notify::after_agent_both_actions_can_trigger_follow_up_turn_without_manual_input` ❌ (timeout waiting for visible hook warning first)
+- `hook_actions_notify::after_agent_visible_note_emits_warning_and_turn_completes` ✅
+- `hook_actions_notify::after_agent_both_actions_can_trigger_follow_up_turn_without_manual_input` ✅
+- `hook_actions_notify::after_agent_auto_user_reply_only_can_trigger_follow_up_turn_without_manual_input` ✅
 - Follow-up narrowing: `codex-hooks::user_notification::notify_hook_parses_actions_from_stdout` ✅
 
-- [ ] Hook testowy zwraca tylko `visible_note` -> wpis widoczny
-- [ ] Hook testowy zwraca tylko `auto_user_reply` -> kolejny turn rusza
-- [ ] Hook testowy zwraca obie akcje -> najpierw wpis, potem auto-turn
-- [ ] Hook testowy zwraca śmieci JSON -> brak crasha, normalny flow
+Notes from debug run:
+- e2e false negatives were caused by mounting SSE fixtures on a different mock server than `TestCodexHarness` (test harness bug, not core hook bug).
+- Added opt-in `debug` logs across hook handoff points (`codex_hooks` + `codex_core`) for future diagnosis via `RUST_LOG`.
+
+- [x] Hook testowy zwraca tylko `visible_note` -> wpis widoczny (AUTO e2e)
+- [x] Hook testowy zwraca tylko `auto_user_reply` -> kolejny turn rusza (AUTO e2e)
+- [x] Hook testowy zwraca obie akcje -> najpierw wpis, potem auto-turn (AUTO e2e `both`)
+- [x] Hook testowy zwraca śmieci JSON -> brak crasha, normalny flow (AUTO e2e)
 
 ## Gate 6: Merge-Safety / Maintainability
 

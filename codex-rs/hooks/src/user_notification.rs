@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tokio::io::AsyncReadExt;
+use tracing::debug;
 use tracing::warn;
 
 use crate::Hook;
@@ -72,6 +73,12 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                 if let Ok(notify_payload) = legacy_notify_json(&payload.hook_event, &payload.cwd) {
                     command.arg(notify_payload);
                 }
+                debug!(
+                    hook_name = "legacy_notify",
+                    argv0 = argv.first().map(String::as_str).unwrap_or(""),
+                    argv_len = argv.len(),
+                    "spawning legacy notify hook process"
+                );
 
                 // Backwards-compat payload shape is preserved (argv + JSON arg).
                 // We await completion so hooks can optionally emit JSON actions on stdout.
@@ -150,14 +157,36 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
 
                 let actions = match String::from_utf8(stdout_bytes) {
                     Ok(stdout) => match parse_hook_actions_from_stdout(&stdout) {
-                        Ok(parsed) => parsed.actions,
+                        Ok(parsed) => {
+                            debug!(
+                                hook_name = "legacy_notify",
+                                parsed_actions = parsed.actions.len(),
+                                ignored_unknown_actions = parsed.ignored_unknown_actions,
+                                stdout_len = stdout.len(),
+                                "parsed hook actions from legacy notify stdout"
+                            );
+                            parsed.actions
+                        }
                         Err(err) if stdout.trim_start().starts_with('{') => {
+                            debug!(
+                                hook_name = "legacy_notify",
+                                stdout_len = stdout.len(),
+                                error = %err,
+                                "legacy notify stdout looked like JSON but actions parsing failed"
+                            );
                             return HookExecution {
                                 result: HookResult::FailedContinue(err.into()),
                                 actions: Vec::new(),
                             };
                         }
-                        Err(_) => Vec::new(),
+                        Err(_) => {
+                            debug!(
+                                hook_name = "legacy_notify",
+                                stdout_len = stdout.len(),
+                                "legacy notify stdout ignored (compat plain text)"
+                            );
+                            Vec::new()
+                        }
                     },
                     Err(err) => {
                         return HookExecution {
@@ -168,11 +197,17 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                 };
 
                 if status.success() {
+                    debug!(
+                        hook_name = "legacy_notify",
+                        actions_count = actions.len(),
+                        "legacy notify hook completed successfully"
+                    );
                     HookExecution {
                         result: HookResult::Success,
                         actions,
                     }
                 } else {
+                    debug!(hook_name = "legacy_notify", status = %status, "legacy notify hook exited non-zero");
                     HookExecution {
                         result: HookResult::FailedContinue(
                             std::io::Error::other(format!(
