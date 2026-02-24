@@ -4943,6 +4943,48 @@ pub(crate) async fn run_turn(
                             );
                             for action in actions {
                                 match action {
+                                    HookAction::NeroHookMsg { mode, show, msg } => {
+                                        if show.tui {
+                                            let tui_body = match mode {
+                                                codex_hooks::NeroHookMsgMode::Synced => msg.full.clone(),
+                                                codex_hooks::NeroHookMsgMode::TuiShort => {
+                                                    msg.short.clone()
+                                                }
+                                            };
+                                            let message = if tui_body.starts_with("[nero-hook]") {
+                                                tui_body
+                                            } else {
+                                                format!("[nero-hook] {tui_body}")
+                                            };
+                                            sess.send_event(
+                                                &turn_context,
+                                                EventMsg::Warning(WarningEvent { message }),
+                                            )
+                                            .await;
+                                        }
+                                        if show.agent {
+                                            let text = if msg.full.starts_with("[nero-hook]") {
+                                                msg.full
+                                            } else {
+                                                format!("[nero-hook] {}", msg.full)
+                                            };
+                                            let response_item: ResponseItem =
+                                                DeveloperInstructions::new(text).into();
+                                            sess.record_conversation_items(
+                                                &turn_context,
+                                                std::slice::from_ref(&response_item),
+                                            )
+                                            .await;
+                                        }
+                                        debug!(
+                                            turn_id = %turn_context.sub_id,
+                                            hook_name = %hook_name,
+                                            show_agent = show.agent,
+                                            show_tui = show.tui,
+                                            ?mode,
+                                            "executed nero_hook_msg"
+                                        );
+                                    }
                                     HookAction::VisibleNote { message } => {
                                         let message = if message.starts_with("[nero-hook]") {
                                             message

@@ -3,8 +3,33 @@ use serde::Serialize;
 use tracing::warn;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NeroHookMsgMode {
+    Synced,
+    #[serde(alias = "tui_short")]
+    TuiShort,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NeroHookMsgShow {
+    pub agent: bool,
+    pub tui: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NeroHookMsgContent {
+    pub full: String,
+    pub short: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HookAction {
+    NeroHookMsg {
+        mode: NeroHookMsgMode,
+        show: NeroHookMsgShow,
+        msg: NeroHookMsgContent,
+    },
     VisibleNote { message: String },
     ContextNote { message: String },
     DualNote {
@@ -59,7 +84,10 @@ fn is_unknown_action_type(value: &serde_json::Value) -> bool {
     let Some(kind) = type_value.as_str() else {
         return false;
     };
-    !matches!(kind, "visible_note" | "context_note" | "dual_note" | "auto_user_reply")
+    !matches!(
+        kind,
+        "nero_hook_msg" | "visible_note" | "context_note" | "dual_note" | "auto_user_reply"
+    )
 }
 
 #[cfg(test)]
@@ -88,6 +116,7 @@ mod tests {
                 {"type": "visible_note", "message": "[nero-hook] ok"},
                 {"type": "context_note", "message": "internal note"},
                 {"type": "dual_note", "tui_message": "short", "agent_message": "full"},
+                {"type": "nero_hook_msg", "mode": "tui-short", "show": {"agent": true, "tui": true}, "msg": {"full": "FULL", "short": "SHORT"}},
                 {"type": "auto_user_reply", "message": "continue"}
               ]
             }"#,
@@ -106,6 +135,17 @@ mod tests {
                 HookAction::DualNote {
                     tui_message: "short".to_string(),
                     agent_message: "full".to_string()
+                },
+                HookAction::NeroHookMsg {
+                    mode: NeroHookMsgMode::TuiShort,
+                    show: NeroHookMsgShow {
+                        agent: true,
+                        tui: true
+                    },
+                    msg: NeroHookMsgContent {
+                        full: "FULL".to_string(),
+                        short: "SHORT".to_string()
+                    }
                 },
                 HookAction::AutoUserReply {
                     message: "continue".to_string()
@@ -155,5 +195,37 @@ mod tests {
         .expect_err("missing message should error");
 
         assert!(err.to_string().contains("message"));
+    }
+
+    #[test]
+    fn nero_hook_msg_mode_accepts_tui_short_alias() {
+        let parsed = parse_hook_actions_from_stdout(
+            r#"{
+              "actions": [
+                {
+                  "type": "nero_hook_msg",
+                  "mode": "tui_short",
+                  "show": {"agent": true, "tui": true},
+                  "msg": {"full": "f", "short": "s"}
+                }
+              ]
+            }"#,
+        )
+        .expect("parse");
+
+        assert_eq!(
+            parsed.actions,
+            vec![HookAction::NeroHookMsg {
+                mode: NeroHookMsgMode::TuiShort,
+                show: NeroHookMsgShow {
+                    agent: true,
+                    tui: true
+                },
+                msg: NeroHookMsgContent {
+                    full: "f".to_string(),
+                    short: "s".to_string()
+                }
+            }]
+        );
     }
 }
