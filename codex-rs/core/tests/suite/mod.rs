@@ -76,6 +76,7 @@ mod exec_policy;
 mod fork_thread;
 mod grep_files;
 mod hierarchical_agents;
+mod hook_actions_notify;
 mod image_rollout;
 mod items;
 mod js_repl;

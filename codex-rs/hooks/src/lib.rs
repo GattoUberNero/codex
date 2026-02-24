@@ -1,11 +1,16 @@
 mod registry;
+mod response;
 mod types;
 mod user_notification;
 
 pub use registry::Hooks;
 pub use registry::HooksConfig;
 pub use registry::command_from_argv;
+pub use response::HookAction;
+pub use response::ParsedHookActions;
+pub use response::parse_hook_actions_from_stdout;
 pub use types::Hook;
+pub use types::HookExecution;
 pub use types::HookEvent;
 pub use types::HookEventAfterAgent;
 pub use types::HookEventAfterToolUse;
