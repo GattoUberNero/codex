@@ -380,6 +380,10 @@ mod tests {
                     HookAction::ContextNote {
                         message: "ctx".to_string(),
                     },
+                    HookAction::DualNote {
+                        tui_message: "short".to_string(),
+                        agent_message: "full".to_string(),
+                    },
                     HookAction::AutoUserReply {
                         message: "continue".to_string(),
                     },
@@ -398,6 +402,10 @@ mod tests {
                 },
                 HookAction::ContextNote {
                     message: "ctx".to_string()
+                },
+                HookAction::DualNote {
+                    tui_message: "short".to_string(),
+                    agent_message: "full".to_string()
                 },
                 HookAction::AutoUserReply {
                     message: "continue".to_string()
