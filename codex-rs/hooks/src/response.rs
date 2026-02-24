@@ -1,8 +1,9 @@
 use serde::Deserialize;
+use serde::Deserializer;
 use serde::Serialize;
 use tracing::warn;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum NeroHookMsgMode {
     Synced,
@@ -22,12 +23,21 @@ pub struct NeroHookMsgContent {
     pub short: String,
 }
 
+fn deserialize_u64_or_default<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<u64>::deserialize(deserializer)?.unwrap_or(0))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HookAction {
     NeroHookMsg {
         mode: NeroHookMsgMode,
         show: NeroHookMsgShow,
+        #[serde(default, deserialize_with = "deserialize_u64_or_default")]
+        freq: u64,
         msg: NeroHookMsgContent,
     },
     VisibleNote { message: String },
@@ -142,6 +152,7 @@ mod tests {
                         agent: true,
                         tui: true
                     },
+                    freq: 0,
                     msg: NeroHookMsgContent {
                         full: "FULL".to_string(),
                         short: "SHORT".to_string()
@@ -221,6 +232,75 @@ mod tests {
                     agent: true,
                     tui: true
                 },
+                freq: 0,
+                msg: NeroHookMsgContent {
+                    full: "f".to_string(),
+                    short: "s".to_string()
+                }
+            }]
+        );
+    }
+
+    #[test]
+    fn nero_hook_msg_parses_freq_when_present() {
+        let parsed = parse_hook_actions_from_stdout(
+            r#"{
+              "actions": [
+                {
+                  "type": "nero_hook_msg",
+                  "mode": "tui-short",
+                  "show": {"agent": true, "tui": true},
+                  "freq": 120,
+                  "msg": {"full": "f", "short": "s"}
+                }
+              ]
+            }"#,
+        )
+        .expect("parse");
+
+        assert_eq!(
+            parsed.actions,
+            vec![HookAction::NeroHookMsg {
+                mode: NeroHookMsgMode::TuiShort,
+                show: NeroHookMsgShow {
+                    agent: true,
+                    tui: true
+                },
+                freq: 120,
+                msg: NeroHookMsgContent {
+                    full: "f".to_string(),
+                    short: "s".to_string()
+                }
+            }]
+        );
+    }
+
+    #[test]
+    fn nero_hook_msg_parses_null_freq_as_zero() {
+        let parsed = parse_hook_actions_from_stdout(
+            r#"{
+              "actions": [
+                {
+                  "type": "nero_hook_msg",
+                  "mode": "tui-short",
+                  "show": {"agent": true, "tui": true},
+                  "freq": null,
+                  "msg": {"full": "f", "short": "s"}
+                }
+              ]
+            }"#,
+        )
+        .expect("parse");
+
+        assert_eq!(
+            parsed.actions,
+            vec![HookAction::NeroHookMsg {
+                mode: NeroHookMsgMode::TuiShort,
+                show: NeroHookMsgShow {
+                    agent: true,
+                    tui: true
+                },
+                freq: 0,
                 msg: NeroHookMsgContent {
                     full: "f".to_string(),
                     short: "s".to_string()
