@@ -46,7 +46,7 @@
 - [x] `nero_hook_msg` obsługuje opcjonalne `format` + `status` (wstecznie kompatybilnie)
 - [x] Domyślny render TUI `nero_hook_msg` używa structured block (`content` + opcjonalny `status`)
 - [x] Skip przez `freq` emituje countdown jako semantykę statusu TUI (nie tylko raw warning string)
-- [ ] Reset throttlingu `nero_hook_msg.freq` po compaction (planowany etap po praktyce)
+- [x] Reset throttlingu `nero_hook_msg.freq` po compaction (po udanym zapisie `RolloutItem::Compacted`)
 
 ## Gate 5: Manual Smoke (MVP)
 
@@ -69,11 +69,13 @@ Latest AUTO e2e result snapshot (local):
 - `hook_actions_notify::after_agent_visible_note_emits_warning_and_turn_completes` ✅
 - `hook_actions_notify::after_agent_both_actions_can_trigger_follow_up_turn_without_manual_input` ✅
 - `hook_actions_notify::after_agent_auto_user_reply_only_can_trigger_follow_up_turn_without_manual_input` ✅
+- `hook_actions_notify::after_agent_nero_hook_msg_block_status_emits_structured_warning_and_turn_completes` ✅ (canonical `nero_hook_msg` + `format/status`)
 - Follow-up narrowing: `codex-hooks::user_notification::notify_hook_parses_actions_from_stdout` ✅
 
 Notes from debug run:
 - e2e false negatives were caused by mounting SSE fixtures on a different mock server than `TestCodexHarness` (test harness bug, not core hook bug).
 - Added opt-in `debug` logs across hook handoff points (`codex_hooks` + `codex_core`) for future diagnosis via `RUST_LOG`.
+- `codexn --hook-debug --check` autodetects real TUI log path (e.g. `~/.codex/log/codex-tui.log`) and prints usable `tail -f ...` command.
 
 - [x] Hook testowy zwraca tylko `visible_note` -> wpis widoczny (AUTO e2e)
 - [x] Hook testowy zwraca tylko `auto_user_reply` -> kolejny turn rusza (AUTO e2e)

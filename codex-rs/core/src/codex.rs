@@ -1634,6 +1634,16 @@ impl Session {
         self.hook_auto_reply_chain_depth.store(0, Ordering::SeqCst);
     }
 
+    fn reset_nero_hook_msg_throttle(&self) {
+        let mut guard = match self.hook_nero_msg_throttle.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let cleared = guard.len();
+        guard.clear();
+        debug!(cleared, "reset nero_hook_msg throttle cache");
+    }
+
     fn nero_hook_msg_throttle_remaining(
         &self,
         hook_name: &str,
@@ -3064,6 +3074,7 @@ impl Session {
     }
 
     pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) {
+        let contains_compaction = items.iter().any(|item| matches!(item, RolloutItem::Compacted(_)));
         let recorder = {
             let guard = self.services.rollout.lock().await;
             guard.clone()
@@ -3072,6 +3083,9 @@ impl Session {
             && let Err(e) = rec.record_items(items).await
         {
             error!("failed to record rollout items: {e:#}");
+        }
+        if contains_compaction {
+            self.reset_nero_hook_msg_throttle();
         }
     }
 
@@ -9197,6 +9211,55 @@ mod tests {
             sess.hook_auto_reply_chain_depth
                 .load(std::sync::atomic::Ordering::SeqCst),
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn nero_hook_msg_throttle_cache_can_be_reset() {
+        let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
+
+        let remaining = sess.nero_hook_msg_throttle_remaining(
+            "test-hook",
+            &NeroHookMsgMode::TuiShort,
+            &NeroHookMsgFormat::Block,
+            true,
+            true,
+            "full",
+            "short",
+            None,
+            120,
+        );
+        assert!(remaining.is_none(), "first emit should not be throttled");
+
+        let remaining = sess.nero_hook_msg_throttle_remaining(
+            "test-hook",
+            &NeroHookMsgMode::TuiShort,
+            &NeroHookMsgFormat::Block,
+            true,
+            true,
+            "full",
+            "short",
+            None,
+            120,
+        );
+        assert!(remaining.is_some(), "second immediate emit should be throttled");
+
+        sess.reset_nero_hook_msg_throttle();
+
+        let remaining = sess.nero_hook_msg_throttle_remaining(
+            "test-hook",
+            &NeroHookMsgMode::TuiShort,
+            &NeroHookMsgFormat::Block,
+            true,
+            true,
+            "full",
+            "short",
+            None,
+            120,
+        );
+        assert!(
+            remaining.is_none(),
+            "emit after reset should not be throttled (compaction reset semantics)"
         );
     }
 
