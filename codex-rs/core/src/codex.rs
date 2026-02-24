@@ -4960,6 +4960,25 @@ pub(crate) async fn run_turn(
                                             "emitted visible_note warning event"
                                         );
                                     }
+                                    HookAction::ContextNote { message } => {
+                                        let text = if message.starts_with("[nero-hook]") {
+                                            message
+                                        } else {
+                                            format!("[nero-hook] {message}")
+                                        };
+                                        let response_item: ResponseItem =
+                                            DeveloperInstructions::new(text).into();
+                                        sess.record_conversation_items(
+                                            &turn_context,
+                                            std::slice::from_ref(&response_item),
+                                        )
+                                        .await;
+                                        debug!(
+                                            turn_id = %turn_context.sub_id,
+                                            hook_name = %hook_name,
+                                            "recorded context_note developer message"
+                                        );
+                                    }
                                     HookAction::AutoUserReply { message } => {
                                         debug!(
                                             turn_id = %turn_context.sub_id,

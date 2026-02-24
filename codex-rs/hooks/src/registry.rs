@@ -377,6 +377,9 @@ mod tests {
                     HookAction::VisibleNote {
                         message: "note".to_string(),
                     },
+                    HookAction::ContextNote {
+                        message: "ctx".to_string(),
+                    },
                     HookAction::AutoUserReply {
                         message: "continue".to_string(),
                     },
@@ -392,6 +395,9 @@ mod tests {
             vec![
                 HookAction::VisibleNote {
                     message: "note".to_string()
+                },
+                HookAction::ContextNote {
+                    message: "ctx".to_string()
                 },
                 HookAction::AutoUserReply {
                     message: "continue".to_string()
