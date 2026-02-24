@@ -2551,6 +2551,7 @@ impl Session {
         turn_context: &TurnContext,
         item: TurnItem,
     ) {
+        let is_context_compaction = matches!(item, TurnItem::ContextCompaction(_));
         self.send_event(
             turn_context,
             EventMsg::ItemCompleted(ItemCompletedEvent {
@@ -2560,6 +2561,9 @@ impl Session {
             }),
         )
         .await;
+        if is_context_compaction {
+            self.reset_nero_hook_msg_throttle();
+        }
     }
 
     /// Adds an execpolicy amendment to both the in-memory and on-disk policies so future
