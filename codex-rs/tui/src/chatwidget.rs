@@ -1689,7 +1689,14 @@ impl ChatWidget {
     }
 
     fn on_warning(&mut self, message: impl Into<String>) {
-        self.add_to_history(history_cell::new_warning_event(message.into()));
+        let message = message.into();
+        if message.starts_with("[nero-hook]") {
+            debug!(
+                message = %message,
+                "tui chatwidget rendering nero-hook warning into history"
+            );
+        }
+        self.add_to_history(history_cell::new_warning_event(message));
         self.request_redraw();
     }
 
@@ -4174,7 +4181,16 @@ impl ChatWidget {
                 self.set_token_info(ev.info);
                 self.on_rate_limit_snapshot(ev.rate_limits);
             }
-            EventMsg::Warning(WarningEvent { message }) => self.on_warning(message),
+            EventMsg::Warning(WarningEvent { message }) => {
+                if message.starts_with("[nero-hook]") {
+                    debug!(
+                        message = %message,
+                        from_replay,
+                        "tui chatwidget received nero-hook warning event"
+                    );
+                }
+                self.on_warning(message)
+            }
             EventMsg::ModelReroute(_) => {}
             EventMsg::Error(ErrorEvent {
                 message,
