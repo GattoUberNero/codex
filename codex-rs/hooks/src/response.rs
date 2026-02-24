@@ -6,6 +6,7 @@ use tracing::warn;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HookAction {
     VisibleNote { message: String },
+    ContextNote { message: String },
     AutoUserReply { message: String },
 }
 
@@ -54,7 +55,7 @@ fn is_unknown_action_type(value: &serde_json::Value) -> bool {
     let Some(kind) = type_value.as_str() else {
         return false;
     };
-    !matches!(kind, "visible_note" | "auto_user_reply")
+    !matches!(kind, "visible_note" | "context_note" | "auto_user_reply")
 }
 
 #[cfg(test)]
@@ -81,6 +82,7 @@ mod tests {
             r#"{
               "actions": [
                 {"type": "visible_note", "message": "[nero-hook] ok"},
+                {"type": "context_note", "message": "internal note"},
                 {"type": "auto_user_reply", "message": "continue"}
               ]
             }"#,
@@ -92,6 +94,9 @@ mod tests {
             vec![
                 HookAction::VisibleNote {
                     message: "[nero-hook] ok".to_string()
+                },
+                HookAction::ContextNote {
+                    message: "internal note".to_string()
                 },
                 HookAction::AutoUserReply {
                     message: "continue".to_string()
