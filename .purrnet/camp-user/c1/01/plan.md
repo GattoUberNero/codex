@@ -239,6 +239,21 @@ Semantyka PoC upgrade:
 Planowany etap następny (po praktyce):
 - reset throttlingu po compaction (wysoka wartość praktyczna po zmianie układu kontekstu)
 
+### Upgrade U2: TUI structured hook note (`format` + `status`)
+
+Cel:
+- dodać kanoniczny, wstecznie kompatybilny sposób przekazania metadata statusu do TUI
+- renderować `nero_hook_msg` domyślnie jako ustrukturyzowany blok (content + status), zamiast surowego warning string
+
+Kontrakt (canonical `nero_hook_msg`):
+- opcjonalne `format` (`block|inline`, default `block`)
+- opcjonalne `status` (min. `kind`, `text`) dla metadata TUI
+
+Semantyka upgrade:
+- stare hooki / stare akcje pozostają wspierane bez zmian
+- `show.agent` nadal append-only na bazie `msg.full`
+- countdown przy `freq` jest reprezentowany w TUI jako `status.kind=countdown` + `status.text`
+
 - Rozszerzyć ten sam mechanizm na `after_tool_use`
 - Dodać workflow server/MCP:
   - np. `basic_status(campaign_id)`
