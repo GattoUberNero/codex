@@ -4922,6 +4922,11 @@ pub(crate) async fn run_turn(
                             },
                         })
                         .await;
+                    debug!(
+                        turn_id = %turn_context.sub_id,
+                        hook_outcomes = hook_outcomes.len(),
+                        "after_agent hooks dispatched"
+                    );
 
                     let mut abort_message = None;
                     let mut deferred_auto_user_replies: Vec<(String, String)> = Vec::new();
@@ -4930,6 +4935,12 @@ pub(crate) async fn run_turn(
                         let result = hook_outcome.result;
                         let actions = hook_outcome.actions;
                         if matches!(&result, HookResult::Success) {
+                            debug!(
+                                turn_id = %turn_context.sub_id,
+                                hook_name = %hook_name,
+                                actions = actions.len(),
+                                "processing after_agent hook actions"
+                            );
                             for action in actions {
                                 match action {
                                     HookAction::VisibleNote { message } => {
@@ -4943,8 +4954,18 @@ pub(crate) async fn run_turn(
                                             EventMsg::Warning(WarningEvent { message }),
                                         )
                                         .await;
+                                        debug!(
+                                            turn_id = %turn_context.sub_id,
+                                            hook_name = %hook_name,
+                                            "emitted visible_note warning event"
+                                        );
                                     }
                                     HookAction::AutoUserReply { message } => {
+                                        debug!(
+                                            turn_id = %turn_context.sub_id,
+                                            hook_name = %hook_name,
+                                            "queued deferred auto_user_reply from hook"
+                                        );
                                         deferred_auto_user_replies.push((hook_name.clone(), message));
                                     }
                                 }
