@@ -99,6 +99,8 @@ pub struct HookPayload {
 #[serde(rename_all = "snake_case")]
 pub struct HookEventAfterAgent {
     pub thread_id: ThreadId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_name: Option<String>,
     pub turn_id: String,
     pub input_messages: Vec<String>,
     pub last_assistant_message: Option<String>,
@@ -213,6 +215,7 @@ mod tests {
             hook_event: HookEvent::AfterAgent {
                 event: HookEventAfterAgent {
                     thread_id,
+                    thread_name: None,
                     turn_id: "turn-1".to_string(),
                     input_messages: vec!["hello".to_string()],
                     last_assistant_message: Some("hi".to_string()),
