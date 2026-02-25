@@ -26,6 +26,8 @@ enum UserNotification {
     #[serde(rename_all = "kebab-case")]
     AgentTurnComplete {
         thread_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_name: Option<String>,
         turn_id: String,
         cwd: String,
 
@@ -42,6 +44,7 @@ pub fn legacy_notify_json(hook_event: &HookEvent, cwd: &Path) -> Result<String, 
         HookEvent::AfterAgent { event } => {
             serde_json::to_string(&UserNotification::AgentTurnComplete {
                 thread_id: event.thread_id.to_string(),
+                thread_name: event.thread_name.clone(),
                 turn_id: event.turn_id.clone(),
                 cwd: cwd.display().to_string(),
                 input_messages: event.input_messages.clone(),
@@ -250,6 +253,7 @@ mod tests {
     fn test_user_notification() -> Result<()> {
         let notification = UserNotification::AgentTurnComplete {
             thread_id: "b5f6c1c2-1111-2222-3333-444455556666".to_string(),
+            thread_name: None,
             turn_id: "12345".to_string(),
             cwd: "/Users/example/project".to_string(),
             input_messages: vec!["Rename `foo` to `bar` and update the callsites.".to_string()],
@@ -269,6 +273,7 @@ mod tests {
             event: crate::HookEventAfterAgent {
                 thread_id: ThreadId::from_string("b5f6c1c2-1111-2222-3333-444455556666")
                     .expect("valid thread id"),
+                thread_name: None,
                 turn_id: "12345".to_string(),
                 input_messages: vec!["Rename `foo` to `bar` and update the callsites.".to_string()],
                 last_assistant_message: Some(
@@ -301,6 +306,7 @@ mod tests {
             hook_event: HookEvent::AfterAgent {
                 event: crate::HookEventAfterAgent {
                     thread_id: ThreadId::new(),
+                    thread_name: None,
                     turn_id: "turn-x".to_string(),
                     input_messages: vec!["hi".to_string()],
                     last_assistant_message: Some("done".to_string()),
@@ -335,6 +341,7 @@ mod tests {
             hook_event: HookEvent::AfterAgent {
                 event: crate::HookEventAfterAgent {
                     thread_id: ThreadId::new(),
+                    thread_name: None,
                     turn_id: "turn-y".to_string(),
                     input_messages: vec!["hi".to_string()],
                     last_assistant_message: Some("done".to_string()),
@@ -365,6 +372,7 @@ mod tests {
             hook_event: HookEvent::AfterAgent {
                 event: crate::HookEventAfterAgent {
                     thread_id: ThreadId::new(),
+                    thread_name: None,
                     turn_id: "turn-timeout".to_string(),
                     input_messages: vec!["hi".to_string()],
                     last_assistant_message: Some("done".to_string()),

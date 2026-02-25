@@ -143,6 +143,7 @@ mod tests {
             hook_event: HookEvent::AfterAgent {
                 event: HookEventAfterAgent {
                     thread_id: ThreadId::new(),
+                    thread_name: None,
                     turn_id: format!("turn-{label}"),
                     input_messages: vec![INPUT_MESSAGE.to_string()],
                     last_assistant_message: Some("hi".to_string()),

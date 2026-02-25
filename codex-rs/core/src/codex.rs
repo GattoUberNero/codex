@@ -5048,6 +5048,10 @@ pub(crate) async fn run_turn(
 
                 if !needs_follow_up {
                     last_agent_message = sampling_request_last_agent_message;
+                    let hook_thread_name = {
+                        let state = sess.state.lock().await;
+                        state.session_configuration.thread_name.clone()
+                    };
                     let hook_outcomes = sess
                         .hooks()
                         .dispatch(HookPayload {
@@ -5057,6 +5061,7 @@ pub(crate) async fn run_turn(
                             hook_event: HookEvent::AfterAgent {
                                 event: HookEventAfterAgent {
                                     thread_id: sess.conversation_id,
+                                    thread_name: hook_thread_name,
                                     turn_id: turn_context.sub_id.clone(),
                                     input_messages: sampling_request_input_messages,
                                     last_assistant_message: last_agent_message.clone(),
