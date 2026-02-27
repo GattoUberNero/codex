@@ -8,9 +8,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::AtomicU32;
 use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 use std::time::Duration as StdDuration;
 use std::time::Instant as StdInstant;
 
@@ -317,8 +315,22 @@ pub(crate) const INITIAL_SUBMIT_ID: &str = "";
 pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
 const HOOK_AUTO_REPLY_SUBMISSION_PREFIX: &str = "hook-auto-";
 const HOOK_AUTO_REPLY_MAX_CHAIN_DEPTH: u32 = 1;
+/// Give TUI "Tab queued" user input a short head start after turn completion.
+///
+/// This keeps `tab-first` behavior deterministic enough in interactive mode:
+/// user-queued follow-ups are preferred, while synthetic auto-replies are
+/// still available as fallback when the user has not queued anything.
+const HOOK_AUTO_REPLY_TAB_PRIORITY_GRACE_MS: u64 = 300;
+const HOOK_AUTO_REPLY_WAIT_FOR_TERMINAL_TIMEOUT_MS: u64 = 30_000;
 const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
 const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyber-safety";
+
+fn parse_hook_auto_reply_epoch(submission_id: &str) -> Option<u64> {
+    let suffix = submission_id.strip_prefix(HOOK_AUTO_REPLY_SUBMISSION_PREFIX)?;
+    let (epoch, _) = suffix.split_once('-')?;
+    epoch.parse::<u64>().ok()
+}
+
 fn nero_hook_msg_throttle_key(
     hook_name: &str,
     mode: &NeroHookMsgMode,
@@ -650,8 +662,9 @@ pub(crate) struct Session {
     pub(crate) services: SessionServices,
     js_repl: Arc<JsReplHandle>,
     hook_seen_terminal_turn_ids: Mutex<HashSet<String>>,
+    hook_auto_reply_internal_submission_ids: StdMutex<HashSet<String>>,
     hook_nero_msg_throttle: StdMutex<HashMap<String, StdInstant>>,
-    hook_auto_reply_chain_depth: AtomicU32,
+    hook_auto_reply_guard_state: StdMutex<HookAutoReplyGuardState>,
     next_internal_sub_id: AtomicU64,
 }
 
@@ -667,6 +680,12 @@ impl TurnSkillsContext {
             implicit_invocation_seen_skills: Arc::new(Mutex::new(HashSet::new())),
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct HookAutoReplyGuardState {
+    epoch: u64,
+    chain_depth: u32,
 }
 
 /// The context needed for a single turn of the thread.
@@ -1533,8 +1552,9 @@ impl Session {
             services,
             js_repl,
             hook_seen_terminal_turn_ids: Mutex::new(HashSet::new()),
+            hook_auto_reply_internal_submission_ids: StdMutex::new(HashSet::new()),
             hook_nero_msg_throttle: StdMutex::new(HashMap::new()),
-            hook_auto_reply_chain_depth: AtomicU32::new(0),
+            hook_auto_reply_guard_state: StdMutex::new(HookAutoReplyGuardState::default()),
             next_internal_sub_id: AtomicU64::new(0),
         });
         if let Some(network_policy_decider_session) = network_policy_decider_session {
@@ -1692,17 +1712,38 @@ impl Session {
         format!("{prefix}{id}")
     }
 
-    async fn enqueue_internal_op_with_prefix(&self, prefix: &str, op: Op) -> CodexResult<String> {
-        let id = self.next_internal_sub_id_with_prefix(prefix);
-        self.tx_sub
-            .send(Submission { id: id.clone(), op })
-            .await
-            .map_err(|_| CodexErr::InternalAgentDied)?;
-        Ok(id)
+    async fn begin_new_user_submission_generation(&self) -> u64 {
+        let next_epoch = {
+            let mut guard = match self.hook_auto_reply_guard_state.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.epoch = guard.epoch.saturating_add(1);
+            guard.chain_depth = 0;
+            guard.epoch
+        };
+        let cleared_markers = {
+            let mut seen = self.hook_seen_terminal_turn_ids.lock().await;
+            let len = seen.len();
+            seen.clear();
+            len
+        };
+        if cleared_markers > 0 {
+            debug!(
+                generation_epoch = next_epoch,
+                cleared_markers,
+                "cleared hook terminal markers for new user submission generation"
+            );
+        }
+        next_epoch
     }
 
-    fn reset_hook_auto_reply_chain_depth(&self) {
-        self.hook_auto_reply_chain_depth.store(0, Ordering::SeqCst);
+    fn current_hook_auto_reply_epoch(&self) -> u64 {
+        let guard = match self.hook_auto_reply_guard_state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.epoch
     }
 
     fn reset_nero_hook_msg_throttle(&self) {
@@ -1768,29 +1809,53 @@ impl Session {
         self.hook_seen_terminal_turn_ids.lock().await.remove(turn_id);
     }
 
-    fn try_reserve_hook_auto_reply_chain_slot(&self) -> Option<u32> {
-        self.hook_auto_reply_chain_depth
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-                if current >= HOOK_AUTO_REPLY_MAX_CHAIN_DEPTH {
-                    None
-                } else {
-                    Some(current + 1)
-                }
-            })
-            .ok()
-            .map(|previous| previous + 1)
+    fn try_reserve_hook_auto_reply_chain_slot(&self) -> Option<(u32, u64)> {
+        let mut guard = match self.hook_auto_reply_guard_state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if guard.chain_depth >= HOOK_AUTO_REPLY_MAX_CHAIN_DEPTH {
+            return None;
+        }
+        guard.chain_depth += 1;
+        Some((guard.chain_depth, guard.epoch))
     }
 
-    fn release_hook_auto_reply_chain_slot(&self) {
-        let _ = self.hook_auto_reply_chain_depth.fetch_update(
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-            |current| current.checked_sub(1),
-        );
+    fn release_hook_auto_reply_chain_slot_for_epoch(&self, epoch: u64) {
+        let mut guard = match self.hook_auto_reply_guard_state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if guard.epoch != epoch {
+            debug!(
+                guard_epoch = guard.epoch,
+                release_epoch = epoch,
+                "skipping hook auto-reply slot release for stale epoch"
+            );
+            return;
+        }
+        guard.chain_depth = guard.chain_depth.saturating_sub(1);
+    }
+
+    fn register_internal_hook_auto_submission_id(&self, submission_id: String) {
+        let mut ids = match self.hook_auto_reply_internal_submission_ids.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        ids.insert(submission_id);
+    }
+
+    fn take_internal_hook_auto_submission_id(&self, submission_id: &str) -> bool {
+        let mut ids = match self.hook_auto_reply_internal_submission_ids.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        ids.remove(submission_id)
     }
 
     fn spawn_deferred_auto_user_reply(self: &Arc<Self>, source_turn_id: String, hook_name: String, text: String) {
-        let Some(chain_depth) = self.try_reserve_hook_auto_reply_chain_slot() else {
+        let Some((chain_depth, reservation_epoch)) = self.try_reserve_hook_auto_reply_chain_slot()
+        else {
             info!(
                 turn_id = %source_turn_id,
                 hook_name = %hook_name,
@@ -1802,7 +1867,20 @@ impl Session {
 
         let sess = Arc::clone(self);
         tokio::spawn(async move {
+            let wait_started = StdInstant::now();
             loop {
+                if sess.current_hook_auto_reply_epoch() != reservation_epoch {
+                    sess.release_hook_auto_reply_chain_slot_for_epoch(reservation_epoch);
+                    info!(
+                        turn_id = %source_turn_id,
+                        hook_name = %hook_name,
+                        reservation_epoch,
+                        current_epoch = sess.current_hook_auto_reply_epoch(),
+                        "dropping deferred synthetic user reply while waiting because a newer generation is active"
+                    );
+                    sess.clear_turn_terminal_marker(&source_turn_id).await;
+                    return;
+                }
                 let source_turn_terminal_event_emitted = {
                     let guard = sess.hook_seen_terminal_turn_ids.lock().await;
                     guard.contains(source_turn_id.as_str())
@@ -1810,31 +1888,83 @@ impl Session {
                 if source_turn_terminal_event_emitted {
                     break;
                 }
+                if wait_started.elapsed()
+                    >= StdDuration::from_millis(HOOK_AUTO_REPLY_WAIT_FOR_TERMINAL_TIMEOUT_MS)
+                {
+                    sess.release_hook_auto_reply_chain_slot_for_epoch(reservation_epoch);
+                    sess.clear_turn_terminal_marker(&source_turn_id).await;
+                    warn!(
+                        turn_id = %source_turn_id,
+                        hook_name = %hook_name,
+                        reservation_epoch,
+                        timeout_ms = HOOK_AUTO_REPLY_WAIT_FOR_TERMINAL_TIMEOUT_MS,
+                        "timed out waiting for source turn terminal marker; dropping synthetic user reply"
+                    );
+                    return;
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let apply_tab_priority_grace = {
+                let state = sess.state.lock().await;
+                matches!(
+                    state.session_configuration.session_source,
+                    SessionSource::Cli | SessionSource::VSCode
+                )
+            };
+            if apply_tab_priority_grace && HOOK_AUTO_REPLY_TAB_PRIORITY_GRACE_MS > 0 {
+                debug!(
+                    turn_id = %source_turn_id,
+                    hook_name = %hook_name,
+                    grace_ms = HOOK_AUTO_REPLY_TAB_PRIORITY_GRACE_MS,
+                    "delaying synthetic user reply to prioritize queued user input"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    HOOK_AUTO_REPLY_TAB_PRIORITY_GRACE_MS,
+                ))
+                .await;
+            }
+            if sess.current_hook_auto_reply_epoch() != reservation_epoch {
+                sess.release_hook_auto_reply_chain_slot_for_epoch(reservation_epoch);
+                info!(
+                    turn_id = %source_turn_id,
+                    hook_name = %hook_name,
+                    reservation_epoch,
+                    current_epoch = sess.current_hook_auto_reply_epoch(),
+                    "dropping stale synthetic user reply because a newer user submission generation is active"
+                );
+                sess.clear_turn_terminal_marker(&source_turn_id).await;
+                return;
             }
             sess.clear_turn_terminal_marker(&source_turn_id).await;
 
-            match sess
-                .enqueue_internal_op_with_prefix(HOOK_AUTO_REPLY_SUBMISSION_PREFIX, Op::UserInput {
+            let hook_auto_submission_prefix =
+                format!("{HOOK_AUTO_REPLY_SUBMISSION_PREFIX}{reservation_epoch}-");
+            let submission_id = sess.next_internal_sub_id_with_prefix(&hook_auto_submission_prefix);
+            sess.register_internal_hook_auto_submission_id(submission_id.clone());
+            let send_result = sess.tx_sub.send(Submission {
+                id: submission_id.clone(),
+                op: Op::UserInput {
                     items: vec![UserInput::Text {
                         text,
                         text_elements: Vec::new(),
                     }],
                     final_output_json_schema: None,
-                })
-                .await
-            {
-                Ok(submission_id) => {
+                },
+            });
+            match send_result.await {
+                Ok(()) => {
                     info!(
                         turn_id = %source_turn_id,
                         hook_name = %hook_name,
                         chain_depth,
+                        reservation_epoch,
                         %submission_id,
                         "queued synthetic user reply from hook action"
                     );
                 }
                 Err(err) => {
-                    sess.release_hook_auto_reply_chain_slot();
+                    let _ = sess.take_internal_hook_auto_submission_id(&submission_id);
+                    sess.release_hook_auto_reply_chain_slot_for_epoch(reservation_epoch);
                     warn!(
                         turn_id = %source_turn_id,
                         hook_name = %hook_name,
@@ -3968,16 +4098,51 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                 .await;
             }
             Op::UserInput { .. } | Op::UserTurn { .. } => {
-                let is_hook_auto_reply = sub.id.starts_with(HOOK_AUTO_REPLY_SUBMISSION_PREFIX);
+                let is_hook_auto_reply = sub.id.starts_with(HOOK_AUTO_REPLY_SUBMISSION_PREFIX)
+                    && sess.take_internal_hook_auto_submission_id(&sub.id);
                 if !is_hook_auto_reply {
-                    sess.reset_hook_auto_reply_chain_depth();
-                } else if sess.active_turn.lock().await.is_some() {
-                    sess.release_hook_auto_reply_chain_slot();
-                    info!(
+                    let generation_epoch = sess.begin_new_user_submission_generation().await;
+                    debug!(
                         submission_id = %sub.id,
-                        "skipping hook synthetic user reply because another turn is already active"
+                        generation_epoch,
+                        "started new user submission generation"
                     );
-                    continue;
+                } else {
+                    let hook_epoch = parse_hook_auto_reply_epoch(&sub.id);
+                    if hook_epoch.is_none() {
+                        warn!(
+                            submission_id = %sub.id,
+                            "dropping hook synthetic user reply with invalid epoch format"
+                        );
+                        continue;
+                    }
+                    if let Some(epoch) = hook_epoch {
+                        let current_epoch = sess.current_hook_auto_reply_epoch();
+                        if epoch != current_epoch {
+                            info!(
+                                submission_id = %sub.id,
+                                hook_epoch = epoch,
+                                current_epoch,
+                                "skipping stale hook synthetic user reply from older generation"
+                            );
+                            continue;
+                        }
+                    }
+                    if sess.active_turn.lock().await.is_some() {
+                        if let Some(epoch) = hook_epoch {
+                            sess.release_hook_auto_reply_chain_slot_for_epoch(epoch);
+                        } else {
+                            warn!(
+                                submission_id = %sub.id,
+                                "skipping hook synthetic user reply with unparseable epoch"
+                            );
+                        }
+                        info!(
+                            submission_id = %sub.id,
+                            "skipping hook synthetic user reply because another turn is already active"
+                        );
+                        continue;
+                    }
                 }
                 handlers::user_input_or_turn(&sess, sub.id.clone(), sub.op).await;
             }
@@ -8967,8 +9132,9 @@ mod tests {
             services,
             js_repl,
             hook_seen_terminal_turn_ids: Mutex::new(HashSet::new()),
+            hook_auto_reply_internal_submission_ids: StdMutex::new(HashSet::new()),
             hook_nero_msg_throttle: StdMutex::new(HashMap::new()),
-            hook_auto_reply_chain_depth: AtomicU32::new(0),
+            hook_auto_reply_guard_state: StdMutex::new(HookAutoReplyGuardState::default()),
             next_internal_sub_id: AtomicU64::new(0),
         };
 
@@ -9131,8 +9297,9 @@ mod tests {
             services,
             js_repl,
             hook_seen_terminal_turn_ids: Mutex::new(HashSet::new()),
+            hook_auto_reply_internal_submission_ids: StdMutex::new(HashSet::new()),
             hook_nero_msg_throttle: StdMutex::new(HashMap::new()),
-            hook_auto_reply_chain_depth: AtomicU32::new(0),
+            hook_auto_reply_guard_state: StdMutex::new(HookAutoReplyGuardState::default()),
             next_internal_sub_id: AtomicU64::new(0),
         });
 
@@ -9763,11 +9930,18 @@ mod tests {
     async fn hook_auto_reply_guard_state_transitions_are_stable() {
         let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
 
-        assert_eq!(sess.try_reserve_hook_auto_reply_chain_slot(), Some(1));
+        let first = sess
+            .try_reserve_hook_auto_reply_chain_slot()
+            .expect("reserve first slot");
+        assert_eq!(first.0, 1);
         assert_eq!(sess.try_reserve_hook_auto_reply_chain_slot(), None);
 
-        sess.release_hook_auto_reply_chain_slot();
-        assert_eq!(sess.try_reserve_hook_auto_reply_chain_slot(), Some(1));
+        sess.release_hook_auto_reply_chain_slot_for_epoch(first.1);
+        let second = sess
+            .try_reserve_hook_auto_reply_chain_slot()
+            .expect("reserve second slot");
+        assert_eq!(second.0, 1);
+        assert_eq!(second.1, first.1);
 
         sess.mark_turn_terminal_event_emitted("turn-a").await;
         {
@@ -9780,12 +9954,15 @@ mod tests {
             assert!(!seen.contains("turn-a"));
         }
 
-        sess.reset_hook_auto_reply_chain_depth();
-        assert_eq!(
-            sess.hook_auto_reply_chain_depth
-                .load(std::sync::atomic::Ordering::SeqCst),
-            0
-        );
+        let next_epoch = sess.begin_new_user_submission_generation().await;
+        assert!(next_epoch > second.1);
+        let stale_epoch = second.1;
+        sess.release_hook_auto_reply_chain_slot_for_epoch(stale_epoch);
+        let after_bump = sess
+            .try_reserve_hook_auto_reply_chain_slot()
+            .expect("reserve slot in newer generation");
+        assert_eq!(after_bump.0, 1);
+        assert_eq!(after_bump.1, next_epoch);
     }
 
     #[tokio::test]
