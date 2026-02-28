@@ -314,7 +314,9 @@ pub struct CodexSpawnOk {
 pub(crate) const INITIAL_SUBMIT_ID: &str = "";
 pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
 const HOOK_AUTO_REPLY_SUBMISSION_PREFIX: &str = "hook-auto-";
-const HOOK_AUTO_REPLY_MAX_CHAIN_DEPTH: u32 = 1;
+// Allow a short autonomous streak before requiring explicit user re-entry.
+// This matches the default nero auto policy (`max_rounds = 7`) plus initial turn.
+const HOOK_AUTO_REPLY_MAX_CHAIN_DEPTH: u32 = 8;
 /// Give TUI "Tab queued" user input a short head start after turn completion.
 ///
 /// This keeps `tab-first` behavior deterministic enough in interactive mode:
