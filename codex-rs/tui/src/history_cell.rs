@@ -1658,6 +1658,12 @@ impl HistoryCell for NeroHookBlockCell {
         let hook_title = if self
             .status
             .as_ref()
+            .is_some_and(|status| status.kind.eq_ignore_ascii_case("state"))
+        {
+            "nero-hook.system"
+        } else if self
+            .status
+            .as_ref()
             .is_some_and(|status| status.kind.eq_ignore_ascii_case("auto"))
             || self.content.trim_start().starts_with("Auto:")
         {
