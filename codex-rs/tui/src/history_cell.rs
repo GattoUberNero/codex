@@ -1655,6 +1655,21 @@ pub(crate) struct NeroHookBlockCell {
 impl HistoryCell for NeroHookBlockCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let inner_width = width.saturating_sub(4).max(1) as usize;
+        if self.content.starts_with("NERO HOOK SYSTEM") {
+            let mut lines: Vec<Line<'static>> = vec![vec!["NERO HOOK SYSTEM".yellow().bold()].into()];
+            let mut block_lines = adaptive_wrap_lines(
+                self.content
+                    .split('\n')
+                    .skip(1)
+                    .map(|line| Line::from(line.to_string()).yellow()),
+                RtOptions::new(inner_width)
+                    .initial_indent("  ".into())
+                    .subsequent_indent("  ".into()),
+            );
+            lines.append(&mut block_lines);
+            return with_border_with_inner_width(lines, inner_width);
+        }
+
         let hook_title = if self
             .status
             .as_ref()
