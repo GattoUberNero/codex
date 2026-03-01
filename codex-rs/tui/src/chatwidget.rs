@@ -173,7 +173,9 @@ const NERO_AUTO_HOTKEY_DEBOUNCE: Duration = Duration::from_millis(180);
 enum NeroAutoHotkeyAction {
     ToggleEnabled,
     IncreaseDifficulty,
+    DecreaseDifficulty,
     CycleMaxRounds,
+    DecreaseMaxRounds,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,18 +226,36 @@ fn queued_message_edit_binding_for_terminal(terminal_name: TerminalName) -> KeyB
 fn detect_nero_auto_hotkey_action(key_event: KeyEvent) -> Option<NeroAutoHotkeyAction> {
     let has_ctrl = key_event.modifiers.contains(KeyModifiers::CONTROL);
     let has_alt = key_event.modifiers.contains(KeyModifiers::ALT);
+    let has_shift = key_event.modifiers.contains(KeyModifiers::SHIFT);
 
     // Fallback shortcuts for terminals where Ctrl+Shift+` is hard to emit.
     // Some terminal/OS combos swallow Ctrl+Fn, so we accept Fn with:
     // - no modifiers
+    // - Shift
     // - Ctrl
     // - Alt
-    let allow_f_key_fallback = key_event.modifiers.is_empty() || has_ctrl || has_alt;
+    // (and combinations of Shift/Ctrl/Alt)
+    let has_unsupported_modifiers = key_event.modifiers.contains(KeyModifiers::SUPER)
+        || key_event.modifiers.contains(KeyModifiers::HYPER)
+        || key_event.modifiers.contains(KeyModifiers::META);
+    let allow_f_key_fallback = !has_unsupported_modifiers;
     if allow_f_key_fallback {
         match key_event.code {
             KeyCode::F(1) => return Some(NeroAutoHotkeyAction::ToggleEnabled),
-            KeyCode::F(2) => return Some(NeroAutoHotkeyAction::IncreaseDifficulty),
-            KeyCode::F(3) => return Some(NeroAutoHotkeyAction::CycleMaxRounds),
+            KeyCode::F(2) => {
+                return Some(if has_shift {
+                    NeroAutoHotkeyAction::DecreaseDifficulty
+                } else {
+                    NeroAutoHotkeyAction::IncreaseDifficulty
+                });
+            }
+            KeyCode::F(3) => {
+                return Some(if has_shift {
+                    NeroAutoHotkeyAction::DecreaseMaxRounds
+                } else {
+                    NeroAutoHotkeyAction::CycleMaxRounds
+                });
+            }
             _ => {}
         }
     }
@@ -7373,7 +7393,13 @@ impl ChatWidget {
                     NeroAutoHotkeyAction::IncreaseDifficulty => {
                         format!("Nero-auto diff-check -> {}", next.autonomy_level)
                     }
+                    NeroAutoHotkeyAction::DecreaseDifficulty => {
+                        format!("Nero-auto diff-check -> {}", next.autonomy_level)
+                    }
                     NeroAutoHotkeyAction::CycleMaxRounds => {
+                        format!("Nero-auto max-rounds -> {}", max_rounds)
+                    }
+                    NeroAutoHotkeyAction::DecreaseMaxRounds => {
                         format!("Nero-auto max-rounds -> {}", max_rounds)
                     }
                 };
@@ -7386,7 +7412,7 @@ impl ChatWidget {
                         next.max_auto_rounds
                     ),
                     Some(format!(
-                        "Shortcuts: Shift+` toggle, Ctrl+Shift+` difficulty+, Alt+Shift+` max-rounds. Fallback: F1/F2/F3 (also works with Ctrl or Alt). Config: {}",
+                        "Shortcuts: F1 toggle, F2 diff+, Shift+F2 diff-, F3 max-rounds+, Shift+F3 max-rounds-. Legacy: Shift+` toggle, Ctrl+Shift+` diff+, Alt+Shift+` max-rounds+. Config: {}",
                         config_path.display()
                     )),
                 );
@@ -8085,6 +8111,14 @@ fn bump_wrapping(value: i64, min: i64, max: i64) -> i64 {
     }
 }
 
+fn bump_wrapping_down(value: i64, min: i64, max: i64) -> i64 {
+    if value <= min {
+        max
+    } else {
+        value - 1
+    }
+}
+
 fn update_nero_auto_runtime_config(
     path: &Path,
     action: NeroAutoHotkeyAction,
@@ -8111,9 +8145,18 @@ fn update_nero_auto_runtime_config(
             autonomy_level: bump_wrapping(current.autonomy_level, 1, 10),
             ..current
         },
+        NeroAutoHotkeyAction::DecreaseDifficulty => NeroAutoRuntimeConfig {
+            autonomy_level: bump_wrapping_down(current.autonomy_level, 1, 10),
+            ..current
+        },
         NeroAutoHotkeyAction::CycleMaxRounds => NeroAutoRuntimeConfig {
             // 0 means unlimited by policy semantics.
             max_auto_rounds: bump_wrapping(current.max_auto_rounds, 0, 10),
+            ..current
+        },
+        NeroAutoHotkeyAction::DecreaseMaxRounds => NeroAutoRuntimeConfig {
+            // 0 means unlimited by policy semantics.
+            max_auto_rounds: bump_wrapping_down(current.max_auto_rounds, 0, 10),
             ..current
         },
     };
