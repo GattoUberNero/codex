@@ -4507,6 +4507,29 @@ async fn nero_auto_hotkeys_function_key_shift_supports_decrement() {
 }
 
 #[tokio::test]
+async fn nero_auto_hotkeys_function_key_f4_fallback_decrements_max_rounds() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    let tmp = tempdir().expect("tempdir");
+    chat.config.codex_home = tmp.path().to_path_buf();
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
+
+    let cfg_path = nero_auto_config_path(&chat.config.codex_home);
+    let raw = std::fs::read_to_string(&cfg_path).expect("read config file");
+    let parsed = toml::from_str::<TomlValue>(&raw).expect("parse config");
+    let max_auto_rounds = parsed
+        .get("nero")
+        .and_then(|v| v.get("hook"))
+        .and_then(|v| v.get("runtime"))
+        .and_then(|v| v.get("auto"))
+        .and_then(|v| v.get("policy"))
+        .and_then(|v| v.get("max_auto_rounds"))
+        .and_then(TomlValue::as_integer);
+
+    assert_eq!(max_auto_rounds, Some(6));
+}
+
+#[tokio::test]
 async fn mode_switch_surfaces_model_change_notification_when_effective_model_changes() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
     chat.set_feature_enabled(Feature::CollaborationModes, true);

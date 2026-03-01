@@ -256,6 +256,11 @@ fn detect_nero_auto_hotkey_action(key_event: KeyEvent) -> Option<NeroAutoHotkeyA
                     NeroAutoHotkeyAction::CycleMaxRounds
                 });
             }
+            // Terminal fallback for environments that swallow Shift+F3.
+            // F4 always means "max-rounds -".
+            KeyCode::F(4) => return Some(NeroAutoHotkeyAction::DecreaseMaxRounds),
+            // Some terminals encode Shift+F3 as F15.
+            KeyCode::F(15) => return Some(NeroAutoHotkeyAction::DecreaseMaxRounds),
             _ => {}
         }
     }
@@ -7412,7 +7417,7 @@ impl ChatWidget {
                         next.max_auto_rounds
                     ),
                     Some(format!(
-                        "Shortcuts: F1 toggle, F2 diff+, Shift+F2 diff-, F3 max-rounds+, Shift+F3 max-rounds-. Legacy: Shift+` toggle, Ctrl+Shift+` diff+, Alt+Shift+` max-rounds+. Config: {}",
+                        "Shortcuts: F1 toggle, F2 diff+, Shift+F2 diff-, F3 max-rounds+, Shift+F3 max-rounds-, F4 max-rounds-. Legacy: Shift+` toggle, Ctrl+Shift+` diff+, Alt+Shift+` max-rounds+. Config: {}",
                         config_path.display()
                     )),
                 );
