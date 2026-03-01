@@ -1656,12 +1656,37 @@ impl HistoryCell for NeroHookBlockCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let inner_width = width.saturating_sub(4).max(1) as usize;
         if self.content.starts_with("NERO HOOK SYSTEM") {
-            let mut lines: Vec<Line<'static>> = vec![vec!["NERO HOOK SYSTEM".yellow().bold()].into()];
+            let mut lines: Vec<Line<'static>> =
+                vec![vec!["NERO HOOK SYSTEM".yellow().bold()].into()];
             let mut block_lines = adaptive_wrap_lines(
                 self.content
                     .split('\n')
                     .skip(1)
-                    .map(|line| Line::from(line.to_string()).yellow()),
+                    .map(|line| {
+                        let trimmed = line.trim_start();
+                        if trimmed.starts_with("status:")
+                            && line.contains("campaign=unresolved")
+                        {
+                            return Line::from(line.to_string()).style(
+                                Style::default()
+                                    .fg(Color::White)
+                                    .bg(Color::Red)
+                                    .add_modifier(Modifier::BOLD),
+                            );
+                        }
+                        if trimmed == "nero-hook.system"
+                            || trimmed == "nero-hook.msg"
+                            || trimmed == "nero-hook.auto"
+                        {
+                            return Line::from(line.to_string())
+                                .style(Style::default().yellow().add_modifier(Modifier::BOLD));
+                        }
+                        if trimmed.chars().all(|c| c == '-') {
+                            return Line::from(line.to_string())
+                                .style(Style::default().yellow().add_modifier(Modifier::DIM));
+                        }
+                        Line::from(line.to_string()).style(Style::default().white())
+                    }),
                 RtOptions::new(inner_width)
                     .initial_indent("  ".into())
                     .subsequent_indent("  ".into()),
@@ -1694,7 +1719,7 @@ impl HistoryCell for NeroHookBlockCell {
         let mut content_lines = adaptive_wrap_lines(
             self.content
                 .split('\n')
-                .map(|line| Line::from(line.to_string()).yellow()),
+                .map(|line| Line::from(line.to_string()).style(Style::default().white())),
             RtOptions::new(inner_width)
                 .initial_indent("  ".into())
                 .subsequent_indent("  ".into()),
@@ -1702,11 +1727,20 @@ impl HistoryCell for NeroHookBlockCell {
         lines.append(&mut content_lines);
 
         if let Some(status) = &self.status {
-            let kind_style = match status.kind.as_str() {
-                "countdown" => Style::default().yellow(),
-                "error" => Style::default().red(),
-                "success" => Style::default().green(),
-                _ => Style::default().cyan(),
+            let unresolved_alert = status.text.contains("campaign=unresolved");
+            let (kind_style, text_style) = if unresolved_alert || status.kind == "error" {
+                let alert = Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Red)
+                    .add_modifier(Modifier::BOLD);
+                (alert, alert)
+            } else {
+                let kind = match status.kind.as_str() {
+                    "countdown" => Style::default().yellow(),
+                    "success" => Style::default().green(),
+                    _ => Style::default().cyan(),
+                };
+                (kind, Style::default().white())
             };
             lines.push(Line::from(""));
             lines.push(vec!["status".bold()].into());
@@ -1715,7 +1749,7 @@ impl HistoryCell for NeroHookBlockCell {
                     "  ".into(),
                     status.kind.clone().set_style(kind_style),
                     ": ".dim(),
-                    status.text.clone().into(),
+                    status.text.clone().set_style(text_style),
                 ])],
                 RtOptions::new(inner_width),
             );
@@ -1731,19 +1765,19 @@ pub(crate) fn try_new_nero_hook_warning_event(message: &str) -> Option<NeroHookB
     const STATUS_SEPARATOR: &str = "\n------------\nstatus = ";
 
     let body = message.strip_prefix(CONTENT_PREFIX)?;
-    let (content, status) = if let Some((content, status_payload)) = body.split_once(STATUS_SEPARATOR)
-    {
-        let (kind, text) = status_payload
-            .split_once(": ")
-            .map(|(kind, text)| (kind.to_string(), text.to_string()))
-            .unwrap_or_else(|| ("info".to_string(), status_payload.to_string()));
-        (
-            content.to_string(),
-            Some(NeroHookTuiBlockStatusPayload { kind, text }),
-        )
-    } else {
-        (body.to_string(), None)
-    };
+    let (content, status) =
+        if let Some((content, status_payload)) = body.split_once(STATUS_SEPARATOR) {
+            let (kind, text) = status_payload
+                .split_once(": ")
+                .map(|(kind, text)| (kind.to_string(), text.to_string()))
+                .unwrap_or_else(|| ("info".to_string(), status_payload.to_string()));
+            (
+                content.to_string(),
+                Some(NeroHookTuiBlockStatusPayload { kind, text }),
+            )
+        } else {
+            (body.to_string(), None)
+        };
 
     Some(NeroHookBlockCell { content, status })
 }
