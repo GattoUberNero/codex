@@ -226,7 +226,12 @@ fn detect_nero_auto_hotkey_action(key_event: KeyEvent) -> Option<NeroAutoHotkeyA
     let has_alt = key_event.modifiers.contains(KeyModifiers::ALT);
 
     // Fallback shortcuts for terminals where Ctrl+Shift+` is hard to emit.
-    if has_ctrl && !has_alt {
+    // Some terminal/OS combos swallow Ctrl+Fn, so we accept Fn with:
+    // - no modifiers
+    // - Ctrl
+    // - Alt
+    let allow_f_key_fallback = key_event.modifiers.is_empty() || has_ctrl || has_alt;
+    if allow_f_key_fallback {
         match key_event.code {
             KeyCode::F(1) => return Some(NeroAutoHotkeyAction::ToggleEnabled),
             KeyCode::F(2) => return Some(NeroAutoHotkeyAction::IncreaseDifficulty),
@@ -7381,7 +7386,7 @@ impl ChatWidget {
                         next.max_auto_rounds
                     ),
                     Some(format!(
-                        "Shortcuts: Shift+` toggle, Ctrl+Shift+` difficulty+, Alt+Shift+` max-rounds. Fallback: Ctrl+F1 toggle, Ctrl+F2 difficulty+, Ctrl+F3 max-rounds. Config: {}",
+                        "Shortcuts: Shift+` toggle, Ctrl+Shift+` difficulty+, Alt+Shift+` max-rounds. Fallback: F1/F2/F3 (also works with Ctrl or Alt). Config: {}",
                         config_path.display()
                     )),
                 );
