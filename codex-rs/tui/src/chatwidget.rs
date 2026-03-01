@@ -167,6 +167,7 @@ const PLAN_MODE_REASONING_SCOPE_PLAN_ONLY: &str = "Apply to Plan mode override";
 const PLAN_MODE_REASONING_SCOPE_ALL_MODES: &str = "Apply to global default and Plan mode override";
 const CONNECTORS_SELECTION_VIEW_ID: &str = "connectors-selection";
 const NERO_AUTO_HOTKEY_CONFIG_ENV: &str = "CODEXN_CONFIG_NERO_AUTO_PATH";
+const NERO_AUTO_HOTKEY_DEBOUNCE: Duration = Duration::from_millis(180);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NeroAutoHotkeyAction {
@@ -221,10 +222,6 @@ fn queued_message_edit_binding_for_terminal(terminal_name: TerminalName) -> KeyB
 }
 
 fn detect_nero_auto_hotkey_action(key_event: KeyEvent) -> Option<NeroAutoHotkeyAction> {
-    if key_event.kind != KeyEventKind::Press {
-        return None;
-    }
-
     let key_char = match key_event.code {
         KeyCode::Char(c) => c,
         _ => return None,
@@ -730,6 +727,8 @@ pub(crate) struct ChatWidget {
     external_editor_state: ExternalEditorState,
     realtime_conversation: RealtimeConversationUiState,
     last_rendered_user_message_event: Option<RenderedUserMessageEvent>,
+    last_nero_auto_hotkey_action: Option<NeroAutoHotkeyAction>,
+    last_nero_auto_hotkey_at: Option<Instant>,
 }
 
 /// Snapshot of active-cell state that affects transcript overlay rendering.
@@ -2941,6 +2940,8 @@ impl ChatWidget {
             external_editor_state: ExternalEditorState::Closed,
             realtime_conversation: RealtimeConversationUiState::default(),
             last_rendered_user_message_event: None,
+            last_nero_auto_hotkey_action: None,
+            last_nero_auto_hotkey_at: None,
         };
 
         widget.prefetch_rate_limits();
@@ -3115,6 +3116,8 @@ impl ChatWidget {
             external_editor_state: ExternalEditorState::Closed,
             realtime_conversation: RealtimeConversationUiState::default(),
             last_rendered_user_message_event: None,
+            last_nero_auto_hotkey_action: None,
+            last_nero_auto_hotkey_at: None,
         };
 
         widget.prefetch_rate_limits();
@@ -3278,6 +3281,8 @@ impl ChatWidget {
             external_editor_state: ExternalEditorState::Closed,
             realtime_conversation: RealtimeConversationUiState::default(),
             last_rendered_user_message_event: None,
+            last_nero_auto_hotkey_action: None,
+            last_nero_auto_hotkey_at: None,
         };
 
         widget.prefetch_rate_limits();
@@ -3382,7 +3387,13 @@ impl ChatWidget {
         if self.can_handle_nero_auto_hotkey()
             && let Some(action) = detect_nero_auto_hotkey_action(key_event)
         {
-            self.apply_nero_auto_hotkey_action(action);
+            // Consume hotkey repeats so a held key does not toggle twice or leak
+            // literal `~` into the composer.
+            if key_event.kind == KeyEventKind::Press
+                && self.should_apply_nero_auto_hotkey_action(action)
+            {
+                self.apply_nero_auto_hotkey_action(action);
+            }
             return;
         }
 
@@ -7309,6 +7320,22 @@ impl ChatWidget {
         self.bottom_pane.composer_is_empty()
             && !self.bottom_pane.is_task_running()
             && self.bottom_pane.no_modal_or_popup_active()
+    }
+
+    fn should_apply_nero_auto_hotkey_action(&mut self, action: NeroAutoHotkeyAction) -> bool {
+        let now = Instant::now();
+        if let (Some(last_action), Some(last_at)) = (
+            self.last_nero_auto_hotkey_action,
+            self.last_nero_auto_hotkey_at,
+        ) {
+            if last_action == action && now.duration_since(last_at) < NERO_AUTO_HOTKEY_DEBOUNCE {
+                return false;
+            }
+        }
+
+        self.last_nero_auto_hotkey_action = Some(action);
+        self.last_nero_auto_hotkey_at = Some(now);
+        true
     }
 
     fn apply_nero_auto_hotkey_action(&mut self, action: NeroAutoHotkeyAction) {

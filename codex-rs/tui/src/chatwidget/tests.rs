@@ -1732,6 +1732,8 @@ async fn make_chatwidget_manual(
         external_editor_state: ExternalEditorState::Closed,
         realtime_conversation: RealtimeConversationUiState::default(),
         last_rendered_user_message_event: None,
+        last_nero_auto_hotkey_action: None,
+        last_nero_auto_hotkey_at: None,
     };
     widget.set_model(&resolved_model);
     (widget, rx, op_rx)
@@ -4291,6 +4293,49 @@ async fn nero_auto_hotkey_toggle_writes_config_and_reports_state() {
     assert!(
         messages.contains("diff-check=5"),
         "expected diff-check in status message, got: {messages:?}"
+    );
+
+    let cfg_path = nero_auto_config_path(&chat.config.codex_home);
+    let raw = std::fs::read_to_string(&cfg_path).expect("read config file");
+    let parsed = toml::from_str::<TomlValue>(&raw).expect("parse config");
+    let enabled = parsed
+        .get("nero")
+        .and_then(|v| v.get("hook"))
+        .and_then(|v| v.get("runtime"))
+        .and_then(|v| v.get("auto"))
+        .and_then(|v| v.get("enabled"))
+        .and_then(TomlValue::as_bool);
+    assert_eq!(enabled, Some(true));
+}
+
+#[tokio::test]
+async fn nero_auto_hotkey_toggle_debounces_duplicate_press_events() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    let tmp = tempdir().expect("tempdir");
+    chat.config.codex_home = tmp.path().to_path_buf();
+
+    let toggle = KeyEvent::new(KeyCode::Char('~'), KeyModifiers::SHIFT);
+    chat.handle_key_event(toggle);
+    // Some terminals can emit duplicate Press events for one physical keypress.
+    chat.handle_key_event(toggle);
+
+    let messages = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines.as_slice()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        messages.contains("Nero-auto ON"),
+        "expected ON confirmation message, got: {messages:?}"
+    );
+    assert!(
+        !messages.contains("Nero-auto OFF"),
+        "duplicate keypress should be debounced, got: {messages:?}"
+    );
+    assert_eq!(
+        messages.matches("Nero-auto ").count(),
+        1,
+        "expected exactly one toggle message, got: {messages:?}"
     );
 
     let cfg_path = nero_auto_config_path(&chat.config.codex_home);
