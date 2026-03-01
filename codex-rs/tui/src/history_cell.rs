@@ -1667,12 +1667,25 @@ impl HistoryCell for NeroHookBlockCell {
                         if trimmed.starts_with("status:")
                             && line.contains("campaign=unresolved")
                         {
-                            return Line::from(line.to_string()).style(
-                                Style::default()
-                                    .fg(Color::White)
-                                    .bg(Color::Red)
-                                    .add_modifier(Modifier::BOLD),
-                            );
+                            let token = "campaign=unresolved";
+                            if let Some(idx) = line.find(token) {
+                                let before = &line[..idx];
+                                let after = &line[idx + token.len()..];
+                                return Line::from(vec![
+                                    Span::from(before.to_string())
+                                        .style(Style::default().white()),
+                                    Span::from(token.to_string()).style(
+                                        Style::default()
+                                            .fg(Color::White)
+                                            .bg(Color::Red)
+                                            .add_modifier(Modifier::BOLD),
+                                    ),
+                                    Span::from(after.to_string())
+                                        .style(Style::default().white()),
+                                ]);
+                            }
+                            return Line::from(line.to_string())
+                                .style(Style::default().white());
                         }
                         if trimmed == "nero-hook.system"
                             || trimmed == "nero-hook.msg"
@@ -1728,31 +1741,58 @@ impl HistoryCell for NeroHookBlockCell {
 
         if let Some(status) = &self.status {
             let unresolved_alert = status.text.contains("campaign=unresolved");
-            let (kind_style, text_style) = if unresolved_alert || status.kind == "error" {
+            let (kind_style, text_style, full_alert) = if status.kind == "error" {
                 let alert = Style::default()
                     .fg(Color::White)
                     .bg(Color::Red)
                     .add_modifier(Modifier::BOLD);
-                (alert, alert)
+                (alert, alert, true)
             } else {
                 let kind = match status.kind.as_str() {
                     "countdown" => Style::default().yellow(),
                     "success" => Style::default().green(),
                     _ => Style::default().cyan(),
                 };
-                (kind, Style::default().white())
+                (kind, Style::default().white(), false)
             };
             lines.push(Line::from(""));
             lines.push(vec!["status".bold()].into());
-            let mut status_lines = adaptive_wrap_lines(
-                vec![Line::from(vec![
+            let status_line = if unresolved_alert && !full_alert {
+                let token = "campaign=unresolved";
+                if let Some(idx) = status.text.find(token) {
+                    let before = &status.text[..idx];
+                    let after = &status.text[idx + token.len()..];
+                    Line::from(vec![
+                        "  ".into(),
+                        status.kind.clone().set_style(kind_style),
+                        ": ".dim(),
+                        Span::from(before.to_string()).style(text_style),
+                        Span::from(token.to_string()).style(
+                            Style::default()
+                                .fg(Color::White)
+                                .bg(Color::Red)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::from(after.to_string()).style(text_style),
+                    ])
+                } else {
+                    Line::from(vec![
+                        "  ".into(),
+                        status.kind.clone().set_style(kind_style),
+                        ": ".dim(),
+                        status.text.clone().set_style(text_style),
+                    ])
+                }
+            } else {
+                Line::from(vec![
                     "  ".into(),
                     status.kind.clone().set_style(kind_style),
                     ": ".dim(),
                     status.text.clone().set_style(text_style),
-                ])],
-                RtOptions::new(inner_width),
-            );
+                ])
+            };
+            let mut status_lines =
+                adaptive_wrap_lines(vec![status_line], RtOptions::new(inner_width));
             lines.append(&mut status_lines);
         }
 
