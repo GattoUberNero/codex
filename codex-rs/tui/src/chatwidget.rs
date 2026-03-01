@@ -222,6 +222,19 @@ fn queued_message_edit_binding_for_terminal(terminal_name: TerminalName) -> KeyB
 }
 
 fn detect_nero_auto_hotkey_action(key_event: KeyEvent) -> Option<NeroAutoHotkeyAction> {
+    let has_ctrl = key_event.modifiers.contains(KeyModifiers::CONTROL);
+    let has_alt = key_event.modifiers.contains(KeyModifiers::ALT);
+
+    // Fallback shortcuts for terminals where Ctrl+Shift+` is hard to emit.
+    if has_ctrl && !has_alt {
+        match key_event.code {
+            KeyCode::F(1) => return Some(NeroAutoHotkeyAction::ToggleEnabled),
+            KeyCode::F(2) => return Some(NeroAutoHotkeyAction::IncreaseDifficulty),
+            KeyCode::F(3) => return Some(NeroAutoHotkeyAction::CycleMaxRounds),
+            _ => {}
+        }
+    }
+
     let key_char = match key_event.code {
         KeyCode::Char(c) => c,
         _ => return None,
@@ -236,8 +249,6 @@ fn detect_nero_auto_hotkey_action(key_event: KeyEvent) -> Option<NeroAutoHotkeyA
         return None;
     }
 
-    let has_ctrl = key_event.modifiers.contains(KeyModifiers::CONTROL);
-    let has_alt = key_event.modifiers.contains(KeyModifiers::ALT);
     match (has_ctrl, has_alt) {
         (false, false) => Some(NeroAutoHotkeyAction::ToggleEnabled),
         (true, false) => Some(NeroAutoHotkeyAction::IncreaseDifficulty),
@@ -7370,7 +7381,7 @@ impl ChatWidget {
                         next.max_auto_rounds
                     ),
                     Some(format!(
-                        "Shortcuts: Shift+` toggle, Ctrl+Shift+` difficulty+, Alt+Shift+` max-rounds. Config: {}",
+                        "Shortcuts: Shift+` toggle, Ctrl+Shift+` difficulty+, Alt+Shift+` max-rounds. Fallback: Ctrl+F1 toggle, Ctrl+F2 difficulty+, Ctrl+F3 max-rounds. Config: {}",
                         config_path.display()
                     )),
                 );

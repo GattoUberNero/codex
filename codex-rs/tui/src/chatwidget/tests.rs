@@ -4409,6 +4409,38 @@ async fn nero_auto_hotkeys_adjust_policy_and_respect_composer_focus() {
 }
 
 #[tokio::test]
+async fn nero_auto_hotkeys_function_key_fallbacks_work() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    let tmp = tempdir().expect("tempdir");
+    chat.config.codex_home = tmp.path().to_path_buf();
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::CONTROL));
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::CONTROL));
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::CONTROL));
+
+    let cfg_path = nero_auto_config_path(&chat.config.codex_home);
+    let raw = std::fs::read_to_string(&cfg_path).expect("read config file");
+    let parsed = toml::from_str::<TomlValue>(&raw).expect("parse config");
+    let auto = parsed
+        .get("nero")
+        .and_then(|v| v.get("hook"))
+        .and_then(|v| v.get("runtime"))
+        .and_then(|v| v.get("auto"))
+        .expect("auto section should exist");
+    let policy = auto.get("policy").expect("policy section should exist");
+
+    assert_eq!(auto.get("enabled").and_then(TomlValue::as_bool), Some(true));
+    assert_eq!(
+        policy.get("autonomy_level").and_then(TomlValue::as_integer),
+        Some(6)
+    );
+    assert_eq!(
+        policy.get("max_auto_rounds").and_then(TomlValue::as_integer),
+        Some(8)
+    );
+}
+
+#[tokio::test]
 async fn mode_switch_surfaces_model_change_notification_when_effective_model_changes() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
     chat.set_feature_enabled(Feature::CollaborationModes, true);
