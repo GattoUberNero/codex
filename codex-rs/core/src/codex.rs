@@ -9862,13 +9862,13 @@ mod tests {
             .try_reserve_hook_auto_reply_chain_slot()
             .expect("reserve first slot");
         assert_eq!(first.0, 1);
-        assert_eq!(sess.try_reserve_hook_auto_reply_chain_slot(), None);
+        assert_eq!(sess.try_reserve_hook_auto_reply_chain_slot(), Some((2, first.1)));
 
         sess.release_hook_auto_reply_chain_slot_for_epoch(first.1);
         let second = sess
             .try_reserve_hook_auto_reply_chain_slot()
             .expect("reserve second slot");
-        assert_eq!(second.0, 1);
+        assert_eq!(second.0, 2);
         assert_eq!(second.1, first.1);
 
         sess.mark_turn_terminal_event_emitted("turn-a").await;

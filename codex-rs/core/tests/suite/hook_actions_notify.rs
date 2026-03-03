@@ -68,7 +68,7 @@ async fn submit_user_turn_no_wait(test: &TestCodexHarness, text: &str) -> Result
             sandbox_policy: SandboxPolicy::DangerFullAccess,
             model: session_model,
             effort: None,
-            summary: ReasoningSummary::Auto,
+            summary: Some(ReasoningSummary::Auto),
             collaboration_mode: None,
             personality: None,
         })

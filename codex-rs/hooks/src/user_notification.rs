@@ -313,6 +313,7 @@ mod tests {
         let payload = HookPayload {
             session_id: ThreadId::new(),
             cwd: tempdir()?.path().to_path_buf(),
+            client: None,
             triggered_at: chrono::Utc::now(),
             hook_event: HookEvent::AfterAgent {
                 event: crate::HookEventAfterAgent {
@@ -348,6 +349,7 @@ mod tests {
         let payload = HookPayload {
             session_id: ThreadId::new(),
             cwd: tempdir()?.path().to_path_buf(),
+            client: None,
             triggered_at: chrono::Utc::now(),
             hook_event: HookEvent::AfterAgent {
                 event: crate::HookEventAfterAgent {
@@ -379,6 +381,7 @@ mod tests {
         let payload = HookPayload {
             session_id: ThreadId::new(),
             cwd: tempdir()?.path().to_path_buf(),
+            client: None,
             triggered_at: chrono::Utc::now(),
             hook_event: HookEvent::AfterAgent {
                 event: crate::HookEventAfterAgent {

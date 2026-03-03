@@ -47,6 +47,59 @@ struct CloseAgentArgs {
     id: String,
 }
 
+fn outside_scope_error(agent_id: ThreadId) -> FunctionCallError {
+    FunctionCallError::RespondToModel(format!(
+        "agent with id {agent_id} is outside the current session scope"
+    ))
+}
+
+async fn ensure_owned_live_or_not_found(
+    session: &Session,
+    agent_id: ThreadId,
+) -> Result<(), FunctionCallError> {
+    if session
+        .services
+        .agent_control
+        .manages_active_agent(agent_id)
+    {
+        return Ok(());
+    }
+
+    let status = session.services.agent_control.get_status(agent_id).await;
+    if matches!(status, AgentStatus::NotFound) {
+        return Ok(());
+    }
+
+    Err(outside_scope_error(agent_id))
+}
+
+async fn ensure_resume_target_allowed(
+    session: &Session,
+    agent_id: ThreadId,
+) -> Result<(), FunctionCallError> {
+    if session
+        .services
+        .agent_control
+        .manages_active_agent(agent_id)
+    {
+        return Ok(());
+    }
+
+    let status = session.services.agent_control.get_status(agent_id).await;
+    if matches!(status, AgentStatus::NotFound) {
+        if session
+            .services
+            .agent_control
+            .manages_known_agent(agent_id)
+        {
+            return Ok(());
+        }
+        return Err(collab_agent_error(agent_id, CodexErr::ThreadNotFound(agent_id)));
+    }
+
+    Err(outside_scope_error(agent_id))
+}
+
 #[async_trait]
 impl ToolHandler for MultiAgentHandler {
     fn kind(&self) -> ToolKind {
@@ -250,6 +303,7 @@ mod send_input {
     ) -> Result<ToolOutput, FunctionCallError> {
         let args: SendInputArgs = parse_arguments(&arguments)?;
         let receiver_thread_id = agent_id(&args.id)?;
+        ensure_owned_live_or_not_found(session.as_ref(), receiver_thread_id).await?;
         let input_items = parse_collab_input(args.message, args.items)?;
         let prompt = input_preview(&input_items);
         let (receiver_agent_nickname, receiver_agent_role) = session
@@ -353,6 +407,7 @@ mod resume_agent {
                 "Agent depth limit reached. Solve the task yourself.".to_string(),
             ));
         }
+        ensure_resume_target_allowed(session.as_ref(), receiver_thread_id).await?;
 
         session
             .send_event(
@@ -499,6 +554,9 @@ pub(crate) mod wait {
             .iter()
             .map(|id| agent_id(id))
             .collect::<Result<Vec<_>, _>>()?;
+        for receiver_thread_id in &receiver_thread_ids {
+            ensure_owned_live_or_not_found(session.as_ref(), *receiver_thread_id).await?;
+        }
         let mut receiver_agents = Vec::with_capacity(receiver_thread_ids.len());
         for receiver_thread_id in &receiver_thread_ids {
             let (agent_nickname, agent_role) = session
@@ -684,28 +742,7 @@ pub mod close_agent {
                 "close_agent cannot target the current thread".to_string(),
             ));
         }
-
-        if session
-            .services
-            .agent_control
-            .manages_active_agent(agent_id)
-        {
-            return Ok(());
-        }
-
-        let status = session.services.agent_control.get_status(agent_id).await;
-        if matches!(status, AgentStatus::NotFound) {
-            return Ok(());
-        }
-
-        // Temporary fork safety guard:
-        // close_agent in 0.106 accepts any live ThreadId reachable via the shared manager, which
-        // lets one session close threads outside its own spawned-agent scope. Keep this patch
-        // intentionally narrow (destructive path only) and remove it once upstream ships a
-        // canonical ownership/authorization check, rather than carrying two parallel semantics.
-        Err(FunctionCallError::RespondToModel(format!(
-            "agent with id {agent_id} is outside the current session scope"
-        )))
+        ensure_owned_live_or_not_found(session, agent_id).await
     }
 
     pub async fn handle(
@@ -995,7 +1032,6 @@ fn apply_spawn_agent_overrides(config: &mut Config, child_depth: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AuthManager;
     use crate::CodexAuth;
     use crate::ThreadManager;
     use crate::built_in_model_providers;
@@ -1010,10 +1046,6 @@ mod tests {
     use crate::protocol::SubAgentSource;
     use crate::turn_diff_tracker::TurnDiffTracker;
     use codex_protocol::ThreadId;
-    use codex_protocol::models::ContentItem;
-    use codex_protocol::models::ResponseItem;
-    use codex_protocol::protocol::InitialHistory;
-    use codex_protocol::protocol::RolloutItem;
     use pretty_assertions::assert_eq;
     use serde::Deserialize;
     use serde_json::json;
@@ -1070,6 +1102,22 @@ mod tests {
             )
             .await
             .expect("managed child agent should spawn")
+    }
+
+    async fn spawn_managed_idle_agent_for_test(
+        session: &crate::codex::Session,
+        turn: &TurnContext,
+    ) -> ThreadId {
+        session
+            .services
+            .agent_control
+            .spawn_agent(
+                turn.config.as_ref().clone(),
+                Vec::new(),
+                Some(thread_spawn_source(session.conversation_id, 1, None)),
+            )
+            .await
+            .expect("managed idle child agent should spawn")
     }
 
     #[tokio::test]
@@ -1482,13 +1530,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_input_rejects_foreign_live_thread_outside_session_scope() {
+        let (mut session, turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+        let foreign_thread = manager
+            .start_thread(turn.config.as_ref().clone())
+            .await
+            .expect("foreign root thread should start");
+        let foreign_id = foreign_thread.thread_id;
+
+        let invocation = invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "send_input",
+            function_payload(json!({"id": foreign_id.to_string(), "message": "hi"})),
+        );
+        let Err(err) = MultiAgentHandler.handle(invocation).await else {
+            panic!("foreign live thread should be rejected");
+        };
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(format!(
+                "agent with id {foreign_id} is outside the current session scope"
+            ))
+        );
+
+        let submitted_user_input = manager
+            .captured_ops()
+            .iter()
+            .any(|(id, op)| *id == foreign_id && matches!(op, Op::UserInput { .. }));
+        assert_eq!(submitted_user_input, false);
+
+        let _ = foreign_thread
+            .thread
+            .submit(Op::Shutdown {})
+            .await
+            .expect("cleanup shutdown should submit");
+    }
+
+    #[tokio::test]
     async fn send_input_interrupts_before_prompt() {
         let (mut session, turn) = make_session_and_context().await;
         let manager = thread_manager();
         session.services.agent_control = manager.agent_control();
-        let config = turn.config.as_ref().clone();
-        let thread = manager.start_thread(config).await.expect("start thread");
-        let agent_id = thread.thread_id;
+        let agent_id = spawn_managed_agent_for_test(&session, &turn).await;
         let invocation = invocation(
             Arc::new(session),
             Arc::new(turn),
@@ -1509,13 +1595,14 @@ mod tests {
             .iter()
             .filter_map(|(id, op)| (*id == agent_id).then_some(op))
             .collect();
-        assert_eq!(ops_for_agent.len(), 2);
-        assert!(matches!(ops_for_agent[0], Op::Interrupt));
-        assert!(matches!(ops_for_agent[1], Op::UserInput { .. }));
+        assert!(ops_for_agent.len() >= 2);
+        let tail = &ops_for_agent[ops_for_agent.len() - 2..];
+        assert!(matches!(tail[0], Op::Interrupt));
+        assert!(matches!(tail[1], Op::UserInput { .. }));
 
-        let _ = thread
-            .thread
-            .submit(Op::Shutdown {})
+        let _ = manager
+            .agent_control()
+            .shutdown_agent(agent_id)
             .await
             .expect("shutdown should submit");
     }
@@ -1525,9 +1612,7 @@ mod tests {
         let (mut session, turn) = make_session_and_context().await;
         let manager = thread_manager();
         session.services.agent_control = manager.agent_control();
-        let config = turn.config.as_ref().clone();
-        let thread = manager.start_thread(config).await.expect("start thread");
-        let agent_id = thread.thread_id;
+        let agent_id = spawn_managed_agent_for_test(&session, &turn).await;
         let invocation = invocation(
             Arc::new(session),
             Arc::new(turn),
@@ -1564,9 +1649,9 @@ mod tests {
             .find(|(id, op)| *id == agent_id && *op == expected);
         assert_eq!(captured, Some((agent_id, expected)));
 
-        let _ = thread
-            .thread
-            .submit(Op::Shutdown {})
+        let _ = manager
+            .agent_control()
+            .shutdown_agent(agent_id)
             .await
             .expect("shutdown should submit");
     }
@@ -1611,13 +1696,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_agent_rejects_foreign_live_thread_outside_session_scope() {
+        let (mut session, turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+        let foreign_thread = manager
+            .start_thread(turn.config.as_ref().clone())
+            .await
+            .expect("foreign root thread should start");
+        let foreign_id = foreign_thread.thread_id;
+        let invocation = invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "resume_agent",
+            function_payload(json!({"id": foreign_id.to_string()})),
+        );
+        let Err(err) = MultiAgentHandler.handle(invocation).await else {
+            panic!("foreign live thread should be rejected");
+        };
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(format!(
+                "agent with id {foreign_id} is outside the current session scope"
+            ))
+        );
+
+        let _ = foreign_thread
+            .thread
+            .submit(Op::Shutdown {})
+            .await
+            .expect("cleanup shutdown should submit");
+    }
+
+    #[tokio::test]
+    async fn resume_agent_rejects_foreign_not_found_thread_even_with_materialized_rollout() {
+        let (mut session, turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+        let foreign_thread = manager
+            .start_thread(turn.config.as_ref().clone())
+            .await
+            .expect("foreign root thread should start");
+        let foreign_id = foreign_thread.thread_id;
+        foreign_thread
+            .thread
+            .codex
+            .session
+            .ensure_rollout_materialized()
+            .await;
+        foreign_thread.thread.codex.session.flush_rollout().await;
+        let _ = manager
+            .agent_control()
+            .shutdown_agent(foreign_id)
+            .await
+            .expect("shutdown should succeed");
+        assert_eq!(
+            manager.agent_control().get_status(foreign_id).await,
+            AgentStatus::NotFound
+        );
+
+        let invocation = invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "resume_agent",
+            function_payload(json!({"id": foreign_id.to_string()})),
+        );
+        let Err(err) = MultiAgentHandler.handle(invocation).await else {
+            panic!("foreign not-found thread should be rejected");
+        };
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(format!("agent with id {foreign_id} not found"))
+        );
+    }
+
+    #[tokio::test]
     async fn resume_agent_noops_for_active_agent() {
         let (mut session, turn) = make_session_and_context().await;
         let manager = thread_manager();
         session.services.agent_control = manager.agent_control();
-        let config = turn.config.as_ref().clone();
-        let thread = manager.start_thread(config).await.expect("start thread");
-        let agent_id = thread.thread_id;
+        let agent_id = spawn_managed_agent_for_test(&session, &turn).await;
         let status_before = manager.agent_control().get_status(agent_id).await;
         let invocation = invocation(
             Arc::new(session),
@@ -1646,9 +1804,9 @@ mod tests {
         let thread_ids = manager.list_thread_ids().await;
         assert_eq!(thread_ids, vec![agent_id]);
 
-        let _ = thread
-            .thread
-            .submit(Op::Shutdown {})
+        let _ = manager
+            .agent_control()
+            .shutdown_agent(agent_id)
             .await
             .expect("shutdown should submit");
     }
@@ -1658,25 +1816,13 @@ mod tests {
         let (mut session, turn) = make_session_and_context().await;
         let manager = thread_manager();
         session.services.agent_control = manager.agent_control();
-        let config = turn.config.as_ref().clone();
+        let agent_id = spawn_managed_agent_for_test(&session, &turn).await;
         let thread = manager
-            .resume_thread_with_history(
-                config,
-                InitialHistory::Forked(vec![RolloutItem::ResponseItem(ResponseItem::Message {
-                    id: None,
-                    role: "user".to_string(),
-                    content: vec![ContentItem::InputText {
-                        text: "materialized".to_string(),
-                    }],
-                    end_turn: None,
-                    phase: None,
-                })]),
-                AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
-                false,
-            )
+            .get_thread(agent_id)
             .await
-            .expect("start thread");
-        let agent_id = thread.thread_id;
+            .expect("managed agent thread should exist");
+        thread.codex.session.ensure_rollout_materialized().await;
+        thread.codex.session.flush_rollout().await;
         let _ = manager
             .agent_control()
             .shutdown_agent(agent_id)
@@ -1817,6 +1963,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wait_rejects_foreign_live_thread_outside_session_scope() {
+        let (mut session, turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+        let foreign_thread = manager
+            .start_thread(turn.config.as_ref().clone())
+            .await
+            .expect("foreign root thread should start");
+        let foreign_id = foreign_thread.thread_id;
+
+        let invocation = invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "wait",
+            function_payload(json!({
+                "ids": [foreign_id.to_string()],
+                "timeout_ms": 10000
+            })),
+        );
+        let Err(err) = MultiAgentHandler.handle(invocation).await else {
+            panic!("foreign live thread should be rejected");
+        };
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(format!(
+                "agent with id {foreign_id} is outside the current session scope"
+            ))
+        );
+
+        let _ = foreign_thread
+            .thread
+            .submit(Op::Shutdown {})
+            .await
+            .expect("cleanup shutdown should submit");
+    }
+
+    #[tokio::test]
     async fn wait_rejects_empty_ids() {
         let (session, turn) = make_session_and_context().await;
         let invocation = invocation(
@@ -1882,9 +2065,7 @@ mod tests {
         let (mut session, turn) = make_session_and_context().await;
         let manager = thread_manager();
         session.services.agent_control = manager.agent_control();
-        let config = turn.config.as_ref().clone();
-        let thread = manager.start_thread(config).await.expect("start thread");
-        let agent_id = thread.thread_id;
+        let agent_id = spawn_managed_idle_agent_for_test(&session, &turn).await;
         let invocation = invocation(
             Arc::new(session),
             Arc::new(turn),
@@ -1917,9 +2098,9 @@ mod tests {
         );
         assert_eq!(success, None);
 
-        let _ = thread
-            .thread
-            .submit(Op::Shutdown {})
+        let _ = manager
+            .agent_control()
+            .shutdown_agent(agent_id)
             .await
             .expect("shutdown should submit");
     }
@@ -1929,9 +2110,7 @@ mod tests {
         let (mut session, turn) = make_session_and_context().await;
         let manager = thread_manager();
         session.services.agent_control = manager.agent_control();
-        let config = turn.config.as_ref().clone();
-        let thread = manager.start_thread(config).await.expect("start thread");
-        let agent_id = thread.thread_id;
+        let agent_id = spawn_managed_idle_agent_for_test(&session, &turn).await;
         let invocation = invocation(
             Arc::new(session),
             Arc::new(turn),
@@ -1952,9 +2131,9 @@ mod tests {
             "wait should not return before the minimum timeout clamp"
         );
 
-        let _ = thread
-            .thread
-            .submit(Op::Shutdown {})
+        let _ = manager
+            .agent_control()
+            .shutdown_agent(agent_id)
             .await
             .expect("shutdown should submit");
     }
@@ -1964,23 +2143,21 @@ mod tests {
         let (mut session, turn) = make_session_and_context().await;
         let manager = thread_manager();
         session.services.agent_control = manager.agent_control();
-        let config = turn.config.as_ref().clone();
-        let thread = manager.start_thread(config).await.expect("start thread");
-        let agent_id = thread.thread_id;
+        let agent_id = spawn_managed_agent_for_test(&session, &turn).await;
         let mut status_rx = manager
             .agent_control()
             .subscribe_status(agent_id)
             .await
             .expect("subscribe should succeed");
 
-        let _ = thread
-            .thread
-            .submit(Op::Shutdown {})
+        let _ = manager
+            .agent_control()
+            .shutdown_agent(agent_id)
             .await
             .expect("shutdown should submit");
         let _ = timeout(Duration::from_secs(1), status_rx.changed())
             .await
-            .expect("shutdown status should arrive");
+            .expect("status update should arrive");
 
         let invocation = invocation(
             Arc::new(session),
@@ -2005,13 +2182,12 @@ mod tests {
         };
         let result: wait::WaitResult =
             serde_json::from_str(&content).expect("wait result should be json");
-        assert_eq!(
-            result,
-            wait::WaitResult {
-                status: HashMap::from([(agent_id, AgentStatus::Shutdown)]),
-                timed_out: false
-            }
-        );
+        let status = result
+            .status
+            .get(&agent_id)
+            .expect("wait result should include target agent");
+        assert!(crate::agent::status::is_final(status));
+        assert_eq!(result.timed_out, false);
         assert_eq!(success, None);
     }
 

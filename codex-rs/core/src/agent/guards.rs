@@ -26,6 +26,7 @@ pub(crate) struct Guards {
 #[derive(Default)]
 struct ActiveAgents {
     threads_set: HashSet<ThreadId>,
+    known_threads_set: HashSet<ThreadId>,
     thread_agent_nicknames: HashMap<ThreadId, String>,
     used_agent_nicknames: HashSet<String>,
     nickname_reset_count: usize,
@@ -52,6 +53,14 @@ impl Guards {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .threads_set
+            .contains(&thread_id)
+    }
+
+    pub(crate) fn has_known_thread(&self, thread_id: ThreadId) -> bool {
+        self.active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .known_threads_set
             .contains(&thread_id)
     }
 
@@ -94,6 +103,7 @@ impl Guards {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         active_agents.threads_set.insert(thread_id);
+        active_agents.known_threads_set.insert(thread_id);
         if let Some(agent_nickname) = agent_nickname {
             active_agents
                 .used_agent_nicknames
@@ -324,6 +334,20 @@ mod tests {
             .reserve_spawn_slot(Some(1))
             .expect("slot released after second thread removal");
         drop(reservation);
+    }
+
+    #[test]
+    fn known_thread_persists_after_release() {
+        let guards = Arc::new(Guards::default());
+        let reservation = guards.reserve_spawn_slot(Some(1)).expect("reserve slot");
+        let thread_id = ThreadId::new();
+        reservation.commit(thread_id);
+        assert_eq!(guards.has_spawned_thread(thread_id), true);
+        assert_eq!(guards.has_known_thread(thread_id), true);
+
+        guards.release_spawned_thread(thread_id);
+        assert_eq!(guards.has_spawned_thread(thread_id), false);
+        assert_eq!(guards.has_known_thread(thread_id), true);
     }
 
     #[test]
