@@ -94,19 +94,31 @@ pub enum HookAction {
         show: NeroHookMsgShow,
         #[serde(default, deserialize_with = "deserialize_u64_or_default")]
         freq: u64,
-        #[serde(default, deserialize_with = "deserialize_nero_hook_msg_format_or_default")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_nero_hook_msg_format_or_default"
+        )]
         format: NeroHookMsgFormat,
-        #[serde(default, deserialize_with = "deserialize_optional_nero_hook_msg_status_lossy")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_nero_hook_msg_status_lossy"
+        )]
         status: Option<NeroHookMsgStatus>,
         msg: NeroHookMsgContent,
     },
-    VisibleNote { message: String },
-    ContextNote { message: String },
+    VisibleNote {
+        message: String,
+    },
+    ContextNote {
+        message: String,
+    },
     DualNote {
         tui_message: String,
         agent_message: String,
     },
-    AutoUserReply { message: String },
+    AutoUserReply {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -121,7 +133,9 @@ struct HookActionEnvelope {
     actions: Vec<serde_json::Value>,
 }
 
-pub fn parse_hook_actions_from_stdout(stdout: &str) -> Result<ParsedHookActions, serde_json::Error> {
+pub fn parse_hook_actions_from_stdout(
+    stdout: &str,
+) -> Result<ParsedHookActions, serde_json::Error> {
     let trimmed = stdout.trim();
     if trimmed.is_empty() {
         return Ok(ParsedHookActions::default());

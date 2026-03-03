@@ -59,9 +59,9 @@ use crate::util::error_or_panic;
 use crate::ws_version_from_features;
 use async_channel::Receiver;
 use async_channel::Sender;
+use codex_hooks::HookAction;
 use codex_hooks::HookEvent;
 use codex_hooks::HookEventAfterAgent;
-use codex_hooks::HookAction;
 use codex_hooks::HookPayload;
 use codex_hooks::HookResult;
 use codex_hooks::Hooks;
@@ -272,9 +272,9 @@ use crate::unified_exec::UnifiedExecProcessManager;
 use crate::util::backoff;
 use crate::windows_sandbox::WindowsSandboxLevelExt;
 use codex_async_utils::OrCancelExt;
+use codex_hooks::NeroHookMsgMode;
 use codex_otel::OtelManager;
 use codex_otel::TelemetryAuthMode;
-use codex_hooks::NeroHookMsgMode;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
@@ -1733,8 +1733,7 @@ impl Session {
         if cleared_markers > 0 {
             debug!(
                 generation_epoch = next_epoch,
-                cleared_markers,
-                "cleared hook terminal markers for new user submission generation"
+                cleared_markers, "cleared hook terminal markers for new user submission generation"
             );
         }
         next_epoch
@@ -1808,7 +1807,10 @@ impl Session {
     }
 
     async fn clear_turn_terminal_marker(&self, turn_id: &str) {
-        self.hook_seen_terminal_turn_ids.lock().await.remove(turn_id);
+        self.hook_seen_terminal_turn_ids
+            .lock()
+            .await
+            .remove(turn_id);
     }
 
     fn try_reserve_hook_auto_reply_chain_slot(&self) -> Option<(u32, u64)> {
@@ -1855,7 +1857,12 @@ impl Session {
         ids.remove(submission_id)
     }
 
-    fn spawn_deferred_auto_user_reply(self: &Arc<Self>, source_turn_id: String, hook_name: String, text: String) {
+    fn spawn_deferred_auto_user_reply(
+        self: &Arc<Self>,
+        source_turn_id: String,
+        hook_name: String,
+        text: String,
+    ) {
         let Some((chain_depth, reservation_epoch)) = self.try_reserve_hook_auto_reply_chain_slot()
         else {
             info!(
@@ -3501,7 +3508,9 @@ impl Session {
     }
 
     pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) {
-        let contains_compaction = items.iter().any(|item| matches!(item, RolloutItem::Compacted(_)));
+        let contains_compaction = items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::Compacted(_)));
         let recorder = {
             let guard = self.services.rollout.lock().await;
             guard.clone()
@@ -5541,23 +5550,23 @@ pub(crate) async fn run_turn(
                                         status,
                                         msg,
                                     } => {
-                                        if let Some(remaining) = sess.nero_hook_msg_throttle_remaining(
-                                            &hook_name,
-                                            &mode,
-                                            &format,
-                                            show.agent,
-                                            show.tui,
-                                            &msg.full,
-                                            &msg.short,
-                                            status.as_ref(),
-                                            freq,
-                                        ) {
+                                        if let Some(remaining) = sess
+                                            .nero_hook_msg_throttle_remaining(
+                                                &hook_name,
+                                                &mode,
+                                                &format,
+                                                show.agent,
+                                                show.tui,
+                                                &msg.full,
+                                                &msg.short,
+                                                status.as_ref(),
+                                                freq,
+                                            )
+                                        {
                                             if show.tui {
                                                 let remaining_secs =
                                                     nero_hook_msg_remaining_secs_ceil(remaining);
-                                                let content = format!(
-                                                    "throttled (freq={freq}s)"
-                                                );
+                                                let content = format!("throttled (freq={freq}s)");
                                                 let countdown =
                                                     format!("next update in {remaining_secs}s");
                                                 let message = nero_hook_tui_warning_message(
@@ -5661,7 +5670,8 @@ pub(crate) async fn run_turn(
                                         tui_message,
                                         agent_message,
                                     } => {
-                                        let tui_message = if tui_message.starts_with("[nero-hook]") {
+                                        let tui_message = if tui_message.starts_with("[nero-hook]")
+                                        {
                                             tui_message
                                         } else {
                                             format!("[nero-hook] {tui_message}")
@@ -5673,7 +5683,8 @@ pub(crate) async fn run_turn(
                                             }),
                                         )
                                         .await;
-                                        let agent_text = if agent_message.starts_with("[nero-hook]") {
+                                        let agent_text = if agent_message.starts_with("[nero-hook]")
+                                        {
                                             agent_message
                                         } else {
                                             format!("[nero-hook] {agent_message}")
@@ -5697,7 +5708,8 @@ pub(crate) async fn run_turn(
                                             hook_name = %hook_name,
                                             "queued deferred auto_user_reply from hook"
                                         );
-                                        deferred_auto_user_replies.push((hook_name.clone(), message));
+                                        deferred_auto_user_replies
+                                            .push((hook_name.clone(), message));
                                     }
                                 }
                             }
@@ -9995,7 +10007,10 @@ mod tests {
             None,
             120,
         );
-        assert!(remaining.is_some(), "second immediate emit should be throttled");
+        assert!(
+            remaining.is_some(),
+            "second immediate emit should be throttled"
+        );
 
         sess.reset_nero_hook_msg_throttle();
 

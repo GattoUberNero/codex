@@ -9,8 +9,8 @@ use tracing::debug;
 use tracing::warn;
 
 use crate::Hook;
-use crate::HookExecution;
 use crate::HookEvent;
+use crate::HookExecution;
 use crate::HookPayload;
 use crate::HookResult;
 use crate::command_from_argv;
@@ -85,9 +85,7 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
 
                 // Backwards-compat payload shape is preserved (argv + JSON arg).
                 // We await completion so hooks can optionally emit JSON actions on stdout.
-                command
-                    .stdin(Stdio::null())
-                    .stderr(Stdio::null());
+                command.stdin(Stdio::null()).stderr(Stdio::null());
 
                 command.stdout(Stdio::piped());
 
@@ -129,7 +127,8 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                         }
                         warn!(
                             timeout_ms = LEGACY_NOTIFY_TIMEOUT.as_millis() as u64,
-                            kill_reap_timeout_ms = LEGACY_NOTIFY_KILL_REAP_TIMEOUT.as_millis() as u64,
+                            kill_reap_timeout_ms =
+                                LEGACY_NOTIFY_KILL_REAP_TIMEOUT.as_millis() as u64,
                             "legacy_notify hook timed out; attempted to kill/reap direct child and continuing without actions"
                         );
                         return HookExecution {

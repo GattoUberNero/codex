@@ -6,14 +6,14 @@ use std::time::Duration;
 use anyhow::Result;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SandboxPolicy;
-use codex_protocol::protocol::EventMsg;
 use codex_protocol::user_input::UserInput;
+use core_test_support::fs_wait;
 use core_test_support::responses;
 use core_test_support::test_codex::TestCodexHarness;
 use core_test_support::wait_for_event;
-use core_test_support::fs_wait;
 use tempfile::TempDir;
 use tracing_subscriber::EnvFilter;
 
@@ -105,24 +105,28 @@ async fn after_agent_visible_note_emits_warning_and_turn_completes() -> Result<(
     submit_user_turn_no_wait(&test, "hello").await?;
     fs_wait::wait_for_path_exists(&marker, Duration::from_secs(5)).await?;
 
-    let warning = wait_for_event(&test.test().codex, |ev| {
-        matches!(ev, EventMsg::Warning(w) if w.message.contains("[nero-hook] e2e visible"))
-    })
+    let warning = wait_for_event(
+        &test.test().codex,
+        |ev| matches!(ev, EventMsg::Warning(w) if w.message.contains("[nero-hook] e2e visible")),
+    )
     .await;
     assert!(
         matches!(warning, EventMsg::Warning(_)),
         "expected [nero-hook] visible_note warning"
     );
 
-    let complete = wait_for_event(&test.test().codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    let complete = wait_for_event(&test.test().codex, |ev| {
+        matches!(ev, EventMsg::TurnComplete(_))
+    })
+    .await;
     assert!(matches!(complete, EventMsg::TurnComplete(_)));
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn after_agent_nero_hook_msg_block_status_emits_structured_warning_and_turn_completes(
-) -> Result<()> {
+async fn after_agent_nero_hook_msg_block_status_emits_structured_warning_and_turn_completes()
+-> Result<()> {
     init_test_tracing();
     if skip_if_no_linux_sandbox_bin() {
         return Ok(());
@@ -161,7 +165,10 @@ async fn after_agent_nero_hook_msg_block_status_emits_structured_warning_and_tur
         "expected structured [nero-hook] warning with content+status"
     );
 
-    let complete = wait_for_event(&test.test().codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    let complete = wait_for_event(&test.test().codex, |ev| {
+        matches!(ev, EventMsg::TurnComplete(_))
+    })
+    .await;
     assert!(matches!(complete, EventMsg::TurnComplete(_)));
 
     Ok(())
@@ -193,7 +200,10 @@ printf '%s' 'legacy-notifier-ok'
 
     submit_user_turn_no_wait(&test, "hello legacy").await?;
 
-    let _complete = wait_for_event(&test.test().codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    let _complete = wait_for_event(&test.test().codex, |ev| {
+        matches!(ev, EventMsg::TurnComplete(_))
+    })
+    .await;
 
     // No extra warning expected for plain legacy stdout actions path.
     let warning = tokio::time::timeout(
@@ -201,7 +211,10 @@ printf '%s' 'legacy-notifier-ok'
         wait_for_event(&test.test().codex, |ev| matches!(ev, EventMsg::Warning(_))),
     )
     .await;
-    assert!(warning.is_err(), "did not expect hook warning for legacy stdout");
+    assert!(
+        warning.is_err(),
+        "did not expect hook warning for legacy stdout"
+    );
     Ok(())
 }
 
@@ -230,7 +243,10 @@ printf '%s' '{not-json'
     .await;
 
     submit_user_turn_no_wait(&test, "hello garbage").await?;
-    let _complete = wait_for_event(&test.test().codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    let _complete = wait_for_event(&test.test().codex, |ev| {
+        matches!(ev, EventMsg::TurnComplete(_))
+    })
+    .await;
     Ok(())
 }
 
@@ -261,24 +277,32 @@ async fn after_agent_both_actions_can_trigger_follow_up_turn_without_manual_inpu
     .await;
     responses::mount_sse_once(
         test.server(),
-        sse(vec![ev_assistant_message("m2", "Done 2"), ev_completed("r2")]),
+        sse(vec![
+            ev_assistant_message("m2", "Done 2"),
+            ev_completed("r2"),
+        ]),
     )
     .await;
 
     submit_user_turn_no_wait(&test, "hello both").await?;
     fs_wait::wait_for_path_exists(&marker, Duration::from_secs(5)).await?;
 
-    let warning = wait_for_event(&test.test().codex, |ev| {
-        matches!(ev, EventMsg::Warning(w) if w.message.contains("[nero-hook] e2e both"))
-    })
+    let warning = wait_for_event(
+        &test.test().codex,
+        |ev| matches!(ev, EventMsg::Warning(w) if w.message.contains("[nero-hook] e2e both")),
+    )
     .await;
     assert!(matches!(warning, EventMsg::Warning(_)));
 
-    let _first_complete =
-        wait_for_event(&test.test().codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    let _first_complete = wait_for_event(&test.test().codex, |ev| {
+        matches!(ev, EventMsg::TurnComplete(_))
+    })
+    .await;
     let second_complete = tokio::time::timeout(
         Duration::from_secs(5),
-        wait_for_event(&test.test().codex, |ev| matches!(ev, EventMsg::TurnComplete(_))),
+        wait_for_event(&test.test().codex, |ev| {
+            matches!(ev, EventMsg::TurnComplete(_))
+        }),
     )
     .await;
     assert!(
@@ -289,8 +313,8 @@ async fn after_agent_both_actions_can_trigger_follow_up_turn_without_manual_inpu
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn after_agent_auto_user_reply_only_can_trigger_follow_up_turn_without_manual_input(
-) -> Result<()> {
+async fn after_agent_auto_user_reply_only_can_trigger_follow_up_turn_without_manual_input()
+-> Result<()> {
     init_test_tracing();
     if skip_if_no_linux_sandbox_bin() {
         return Ok(());
@@ -316,18 +340,25 @@ async fn after_agent_auto_user_reply_only_can_trigger_follow_up_turn_without_man
     .await;
     responses::mount_sse_once(
         test.server(),
-        sse(vec![ev_assistant_message("m2", "Done 2"), ev_completed("r2")]),
+        sse(vec![
+            ev_assistant_message("m2", "Done 2"),
+            ev_completed("r2"),
+        ]),
     )
     .await;
 
     submit_user_turn_no_wait(&test, "hello auto").await?;
     fs_wait::wait_for_path_exists(&marker, Duration::from_secs(5)).await?;
 
-    let _first_complete =
-        wait_for_event(&test.test().codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    let _first_complete = wait_for_event(&test.test().codex, |ev| {
+        matches!(ev, EventMsg::TurnComplete(_))
+    })
+    .await;
     let second_complete = tokio::time::timeout(
         Duration::from_secs(5),
-        wait_for_event(&test.test().codex, |ev| matches!(ev, EventMsg::TurnComplete(_))),
+        wait_for_event(&test.test().codex, |ev| {
+            matches!(ev, EventMsg::TurnComplete(_))
+        }),
     )
     .await;
     assert!(

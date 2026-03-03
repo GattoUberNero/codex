@@ -121,13 +121,13 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
+    use crate::HookAction;
     use crate::types::HookEventAfterAgent;
-    use crate::types::HookExecution;
     use crate::types::HookEventAfterToolUse;
+    use crate::types::HookExecution;
     use crate::types::HookResult;
     use crate::types::HookToolInput;
     use crate::types::HookToolKind;
-    use crate::HookAction;
 
     const CWD: &str = "/tmp";
     const INPUT_MESSAGE: &str = "hello";

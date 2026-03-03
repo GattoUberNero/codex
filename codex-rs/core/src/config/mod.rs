@@ -695,6 +695,52 @@ pub(crate) fn deserialize_config_toml_with_base(
 
 const CODEXN_CONFIG_NERO_PATH_ENV: &str = "CODEXN_CONFIG_NERO_PATH";
 
+fn codexn_fork_main_agent_developer_instructions(extra_toml: &TomlValue) -> Option<String> {
+    let root = extra_toml.as_table()?;
+    let nero = root.get("nero")?.as_table()?;
+
+    // Canonical fork key: [nero.main_agent].developer_instructions
+    // Backward-compatible alias: [nero.agent].developer_instructions
+    for section in ["main_agent", "agent"] {
+        let Some(agent_table) = nero.get(section).and_then(TomlValue::as_table) else {
+            continue;
+        };
+
+        if let Some(value) = agent_table
+            .get("developer_instructions")
+            .and_then(TomlValue::as_str)
+        {
+            return Some(value.to_string());
+        }
+
+        if let Some(value) = agent_table
+            .get("developer_instruction")
+            .and_then(TomlValue::as_str)
+        {
+            return Some(value.to_string());
+        }
+    }
+
+    None
+}
+
+fn apply_codexn_fork_overrides(extra_toml: &mut TomlValue) {
+    let Some(override_instructions) = codexn_fork_main_agent_developer_instructions(extra_toml)
+    else {
+        return;
+    };
+    let Some(root) = extra_toml.as_table_mut() else {
+        return;
+    };
+
+    // Fork-scoped main-agent override is promoted to the standard root
+    // developer_instructions field before merge.
+    root.insert(
+        "developer_instructions".to_string(),
+        TomlValue::String(override_instructions),
+    );
+}
+
 fn merge_codexn_extra_config_from_env(merged_toml: &mut TomlValue) -> std::io::Result<()> {
     let Some(extra_path) = std::env::var_os(CODEXN_CONFIG_NERO_PATH_ENV).map(PathBuf::from) else {
         return Ok(());
@@ -718,7 +764,7 @@ fn merge_codexn_extra_config_from_env(merged_toml: &mut TomlValue) -> std::io::R
         )
     })?;
 
-    let extra_toml: TomlValue = toml::from_str(&extra_contents).map_err(|err| {
+    let mut extra_toml: TomlValue = toml::from_str(&extra_contents).map_err(|err| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
@@ -727,6 +773,7 @@ fn merge_codexn_extra_config_from_env(merged_toml: &mut TomlValue) -> std::io::R
             ),
         )
     })?;
+    apply_codexn_fork_overrides(&mut extra_toml);
 
     tracing::debug!(
         path = %extra_path.display(),
@@ -2551,6 +2598,70 @@ phase_2_model = "gpt-5"
                 phase_1_model: Some("gpt-5-mini".to_string()),
                 phase_2_model: Some("gpt-5".to_string()),
             }
+        );
+    }
+
+    #[test]
+    fn codexn_fork_main_agent_override_promotes_to_root_developer_instructions() {
+        let mut extra_toml: TomlValue = toml::from_str(
+            r#"
+                developer_instructions = "root instructions"
+                [nero.main_agent]
+                developer_instructions = "fork main instructions"
+            "#,
+        )
+        .expect("parse extra toml");
+
+        apply_codexn_fork_overrides(&mut extra_toml);
+
+        assert_eq!(
+            extra_toml
+                .as_table()
+                .and_then(|t| t.get("developer_instructions"))
+                .and_then(TomlValue::as_str),
+            Some("fork main instructions")
+        );
+    }
+
+    #[test]
+    fn codexn_fork_agent_alias_promotes_to_root_developer_instructions() {
+        let mut extra_toml: TomlValue = toml::from_str(
+            r#"
+                [nero.agent]
+                developer_instructions = "fork alias instructions"
+            "#,
+        )
+        .expect("parse extra toml");
+
+        apply_codexn_fork_overrides(&mut extra_toml);
+
+        assert_eq!(
+            extra_toml
+                .as_table()
+                .and_then(|t| t.get("developer_instructions"))
+                .and_then(TomlValue::as_str),
+            Some("fork alias instructions")
+        );
+    }
+
+    #[test]
+    fn codexn_fork_override_uses_singular_alias_when_present() {
+        let mut extra_toml: TomlValue = toml::from_str(
+            r#"
+                [nero.main_agent]
+                developer_instruction = "singular alias"
+            "#,
+        )
+        .expect("parse extra toml");
+
+        apply_codexn_fork_overrides(&mut extra_toml);
+
+        assert_eq!(
+            extra_toml
+                .as_table()
+                .and_then(|t| t.get("developer_instructions"))
+                .and_then(TomlValue::as_str),
+            Some("singular alias")
         );
     }
 

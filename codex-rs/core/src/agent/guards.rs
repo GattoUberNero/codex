@@ -47,6 +47,14 @@ pub(crate) fn exceeds_thread_spawn_depth_limit(depth: i32, max_depth: i32) -> bo
 }
 
 impl Guards {
+    pub(crate) fn has_spawned_thread(&self, thread_id: ThreadId) -> bool {
+        self.active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .threads_set
+            .contains(&thread_id)
+    }
+
     pub(crate) fn reserve_spawn_slot(
         self: &Arc<Self>,
         max_threads: Option<usize>,
