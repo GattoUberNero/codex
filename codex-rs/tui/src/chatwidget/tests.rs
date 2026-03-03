@@ -1737,6 +1737,8 @@ async fn make_chatwidget_manual(
         external_editor_state: ExternalEditorState::Closed,
         realtime_conversation: RealtimeConversationUiState::default(),
         last_rendered_user_message_event: None,
+        last_nero_auto_hotkey_action: None,
+        last_nero_auto_hotkey_at: None,
     };
     widget.set_model(&resolved_model);
     (widget, rx, op_rx)
@@ -4274,6 +4276,262 @@ async fn collab_mode_shift_tab_cycles_only_when_idle() {
     let before = chat.active_collaboration_mode_kind();
     chat.handle_key_event(KeyEvent::from(KeyCode::BackTab));
     assert_eq!(chat.active_collaboration_mode_kind(), before);
+}
+
+#[tokio::test]
+async fn nero_auto_hotkey_toggle_writes_config_and_reports_state() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    let tmp = tempdir().expect("tempdir");
+    chat.config.codex_home = tmp.path().to_path_buf();
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('~'), KeyModifiers::SHIFT));
+
+    let messages = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines.as_slice()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        messages.contains("Nero-auto ON"),
+        "expected toggle confirmation message, got: {messages:?}"
+    );
+    assert!(
+        messages.contains("diff-check=5"),
+        "expected diff-check in status message, got: {messages:?}"
+    );
+
+    let cfg_path = nero_auto_config_path(&chat.config.codex_home);
+    let raw = std::fs::read_to_string(&cfg_path).expect("read config file");
+    let parsed = toml::from_str::<TomlValue>(&raw).expect("parse config");
+    let enabled = parsed
+        .get("nero")
+        .and_then(|v| v.get("hook"))
+        .and_then(|v| v.get("runtime"))
+        .and_then(|v| v.get("auto"))
+        .and_then(|v| v.get("enabled"))
+        .and_then(TomlValue::as_bool);
+    assert_eq!(enabled, Some(true));
+}
+
+#[tokio::test]
+async fn nero_auto_hotkey_toggle_debounces_duplicate_press_events() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    let tmp = tempdir().expect("tempdir");
+    chat.config.codex_home = tmp.path().to_path_buf();
+
+    let toggle = KeyEvent::new(KeyCode::Char('~'), KeyModifiers::SHIFT);
+    chat.handle_key_event(toggle);
+    // Some terminals can emit duplicate Press events for one physical keypress.
+    chat.handle_key_event(toggle);
+
+    let messages = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines.as_slice()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        messages.contains("Nero-auto ON"),
+        "expected ON confirmation message, got: {messages:?}"
+    );
+    assert!(
+        !messages.contains("Nero-auto OFF"),
+        "duplicate keypress should be debounced, got: {messages:?}"
+    );
+    assert_eq!(
+        messages.matches("Nero-auto ").count(),
+        1,
+        "expected exactly one toggle message, got: {messages:?}"
+    );
+
+    let cfg_path = nero_auto_config_path(&chat.config.codex_home);
+    let raw = std::fs::read_to_string(&cfg_path).expect("read config file");
+    let parsed = toml::from_str::<TomlValue>(&raw).expect("parse config");
+    let enabled = parsed
+        .get("nero")
+        .and_then(|v| v.get("hook"))
+        .and_then(|v| v.get("runtime"))
+        .and_then(|v| v.get("auto"))
+        .and_then(|v| v.get("enabled"))
+        .and_then(TomlValue::as_bool);
+    assert_eq!(enabled, Some(true));
+}
+
+#[tokio::test]
+async fn nero_auto_hotkeys_adjust_policy_and_respect_composer_focus() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    let tmp = tempdir().expect("tempdir");
+    chat.config.codex_home = tmp.path().to_path_buf();
+
+    // Ctrl+Shift+` -> difficulty +1
+    chat.handle_key_event(KeyEvent::new(
+        KeyCode::Char('`'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    // Alt+Shift+` -> max rounds +1
+    chat.handle_key_event(KeyEvent::new(
+        KeyCode::Char('`'),
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ));
+
+    let cfg_path = nero_auto_config_path(&chat.config.codex_home);
+    let raw = std::fs::read_to_string(&cfg_path).expect("read config file");
+    let parsed = toml::from_str::<TomlValue>(&raw).expect("parse config");
+    let auto = parsed
+        .get("nero")
+        .and_then(|v| v.get("hook"))
+        .and_then(|v| v.get("runtime"))
+        .and_then(|v| v.get("auto"))
+        .expect("auto section should exist");
+    let policy = auto.get("policy").expect("policy section should exist");
+    assert_eq!(
+        policy.get("autonomy_level").and_then(TomlValue::as_integer),
+        Some(6)
+    );
+    assert_eq!(
+        policy.get("max_auto_rounds").and_then(TomlValue::as_integer),
+        Some(8)
+    );
+
+    // With composer draft, hotkey should not be consumed (must behave like regular typing flow).
+    chat.bottom_pane
+        .set_composer_text("draft".to_string(), Vec::new(), Vec::new());
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('~'), KeyModifiers::SHIFT));
+    let raw_after = std::fs::read_to_string(&cfg_path).expect("read config file");
+    let parsed_after = toml::from_str::<TomlValue>(&raw_after).expect("parse config");
+    let policy_after = parsed_after
+        .get("nero")
+        .and_then(|v| v.get("hook"))
+        .and_then(|v| v.get("runtime"))
+        .and_then(|v| v.get("auto"))
+        .and_then(|v| v.get("policy"))
+        .expect("policy after draft");
+    assert_eq!(
+        policy_after
+            .get("autonomy_level")
+            .and_then(TomlValue::as_integer),
+        Some(6)
+    );
+}
+
+#[tokio::test]
+async fn nero_auto_hotkeys_function_key_fallbacks_work() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    let tmp = tempdir().expect("tempdir");
+    chat.config.codex_home = tmp.path().to_path_buf();
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::CONTROL));
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::CONTROL));
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::CONTROL));
+
+    let cfg_path = nero_auto_config_path(&chat.config.codex_home);
+    let raw = std::fs::read_to_string(&cfg_path).expect("read config file");
+    let parsed = toml::from_str::<TomlValue>(&raw).expect("parse config");
+    let auto = parsed
+        .get("nero")
+        .and_then(|v| v.get("hook"))
+        .and_then(|v| v.get("runtime"))
+        .and_then(|v| v.get("auto"))
+        .expect("auto section should exist");
+    let policy = auto.get("policy").expect("policy section should exist");
+
+    assert_eq!(auto.get("enabled").and_then(TomlValue::as_bool), Some(true));
+    assert_eq!(
+        policy.get("autonomy_level").and_then(TomlValue::as_integer),
+        Some(6)
+    );
+    assert_eq!(
+        policy.get("max_auto_rounds").and_then(TomlValue::as_integer),
+        Some(8)
+    );
+}
+
+#[tokio::test]
+async fn nero_auto_hotkeys_function_key_fallbacks_work_without_modifiers() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    let tmp = tempdir().expect("tempdir");
+    chat.config.codex_home = tmp.path().to_path_buf();
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+
+    let cfg_path = nero_auto_config_path(&chat.config.codex_home);
+    let raw = std::fs::read_to_string(&cfg_path).expect("read config file");
+    let parsed = toml::from_str::<TomlValue>(&raw).expect("parse config");
+    let auto = parsed
+        .get("nero")
+        .and_then(|v| v.get("hook"))
+        .and_then(|v| v.get("runtime"))
+        .and_then(|v| v.get("auto"))
+        .expect("auto section should exist");
+    let policy = auto.get("policy").expect("policy section should exist");
+
+    assert_eq!(auto.get("enabled").and_then(TomlValue::as_bool), Some(true));
+    assert_eq!(
+        policy.get("autonomy_level").and_then(TomlValue::as_integer),
+        Some(6)
+    );
+    assert_eq!(
+        policy.get("max_auto_rounds").and_then(TomlValue::as_integer),
+        Some(8)
+    );
+}
+
+#[tokio::test]
+async fn nero_auto_hotkeys_function_key_shift_supports_decrement() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    let tmp = tempdir().expect("tempdir");
+    chat.config.codex_home = tmp.path().to_path_buf();
+
+    // Increase first.
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+    // Decrease with Shift.
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT));
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::SHIFT));
+
+    let cfg_path = nero_auto_config_path(&chat.config.codex_home);
+    let raw = std::fs::read_to_string(&cfg_path).expect("read config file");
+    let parsed = toml::from_str::<TomlValue>(&raw).expect("parse config");
+    let auto = parsed
+        .get("nero")
+        .and_then(|v| v.get("hook"))
+        .and_then(|v| v.get("runtime"))
+        .and_then(|v| v.get("auto"))
+        .expect("auto section should exist");
+    let policy = auto.get("policy").expect("policy section should exist");
+
+    assert_eq!(
+        policy.get("autonomy_level").and_then(TomlValue::as_integer),
+        Some(5)
+    );
+    assert_eq!(
+        policy.get("max_auto_rounds").and_then(TomlValue::as_integer),
+        Some(7)
+    );
+}
+
+#[tokio::test]
+async fn nero_auto_hotkeys_function_key_f4_fallback_decrements_max_rounds() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    let tmp = tempdir().expect("tempdir");
+    chat.config.codex_home = tmp.path().to_path_buf();
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
+
+    let cfg_path = nero_auto_config_path(&chat.config.codex_home);
+    let raw = std::fs::read_to_string(&cfg_path).expect("read config file");
+    let parsed = toml::from_str::<TomlValue>(&raw).expect("parse config");
+    let max_auto_rounds = parsed
+        .get("nero")
+        .and_then(|v| v.get("hook"))
+        .and_then(|v| v.get("runtime"))
+        .and_then(|v| v.get("auto"))
+        .and_then(|v| v.get("policy"))
+        .and_then(|v| v.get("max_auto_rounds"))
+        .and_then(TomlValue::as_integer);
+
+    assert_eq!(max_auto_rounds, Some(6));
 }
 
 #[tokio::test]

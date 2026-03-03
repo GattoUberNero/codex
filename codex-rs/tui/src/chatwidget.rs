@@ -29,6 +29,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -48,6 +49,7 @@ use crate::status::format_tokens_compact;
 use crate::status::rate_limit_snapshot_display_for_limit;
 use crate::text_formatting::proper_join;
 use crate::version::CODEX_CLI_VERSION;
+use crate::version::codex_cli_display_version;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_backend_client::Client as BackendClient;
 use codex_chatgpt::connectors;
@@ -154,6 +156,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
+use toml::Value as TomlValue;
 use tracing::debug;
 use tracing::warn;
 
@@ -166,6 +169,34 @@ const PLAN_MODE_REASONING_SCOPE_TITLE: &str = "Apply reasoning change";
 const PLAN_MODE_REASONING_SCOPE_PLAN_ONLY: &str = "Apply to Plan mode override";
 const PLAN_MODE_REASONING_SCOPE_ALL_MODES: &str = "Apply to global default and Plan mode override";
 const CONNECTORS_SELECTION_VIEW_ID: &str = "connectors-selection";
+const NERO_AUTO_HOTKEY_CONFIG_ENV: &str = "CODEXN_CONFIG_NERO_AUTO_PATH";
+const NERO_AUTO_HOTKEY_DEBOUNCE: Duration = Duration::from_millis(180);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NeroAutoHotkeyAction {
+    ToggleEnabled,
+    IncreaseDifficulty,
+    DecreaseDifficulty,
+    CycleMaxRounds,
+    DecreaseMaxRounds,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NeroAutoRuntimeConfig {
+    enabled: bool,
+    autonomy_level: i64,
+    max_auto_rounds: i64,
+}
+
+impl Default for NeroAutoRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            autonomy_level: 5,
+            max_auto_rounds: 7,
+        }
+    }
+}
 
 /// Choose the keybinding used to edit the most-recently queued message.
 ///
@@ -192,6 +223,70 @@ fn queued_message_edit_binding_for_terminal(terminal_name: TerminalName) -> KeyB
         | TerminalName::WindowsTerminal
         | TerminalName::Dumb
         | TerminalName::Unknown => key_hint::alt(KeyCode::Up),
+    }
+}
+
+fn detect_nero_auto_hotkey_action(key_event: KeyEvent) -> Option<NeroAutoHotkeyAction> {
+    let has_ctrl = key_event.modifiers.contains(KeyModifiers::CONTROL);
+    let has_alt = key_event.modifiers.contains(KeyModifiers::ALT);
+    let has_shift = key_event.modifiers.contains(KeyModifiers::SHIFT);
+
+    // Fallback shortcuts for terminals where Ctrl+Shift+` is hard to emit.
+    // Some terminal/OS combos swallow Ctrl+Fn, so we accept Fn with:
+    // - no modifiers
+    // - Shift
+    // - Ctrl
+    // - Alt
+    // (and combinations of Shift/Ctrl/Alt)
+    let has_unsupported_modifiers = key_event.modifiers.contains(KeyModifiers::SUPER)
+        || key_event.modifiers.contains(KeyModifiers::HYPER)
+        || key_event.modifiers.contains(KeyModifiers::META);
+    let allow_f_key_fallback = !has_unsupported_modifiers;
+    if allow_f_key_fallback {
+        match key_event.code {
+            KeyCode::F(1) => return Some(NeroAutoHotkeyAction::ToggleEnabled),
+            KeyCode::F(2) => {
+                return Some(if has_shift {
+                    NeroAutoHotkeyAction::DecreaseDifficulty
+                } else {
+                    NeroAutoHotkeyAction::IncreaseDifficulty
+                });
+            }
+            KeyCode::F(3) => {
+                return Some(if has_shift {
+                    NeroAutoHotkeyAction::DecreaseMaxRounds
+                } else {
+                    NeroAutoHotkeyAction::CycleMaxRounds
+                });
+            }
+            // Terminal fallback for environments that swallow Shift+F3.
+            // F4 always means "max-rounds -".
+            KeyCode::F(4) => return Some(NeroAutoHotkeyAction::DecreaseMaxRounds),
+            // Some terminals encode Shift+F3 as F15.
+            KeyCode::F(15) => return Some(NeroAutoHotkeyAction::DecreaseMaxRounds),
+            _ => {}
+        }
+    }
+
+    let key_char = match key_event.code {
+        KeyCode::Char(c) => c,
+        _ => return None,
+    };
+    if key_char != '`' && key_char != '~' {
+        return None;
+    }
+
+    // Most terminals map Shift+` to '~'. Some only keep the base key plus SHIFT.
+    let has_shift_intent = key_event.modifiers.contains(KeyModifiers::SHIFT) || key_char == '~';
+    if !has_shift_intent {
+        return None;
+    }
+
+    match (has_ctrl, has_alt) {
+        (false, false) => Some(NeroAutoHotkeyAction::ToggleEnabled),
+        (true, false) => Some(NeroAutoHotkeyAction::IncreaseDifficulty),
+        (false, true) => Some(NeroAutoHotkeyAction::CycleMaxRounds),
+        (true, true) => None,
     }
 }
 
@@ -679,6 +774,8 @@ pub(crate) struct ChatWidget {
     external_editor_state: ExternalEditorState,
     realtime_conversation: RealtimeConversationUiState,
     last_rendered_user_message_event: Option<RenderedUserMessageEvent>,
+    last_nero_auto_hotkey_action: Option<NeroAutoHotkeyAction>,
+    last_nero_auto_hotkey_at: Option<Instant>,
 }
 
 /// Snapshot of active-cell state that affects transcript overlay rendering.
@@ -1737,7 +1834,18 @@ impl ChatWidget {
     }
 
     fn on_warning(&mut self, message: impl Into<String>) {
-        self.add_to_history(history_cell::new_warning_event(message.into()));
+        let message = message.into();
+        if message.starts_with("[nero-hook]") {
+            debug!(
+                message = %message,
+                "tui chatwidget rendering nero-hook warning into history"
+            );
+        }
+        if let Some(cell) = history_cell::try_new_nero_hook_warning_event(&message) {
+            self.add_to_history(cell);
+        } else {
+            self.add_to_history(history_cell::new_warning_event(message));
+        }
         self.request_redraw();
     }
 
@@ -2887,6 +2995,8 @@ impl ChatWidget {
             external_editor_state: ExternalEditorState::Closed,
             realtime_conversation: RealtimeConversationUiState::default(),
             last_rendered_user_message_event: None,
+            last_nero_auto_hotkey_action: None,
+            last_nero_auto_hotkey_at: None,
         };
 
         widget.prefetch_rate_limits();
@@ -3066,6 +3176,8 @@ impl ChatWidget {
             external_editor_state: ExternalEditorState::Closed,
             realtime_conversation: RealtimeConversationUiState::default(),
             last_rendered_user_message_event: None,
+            last_nero_auto_hotkey_action: None,
+            last_nero_auto_hotkey_at: None,
         };
 
         widget.prefetch_rate_limits();
@@ -3234,6 +3346,8 @@ impl ChatWidget {
             external_editor_state: ExternalEditorState::Closed,
             realtime_conversation: RealtimeConversationUiState::default(),
             last_rendered_user_message_event: None,
+            last_nero_auto_hotkey_action: None,
+            last_nero_auto_hotkey_at: None,
         };
 
         widget.prefetch_rate_limits();
@@ -3334,6 +3448,19 @@ impl ChatWidget {
                 self.restore_user_message_to_composer(user_message);
                 self.refresh_queued_user_messages();
                 self.request_redraw();
+            }
+            return;
+        }
+
+        if self.can_handle_nero_auto_hotkey()
+            && let Some(action) = detect_nero_auto_hotkey_action(key_event)
+        {
+            // Consume hotkey repeats so a held key does not toggle twice or leak
+            // literal `~` into the composer.
+            if key_event.kind == KeyEventKind::Press
+                && self.should_apply_nero_auto_hotkey_action(action)
+            {
+                self.apply_nero_auto_hotkey_action(action);
             }
             return;
         }
@@ -4360,7 +4487,16 @@ impl ChatWidget {
                 self.set_token_info(ev.info);
                 self.on_rate_limit_snapshot(ev.rate_limits);
             }
-            EventMsg::Warning(WarningEvent { message }) => self.on_warning(message),
+            EventMsg::Warning(WarningEvent { message }) => {
+                if message.starts_with("[nero-hook]") {
+                    debug!(
+                        message = %message,
+                        from_replay,
+                        "tui chatwidget received nero-hook warning event"
+                    );
+                }
+                self.on_warning(message)
+            }
             EventMsg::ModelReroute(_) => {}
             EventMsg::Error(ErrorEvent {
                 message,
@@ -4889,7 +5025,7 @@ impl ChatWidget {
                     .unwrap_or_else(|| "weekly".to_string());
                 self.status_line_limit_display(window, &label)
             }
-            StatusLineItem::CodexVersion => Some(CODEX_CLI_VERSION.to_string()),
+            StatusLineItem::CodexVersion => Some(codex_cli_display_version().to_string()),
             StatusLineItem::ContextWindowSize => self
                 .status_line_context_window_size()
                 .map(|cws| format!("{} window", format_tokens_compact(cws))),
@@ -7435,6 +7571,80 @@ impl ChatWidget {
         true
     }
 
+    fn can_handle_nero_auto_hotkey(&self) -> bool {
+        self.bottom_pane.composer_is_empty()
+            && !self.bottom_pane.is_task_running()
+            && self.bottom_pane.no_modal_or_popup_active()
+    }
+
+    fn should_apply_nero_auto_hotkey_action(&mut self, action: NeroAutoHotkeyAction) -> bool {
+        let now = Instant::now();
+        if let (Some(last_action), Some(last_at)) = (
+            self.last_nero_auto_hotkey_action,
+            self.last_nero_auto_hotkey_at,
+        ) {
+            if last_action == action && now.duration_since(last_at) < NERO_AUTO_HOTKEY_DEBOUNCE {
+                return false;
+            }
+        }
+
+        self.last_nero_auto_hotkey_action = Some(action);
+        self.last_nero_auto_hotkey_at = Some(now);
+        true
+    }
+
+    fn apply_nero_auto_hotkey_action(&mut self, action: NeroAutoHotkeyAction) {
+        let config_path = nero_auto_config_path(&self.config.codex_home);
+        match update_nero_auto_runtime_config(&config_path, action) {
+            Ok(next) => {
+                let max_rounds = if next.max_auto_rounds == 0 {
+                    "∞".to_string()
+                } else {
+                    next.max_auto_rounds.to_string()
+                };
+                let action_label = match action {
+                    NeroAutoHotkeyAction::ToggleEnabled => {
+                        format!(
+                            "Nero-auto {}",
+                            if next.enabled { "ON" } else { "OFF" }
+                        )
+                    }
+                    NeroAutoHotkeyAction::IncreaseDifficulty => {
+                        format!("Nero-auto diff-check -> {}", next.autonomy_level)
+                    }
+                    NeroAutoHotkeyAction::DecreaseDifficulty => {
+                        format!("Nero-auto diff-check -> {}", next.autonomy_level)
+                    }
+                    NeroAutoHotkeyAction::CycleMaxRounds => {
+                        format!("Nero-auto max-rounds -> {}", max_rounds)
+                    }
+                    NeroAutoHotkeyAction::DecreaseMaxRounds => {
+                        format!("Nero-auto max-rounds -> {}", max_rounds)
+                    }
+                };
+                self.add_info_message(
+                    format!(
+                        "{action_label} · state: enabled={}, diff-check={}, max-rounds={} ({})",
+                        if next.enabled { "on" } else { "off" },
+                        next.autonomy_level,
+                        max_rounds,
+                        next.max_auto_rounds
+                    ),
+                    Some(format!(
+                        "Shortcuts: F1 toggle, F2 diff+, Shift+F2 diff-, F3 max-rounds+, Shift+F3 max-rounds-, F4 max-rounds-. Legacy: Shift+` toggle, Ctrl+Shift+` diff+, Alt+Shift+` max-rounds+. Config: {}",
+                        config_path.display()
+                    )),
+                );
+            }
+            Err(err) => {
+                self.add_error_message(format!(
+                    "Failed to update nero-auto config at {}: {err}",
+                    config_path.display()
+                ));
+            }
+        }
+    }
+
     /// True if `key` matches the armed quit shortcut and the window has not expired.
     fn quit_shortcut_active_for(&self, key: KeyBinding) -> bool {
         self.quit_shortcut_key == Some(key)
@@ -8038,6 +8248,162 @@ const PLACEHOLDERS: [&str; 8] = [
     "Run /review on my current changes",
     "Use /skills to list available skills",
 ];
+
+fn nero_auto_config_path(codex_home: &Path) -> PathBuf {
+    if let Some(path) = std::env::var_os(NERO_AUTO_HOTKEY_CONFIG_ENV) {
+        PathBuf::from(path)
+    } else {
+        codex_home.join("config-nero-hook-auto.toml")
+    }
+}
+
+fn toml_bool(value: Option<&TomlValue>, default: bool) -> bool {
+    value.and_then(TomlValue::as_bool).unwrap_or(default)
+}
+
+fn toml_int(value: Option<&TomlValue>, default: i64) -> i64 {
+    value.and_then(TomlValue::as_integer).unwrap_or(default)
+}
+
+fn clamp_autonomy_level(value: i64) -> i64 {
+    value.clamp(1, 10)
+}
+
+fn clamp_max_auto_rounds(value: i64) -> i64 {
+    value.max(0)
+}
+
+fn ensure_table_mut(value: &mut TomlValue) -> &mut toml::map::Map<String, TomlValue> {
+    if !value.is_table() {
+        *value = TomlValue::Table(toml::map::Map::new());
+    }
+    value
+        .as_table_mut()
+        .expect("table expected after normalization")
+}
+
+fn ensure_nested_table_mut<'a>(
+    root: &'a mut TomlValue,
+    keys: &[&str],
+) -> &'a mut toml::map::Map<String, TomlValue> {
+    let mut table = ensure_table_mut(root);
+    for key in keys {
+        let entry = table
+            .entry((*key).to_string())
+            .or_insert_with(|| TomlValue::Table(toml::map::Map::new()));
+        if !entry.is_table() {
+            *entry = TomlValue::Table(toml::map::Map::new());
+        }
+        table = entry
+            .as_table_mut()
+            .expect("table expected after normalization");
+    }
+    table
+}
+
+fn read_nero_auto_runtime_config(doc: &TomlValue) -> NeroAutoRuntimeConfig {
+    let auto = doc
+        .get("nero")
+        .and_then(|v| v.get("hook"))
+        .and_then(|v| v.get("runtime"))
+        .and_then(|v| v.get("auto"));
+    let policy = auto.and_then(|v| v.get("policy"));
+
+    NeroAutoRuntimeConfig {
+        enabled: toml_bool(auto.and_then(|v| v.get("enabled")), NeroAutoRuntimeConfig::default().enabled),
+        autonomy_level: clamp_autonomy_level(toml_int(
+            policy.and_then(|v| v.get("autonomy_level")),
+            NeroAutoRuntimeConfig::default().autonomy_level,
+        )),
+        max_auto_rounds: clamp_max_auto_rounds(toml_int(
+            policy.and_then(|v| v.get("max_auto_rounds")),
+            NeroAutoRuntimeConfig::default().max_auto_rounds,
+        )),
+    }
+}
+
+fn bump_wrapping(value: i64, min: i64, max: i64) -> i64 {
+    if value >= max {
+        min
+    } else {
+        value + 1
+    }
+}
+
+fn bump_wrapping_down(value: i64, min: i64, max: i64) -> i64 {
+    if value <= min {
+        max
+    } else {
+        value - 1
+    }
+}
+
+fn update_nero_auto_runtime_config(
+    path: &Path,
+    action: NeroAutoHotkeyAction,
+) -> io::Result<NeroAutoRuntimeConfig> {
+    let mut doc = if path.is_file() {
+        let content = std::fs::read_to_string(path)?;
+        toml::from_str::<TomlValue>(&content).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid TOML in {}: {err}", path.display()),
+            )
+        })?
+    } else {
+        TomlValue::Table(toml::map::Map::new())
+    };
+
+    let current = read_nero_auto_runtime_config(&doc);
+    let next = match action {
+        NeroAutoHotkeyAction::ToggleEnabled => NeroAutoRuntimeConfig {
+            enabled: !current.enabled,
+            ..current
+        },
+        NeroAutoHotkeyAction::IncreaseDifficulty => NeroAutoRuntimeConfig {
+            autonomy_level: bump_wrapping(current.autonomy_level, 1, 10),
+            ..current
+        },
+        NeroAutoHotkeyAction::DecreaseDifficulty => NeroAutoRuntimeConfig {
+            autonomy_level: bump_wrapping_down(current.autonomy_level, 1, 10),
+            ..current
+        },
+        NeroAutoHotkeyAction::CycleMaxRounds => NeroAutoRuntimeConfig {
+            // 0 means unlimited by policy semantics.
+            max_auto_rounds: bump_wrapping(current.max_auto_rounds, 0, 10),
+            ..current
+        },
+        NeroAutoHotkeyAction::DecreaseMaxRounds => NeroAutoRuntimeConfig {
+            // 0 means unlimited by policy semantics.
+            max_auto_rounds: bump_wrapping_down(current.max_auto_rounds, 0, 10),
+            ..current
+        },
+    };
+
+    {
+        let auto = ensure_nested_table_mut(&mut doc, &["nero", "hook", "runtime", "auto"]);
+        auto.insert("enabled".to_string(), TomlValue::Boolean(next.enabled));
+    }
+    {
+        let policy = ensure_nested_table_mut(&mut doc, &["nero", "hook", "runtime", "auto", "policy"]);
+        policy.insert(
+            "autonomy_level".to_string(),
+            TomlValue::Integer(next.autonomy_level),
+        );
+        policy.insert(
+            "max_auto_rounds".to_string(),
+            TomlValue::Integer(next.max_auto_rounds),
+        );
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let rendered = toml::to_string_pretty(&doc)
+        .map_err(|err| io::Error::other(format!("failed to render TOML: {err}")))?;
+    std::fs::write(path, rendered)?;
+    Ok(next)
+}
 
 // Extract the first bold (Markdown) element in the form **...** from `s`.
 // Returns the inner text if found; otherwise `None`.

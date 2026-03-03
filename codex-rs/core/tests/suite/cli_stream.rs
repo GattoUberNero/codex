@@ -5,19 +5,25 @@ use codex_utils_cargo_bin::find_resource;
 use core_test_support::fs_wait;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
+use std::path::PathBuf;
 use std::time::Duration;
 use tempfile::TempDir;
 use uuid::Uuid;
 use wiremock::MockServer;
 
 fn repo_root() -> std::path::PathBuf {
-    #[expect(clippy::expect_used)]
-    codex_utils_cargo_bin::repo_root().expect("failed to resolve repo root")
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    std::fs::canonicalize(&root).unwrap_or(root)
 }
 
 fn cli_responses_fixture() -> std::path::PathBuf {
     #[expect(clippy::expect_used)]
     find_resource!("tests/cli_responses_fixture.sse").expect("failed to resolve fixture path")
+}
+
+fn codex_bin() -> PathBuf {
+    let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
+    std::fs::canonicalize(&bin).unwrap_or(bin)
 }
 
 /// Tests streaming the Responses API through the CLI using a mock server.
@@ -39,7 +45,7 @@ async fn responses_mode_stream_cli() {
         "model_providers.mock={{ name = \"mock\", base_url = \"{}/v1\", env_key = \"PATH\", wire_api = \"responses\" }}",
         server.uri()
     );
-    let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
+    let bin = codex_bin();
     let mut cmd = AssertCommand::new(bin);
     cmd.timeout(Duration::from_secs(30));
     cmd.arg("exec")
@@ -122,7 +128,7 @@ async fn exec_cli_applies_model_instructions_file() {
 
     let home = TempDir::new().unwrap();
     let repo_root = repo_root();
-    let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
+    let bin = codex_bin();
     let mut cmd = AssertCommand::new(bin);
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
@@ -174,7 +180,7 @@ async fn responses_api_stream_cli() {
     let repo_root = repo_root();
 
     let home = TempDir::new().unwrap();
-    let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
+    let bin = codex_bin();
     let mut cmd = AssertCommand::new(bin);
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
@@ -199,7 +205,7 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     // 1. Temp home so we read/write isolated session files.
-    let home = TempDir::new()?;
+    let home = TempDir::new().unwrap();
 
     // 2. Unique marker we'll look for in the session log.
     let marker = format!("integration-test-{}", Uuid::new_v4());
@@ -210,7 +216,7 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     let repo_root = repo_root();
 
     // 4. Run the codex CLI and invoke `exec`, which is what records a session.
-    let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
+    let bin = codex_bin();
     let mut cmd = AssertCommand::new(bin);
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
@@ -331,7 +337,7 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     // Second run: resume should update the existing file.
     let marker2 = format!("integration-resume-{}", Uuid::new_v4());
     let prompt2 = format!("echo {marker2}");
-    let bin2 = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
+    let bin2 = codex_bin();
     let mut cmd2 = AssertCommand::new(bin2);
     cmd2.arg("exec")
         .arg("--skip-git-repo-check")

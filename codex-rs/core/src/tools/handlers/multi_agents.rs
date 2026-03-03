@@ -675,6 +675,39 @@ pub mod close_agent {
         pub(super) status: AgentStatus,
     }
 
+    async fn ensure_close_target_allowed(
+        session: &Session,
+        agent_id: ThreadId,
+    ) -> Result<(), FunctionCallError> {
+        if agent_id == session.conversation_id {
+            return Err(FunctionCallError::RespondToModel(
+                "close_agent cannot target the current thread".to_string(),
+            ));
+        }
+
+        if session
+            .services
+            .agent_control
+            .manages_active_agent(agent_id)
+        {
+            return Ok(());
+        }
+
+        let status = session.services.agent_control.get_status(agent_id).await;
+        if matches!(status, AgentStatus::NotFound) {
+            return Ok(());
+        }
+
+        // Temporary fork safety guard:
+        // close_agent in 0.106 accepts any live ThreadId reachable via the shared manager, which
+        // lets one session close threads outside its own spawned-agent scope. Keep this patch
+        // intentionally narrow (destructive path only) and remove it once upstream ships a
+        // canonical ownership/authorization check, rather than carrying two parallel semantics.
+        Err(FunctionCallError::RespondToModel(format!(
+            "agent with id {agent_id} is outside the current session scope"
+        )))
+    }
+
     pub async fn handle(
         session: Arc<Session>,
         turn: Arc<TurnContext>,
@@ -683,6 +716,7 @@ pub mod close_agent {
     ) -> Result<ToolOutput, FunctionCallError> {
         let args: CloseAgentArgs = parse_arguments(&arguments)?;
         let agent_id = agent_id(&args.id)?;
+        ensure_close_target_allowed(session.as_ref(), agent_id).await?;
         let (receiver_agent_nickname, receiver_agent_role) = session
             .services
             .agent_control
@@ -1017,6 +1051,25 @@ mod tests {
             CodexAuth::from_api_key("dummy"),
             built_in_model_providers()["openai"].clone(),
         )
+    }
+
+    async fn spawn_managed_agent_for_test(
+        session: &crate::codex::Session,
+        turn: &TurnContext,
+    ) -> ThreadId {
+        session
+            .services
+            .agent_control
+            .spawn_agent(
+                turn.config.as_ref().clone(),
+                vec![UserInput::Text {
+                    text: "boot".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                Some(thread_spawn_source(session.conversation_id, 1, None)),
+            )
+            .await
+            .expect("managed child agent should spawn")
     }
 
     #[tokio::test]
@@ -1967,9 +2020,7 @@ mod tests {
         let (mut session, turn) = make_session_and_context().await;
         let manager = thread_manager();
         session.services.agent_control = manager.agent_control();
-        let config = turn.config.as_ref().clone();
-        let thread = manager.start_thread(config).await.expect("start thread");
-        let agent_id = thread.thread_id;
+        let agent_id = spawn_managed_agent_for_test(&session, &turn).await;
         let status_before = manager.agent_control().get_status(agent_id).await;
 
         let invocation = invocation(
@@ -2003,6 +2054,68 @@ mod tests {
 
         let status_after = manager.agent_control().get_status(agent_id).await;
         assert_eq!(status_after, AgentStatus::NotFound);
+    }
+
+    #[tokio::test]
+    async fn close_agent_rejects_self_target() {
+        let (session, turn) = make_session_and_context().await;
+        let self_id = session.conversation_id;
+        let invocation = invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "close_agent",
+            function_payload(json!({"id": self_id.to_string()})),
+        );
+        let Err(err) = MultiAgentHandler.handle(invocation).await else {
+            panic!("self-target close should be rejected");
+        };
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(
+                "close_agent cannot target the current thread".to_string()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn close_agent_rejects_foreign_live_thread_outside_session_scope() {
+        let (mut session, turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+
+        let foreign_thread = manager
+            .start_thread(turn.config.as_ref().clone())
+            .await
+            .expect("foreign root thread should start");
+        let foreign_id = foreign_thread.thread_id;
+
+        let invocation = invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "close_agent",
+            function_payload(json!({"id": foreign_id.to_string()})),
+        );
+        let Err(err) = MultiAgentHandler.handle(invocation).await else {
+            panic!("foreign live thread should be rejected");
+        };
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(format!(
+                "agent with id {foreign_id} is outside the current session scope"
+            ))
+        );
+
+        let submitted_shutdown = manager
+            .captured_ops()
+            .iter()
+            .any(|(id, op)| *id == foreign_id && matches!(op, Op::Shutdown));
+        assert_eq!(submitted_shutdown, false);
+
+        let _ = foreign_thread
+            .thread
+            .submit(Op::Shutdown {})
+            .await
+            .expect("cleanup shutdown should submit");
     }
 
     #[tokio::test]

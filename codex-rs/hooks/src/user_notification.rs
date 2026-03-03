@@ -1,13 +1,22 @@
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Serialize;
+use tokio::io::AsyncReadExt;
+use tracing::debug;
+use tracing::warn;
 
 use crate::Hook;
 use crate::HookEvent;
+use crate::HookExecution;
 use crate::HookPayload;
 use crate::HookResult;
 use crate::command_from_argv;
+use crate::parse_hook_actions_from_stdout;
+
+const LEGACY_NOTIFY_TIMEOUT: Duration = Duration::from_millis(1500);
+const LEGACY_NOTIFY_KILL_REAP_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Legacy notify payload appended as the final argv argument for backward compatibility.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -16,6 +25,8 @@ enum UserNotification {
     #[serde(rename_all = "kebab-case")]
     AgentTurnComplete {
         thread_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_name: Option<String>,
         turn_id: String,
         cwd: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -34,6 +45,7 @@ pub fn legacy_notify_json(payload: &HookPayload) -> Result<String, serde_json::E
         HookEvent::AfterAgent { event } => {
             serde_json::to_string(&UserNotification::AgentTurnComplete {
                 thread_id: event.thread_id.to_string(),
+                thread_name: event.thread_name.clone(),
                 turn_id: event.turn_id.clone(),
                 cwd: payload.cwd.display().to_string(),
                 client: payload.client.clone(),
@@ -56,21 +68,160 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
             Box::pin(async move {
                 let mut command = match command_from_argv(&argv) {
                     Some(command) => command,
-                    None => return HookResult::Success,
+                    None => {
+                        return HookExecution {
+                            result: HookResult::Success,
+                            actions: Vec::new(),
+                        };
+                    }
                 };
                 if let Ok(notify_payload) = legacy_notify_json(payload) {
                     command.arg(notify_payload);
                 }
+                debug!(
+                    hook_name = "legacy_notify",
+                    argv0 = argv.first().map(String::as_str).unwrap_or(""),
+                    argv_len = argv.len(),
+                    "spawning legacy notify hook process"
+                );
 
-                // Backwards-compat: match legacy notify behavior (argv + JSON arg, fire-and-forget).
-                command
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null());
+                // Backwards-compat payload shape is preserved (argv + JSON arg).
+                // We await completion so hooks can optionally emit JSON actions on stdout.
+                command.stdin(Stdio::null()).stderr(Stdio::null());
 
-                match command.spawn() {
-                    Ok(_) => HookResult::Success,
-                    Err(err) => HookResult::FailedContinue(err.into()),
+                command.stdout(Stdio::piped());
+
+                let mut child = match command.spawn() {
+                    Ok(child) => child,
+                    Err(err) => {
+                        return HookExecution {
+                            result: HookResult::FailedContinue(err.into()),
+                            actions: Vec::new(),
+                        };
+                    }
+                };
+
+                let stdout_task = child.stdout.take().map(|mut stdout| {
+                    tokio::spawn(async move {
+                        let mut buf = Vec::new();
+                        let _ = stdout.read_to_end(&mut buf).await;
+                        buf
+                    })
+                });
+
+                let status = match tokio::time::timeout(LEGACY_NOTIFY_TIMEOUT, child.wait()).await {
+                    Ok(Ok(status)) => status,
+                    Ok(Err(err)) => {
+                        if let Some(task) = stdout_task {
+                            task.abort();
+                        }
+                        return HookExecution {
+                            result: HookResult::FailedContinue(err.into()),
+                            actions: Vec::new(),
+                        };
+                    }
+                    Err(_) => {
+                        let _ = child.start_kill();
+                        let _ = tokio::time::timeout(LEGACY_NOTIFY_KILL_REAP_TIMEOUT, child.wait())
+                            .await;
+                        if let Some(task) = stdout_task {
+                            task.abort();
+                        }
+                        warn!(
+                            timeout_ms = LEGACY_NOTIFY_TIMEOUT.as_millis() as u64,
+                            kill_reap_timeout_ms =
+                                LEGACY_NOTIFY_KILL_REAP_TIMEOUT.as_millis() as u64,
+                            "legacy_notify hook timed out; attempted to kill/reap direct child and continuing without actions"
+                        );
+                        return HookExecution {
+                            result: HookResult::Success,
+                            actions: Vec::new(),
+                        };
+                    }
+                };
+
+                let stdout_bytes = match stdout_task {
+                    Some(task) => {
+                        let mut task = task;
+                        match tokio::time::timeout(LEGACY_NOTIFY_TIMEOUT, &mut task).await {
+                            Ok(Ok(buf)) => buf,
+                            Ok(Err(_join_err)) => Vec::new(),
+                            Err(_) => {
+                                task.abort();
+                                warn!(
+                                    timeout_ms = LEGACY_NOTIFY_TIMEOUT.as_millis() as u64,
+                                    "legacy_notify stdout reader timed out; continuing without actions"
+                                );
+                                Vec::new()
+                            }
+                        }
+                    }
+                    None => Vec::new(),
+                };
+
+                let actions = match String::from_utf8(stdout_bytes) {
+                    Ok(stdout) => match parse_hook_actions_from_stdout(&stdout) {
+                        Ok(parsed) => {
+                            debug!(
+                                hook_name = "legacy_notify",
+                                parsed_actions = parsed.actions.len(),
+                                ignored_unknown_actions = parsed.ignored_unknown_actions,
+                                stdout_len = stdout.len(),
+                                "parsed hook actions from legacy notify stdout"
+                            );
+                            parsed.actions
+                        }
+                        Err(err) if stdout.trim_start().starts_with('{') => {
+                            debug!(
+                                hook_name = "legacy_notify",
+                                stdout_len = stdout.len(),
+                                error = %err,
+                                "legacy notify stdout looked like JSON but actions parsing failed"
+                            );
+                            return HookExecution {
+                                result: HookResult::FailedContinue(err.into()),
+                                actions: Vec::new(),
+                            };
+                        }
+                        Err(_) => {
+                            debug!(
+                                hook_name = "legacy_notify",
+                                stdout_len = stdout.len(),
+                                "legacy notify stdout ignored (compat plain text)"
+                            );
+                            Vec::new()
+                        }
+                    },
+                    Err(err) => {
+                        return HookExecution {
+                            result: HookResult::FailedContinue(err.into()),
+                            actions: Vec::new(),
+                        };
+                    }
+                };
+
+                if status.success() {
+                    debug!(
+                        hook_name = "legacy_notify",
+                        actions_count = actions.len(),
+                        "legacy notify hook completed successfully"
+                    );
+                    HookExecution {
+                        result: HookResult::Success,
+                        actions,
+                    }
+                } else {
+                    debug!(hook_name = "legacy_notify", status = %status, "legacy notify hook exited non-zero");
+                    HookExecution {
+                        result: HookResult::FailedContinue(
+                            std::io::Error::other(format!(
+                                "hook command exited with status {}",
+                                status
+                            ))
+                            .into(),
+                        ),
+                        actions,
+                    }
                 }
             })
         }),
@@ -84,6 +235,7 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde_json::Value;
     use serde_json::json;
+    use tempfile::tempdir;
 
     use super::*;
 
@@ -103,6 +255,7 @@ mod tests {
     fn test_user_notification() -> Result<()> {
         let notification = UserNotification::AgentTurnComplete {
             thread_id: "b5f6c1c2-1111-2222-3333-444455556666".to_string(),
+            thread_name: None,
             turn_id: "12345".to_string(),
             cwd: "/Users/example/project".to_string(),
             client: Some("codex-tui".to_string()),
@@ -128,6 +281,7 @@ mod tests {
                 event: crate::HookEventAfterAgent {
                     thread_id: ThreadId::from_string("b5f6c1c2-1111-2222-3333-444455556666")
                         .expect("valid thread id"),
+                    thread_name: None,
                     turn_id: "12345".to_string(),
                     input_messages: vec![
                         "Rename `foo` to `bar` and update the callsites.".to_string(),
@@ -143,6 +297,107 @@ mod tests {
         let actual: Value = serde_json::from_str(&serialized)?;
         assert_eq!(actual, expected_notification_json());
 
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn notify_hook_parses_actions_from_stdout() -> Result<()> {
+        let hook = notify_hook(vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf '%s' '{\"actions\":[{\"type\":\"visible_note\",\"message\":\"hello\"}]}'"
+                .to_string(),
+        ]);
+
+        let payload = HookPayload {
+            session_id: ThreadId::new(),
+            cwd: tempdir()?.path().to_path_buf(),
+            triggered_at: chrono::Utc::now(),
+            hook_event: HookEvent::AfterAgent {
+                event: crate::HookEventAfterAgent {
+                    thread_id: ThreadId::new(),
+                    thread_name: None,
+                    turn_id: "turn-x".to_string(),
+                    input_messages: vec!["hi".to_string()],
+                    last_assistant_message: Some("done".to_string()),
+                },
+            },
+        };
+
+        let outcome = hook.execute(&payload).await;
+        assert!(matches!(outcome.result, HookResult::Success));
+        assert_eq!(
+            outcome.actions,
+            vec![crate::HookAction::VisibleNote {
+                message: "hello".to_string()
+            }]
+        );
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn notify_hook_ignores_plain_stdout_for_compat() -> Result<()> {
+        let hook = notify_hook(vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf '%s' 'legacy-notifier-ok'".to_string(),
+        ]);
+
+        let payload = HookPayload {
+            session_id: ThreadId::new(),
+            cwd: tempdir()?.path().to_path_buf(),
+            triggered_at: chrono::Utc::now(),
+            hook_event: HookEvent::AfterAgent {
+                event: crate::HookEventAfterAgent {
+                    thread_id: ThreadId::new(),
+                    thread_name: None,
+                    turn_id: "turn-y".to_string(),
+                    input_messages: vec!["hi".to_string()],
+                    last_assistant_message: Some("done".to_string()),
+                },
+            },
+        };
+
+        let outcome = hook.execute(&payload).await;
+        assert!(matches!(outcome.result, HookResult::Success));
+        assert!(outcome.actions.is_empty());
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn notify_hook_times_out_fail_open() -> Result<()> {
+        let hook = notify_hook(vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "sleep 3; printf '%s' '{\"actions\":[{\"type\":\"visible_note\",\"message\":\"late\"}]}'"
+                .to_string(),
+        ]);
+
+        let payload = HookPayload {
+            session_id: ThreadId::new(),
+            cwd: tempdir()?.path().to_path_buf(),
+            triggered_at: chrono::Utc::now(),
+            hook_event: HookEvent::AfterAgent {
+                event: crate::HookEventAfterAgent {
+                    thread_id: ThreadId::new(),
+                    thread_name: None,
+                    turn_id: "turn-timeout".to_string(),
+                    input_messages: vec!["hi".to_string()],
+                    last_assistant_message: Some("done".to_string()),
+                },
+            },
+        };
+
+        let started = std::time::Instant::now();
+        let outcome = hook.execute(&payload).await;
+        let elapsed = started.elapsed();
+
+        assert!(matches!(outcome.result, HookResult::Success));
+        assert!(outcome.actions.is_empty());
+        assert!(elapsed < Duration::from_secs(3));
         Ok(())
     }
 }

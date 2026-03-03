@@ -1,10 +1,16 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
 use std::fmt::Debug;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicU64;
+use std::time::Duration as StdDuration;
+use std::time::Instant as StdInstant;
 
 use crate::AuthManager;
 use crate::CodexAuth;
@@ -55,12 +61,14 @@ use async_channel::Receiver;
 use async_channel::Sender;
 use chrono::Local;
 use chrono::Utc;
+use codex_hooks::HookAction;
 use codex_hooks::HookEvent;
 use codex_hooks::HookEventAfterAgent;
 use codex_hooks::HookPayload;
 use codex_hooks::HookResult;
 use codex_hooks::Hooks;
 use codex_hooks::HooksConfig;
+use codex_hooks::NeroHookMsgFormat;
 use codex_network_proxy::NetworkProxy;
 use codex_network_proxy::NetworkProxyAuditMetadata;
 use codex_network_proxy::normalize_host;
@@ -271,6 +279,7 @@ use crate::unified_exec::UnifiedExecProcessManager;
 use crate::util::backoff;
 use crate::windows_sandbox::WindowsSandboxLevelExt;
 use codex_async_utils::OrCancelExt;
+use codex_hooks::NeroHookMsgMode;
 use codex_otel::OtelManager;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::config_types::CollaborationMode;
@@ -311,8 +320,98 @@ pub struct CodexSpawnOk {
 
 pub(crate) const INITIAL_SUBMIT_ID: &str = "";
 pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
+const HOOK_AUTO_REPLY_SUBMISSION_PREFIX: &str = "hook-auto-";
+// Allow a short autonomous streak before requiring explicit user re-entry.
+// This matches the default nero auto policy (`max_rounds = 7`) plus initial turn.
+const HOOK_AUTO_REPLY_MAX_CHAIN_DEPTH: u32 = 8;
+/// Give TUI "Tab queued" user input a short head start after turn completion.
+///
+/// This keeps `tab-first` behavior deterministic enough in interactive mode:
+/// user-queued follow-ups are preferred, while synthetic auto-replies are
+/// still available as fallback when the user has not queued anything.
+const HOOK_AUTO_REPLY_TAB_PRIORITY_GRACE_MS: u64 = 300;
+const HOOK_AUTO_REPLY_WAIT_FOR_TERMINAL_TIMEOUT_MS: u64 = 30_000;
 const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
 const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyber-safety";
+
+fn parse_hook_auto_reply_epoch(submission_id: &str) -> Option<u64> {
+    let suffix = submission_id.strip_prefix(HOOK_AUTO_REPLY_SUBMISSION_PREFIX)?;
+    let (epoch, _) = suffix.split_once('-')?;
+    epoch.parse::<u64>().ok()
+}
+
+fn nero_hook_msg_throttle_key(
+    hook_name: &str,
+    mode: &NeroHookMsgMode,
+    format: &NeroHookMsgFormat,
+    show_agent: bool,
+    show_tui: bool,
+    full: &str,
+    short: &str,
+    status_kind: Option<&str>,
+    status_text: Option<&str>,
+) -> String {
+    let mut hasher = DefaultHasher::new();
+    hook_name.hash(&mut hasher);
+    mode.hash(&mut hasher);
+    format.hash(&mut hasher);
+    show_agent.hash(&mut hasher);
+    show_tui.hash(&mut hasher);
+    full.hash(&mut hasher);
+    short.hash(&mut hasher);
+    status_kind.hash(&mut hasher);
+    status_text.hash(&mut hasher);
+    hasher.finish().to_string()
+}
+
+fn nero_hook_msg_remaining_secs_ceil(remaining: StdDuration) -> u64 {
+    if remaining.is_zero() {
+        return 1;
+    }
+    let millis = remaining.as_millis();
+    let secs = millis.div_ceil(1000);
+    let secs = u64::try_from(secs).unwrap_or(u64::MAX);
+    secs.max(1)
+}
+
+fn nero_hook_prefixed_message(message: String) -> String {
+    if message.starts_with("[nero-hook]") {
+        message
+    } else {
+        format!("[nero-hook] {message}")
+    }
+}
+
+fn nero_hook_tui_warning_message(
+    content: &str,
+    format: NeroHookMsgFormat,
+    status: Option<(&str, &str)>,
+) -> String {
+    match format {
+        NeroHookMsgFormat::Inline => {
+            let mut line = content.to_string();
+            if let Some((kind, text)) = status {
+                line.push_str(" [");
+                line.push_str(kind);
+                line.push_str(": ");
+                line.push_str(text);
+                line.push(']');
+            }
+            nero_hook_prefixed_message(line)
+        }
+        NeroHookMsgFormat::Block => {
+            let mut out = String::from("[nero-hook]\n------------\ncontent = ");
+            out.push_str(content);
+            if let Some((kind, text)) = status {
+                out.push_str("\n------------\nstatus = ");
+                out.push_str(kind);
+                out.push_str(": ");
+                out.push_str(text);
+            }
+            out
+        }
+    }
+}
 
 impl Codex {
     /// Spawn a new [`Codex`] and initialize the session.
@@ -465,6 +564,7 @@ impl Codex {
             auth_manager.clone(),
             models_manager.clone(),
             exec_policy,
+            tx_sub.clone(),
             tx_event.clone(),
             agent_status_tx.clone(),
             conversation_history,
@@ -571,6 +671,7 @@ impl Codex {
 /// A session has at most 1 running task at a time, and can be interrupted by user input.
 pub(crate) struct Session {
     pub(crate) conversation_id: ThreadId,
+    tx_sub: Sender<Submission>,
     tx_event: Sender<Event>,
     agent_status: watch::Sender<AgentStatus>,
     state: Mutex<SessionState>,
@@ -582,6 +683,10 @@ pub(crate) struct Session {
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) services: SessionServices,
     js_repl: Arc<JsReplHandle>,
+    hook_seen_terminal_turn_ids: Mutex<HashSet<String>>,
+    hook_auto_reply_internal_submission_ids: StdMutex<HashSet<String>>,
+    hook_nero_msg_throttle: StdMutex<HashMap<String, StdInstant>>,
+    hook_auto_reply_guard_state: StdMutex<HookAutoReplyGuardState>,
     next_internal_sub_id: AtomicU64,
 }
 
@@ -597,6 +702,12 @@ impl TurnSkillsContext {
             implicit_invocation_seen_skills: Arc::new(Mutex::new(HashSet::new())),
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct HookAutoReplyGuardState {
+    epoch: u64,
+    chain_depth: u32,
 }
 
 /// The context needed for a single turn of the thread.
@@ -1107,6 +1218,7 @@ impl Session {
         auth_manager: Arc<AuthManager>,
         models_manager: Arc<ModelsManager>,
         exec_policy: ExecPolicyManager,
+        tx_sub: Sender<Submission>,
         tx_event: Sender<Event>,
         agent_status: watch::Sender<AgentStatus>,
         initial_history: InitialHistory,
@@ -1479,6 +1591,7 @@ impl Session {
 
         let sess = Arc::new(Session {
             conversation_id,
+            tx_sub,
             tx_event: tx_event.clone(),
             agent_status,
             state: Mutex::new(state),
@@ -1488,6 +1601,10 @@ impl Session {
             active_turn: Mutex::new(None),
             services,
             js_repl,
+            hook_seen_terminal_turn_ids: Mutex::new(HashSet::new()),
+            hook_auto_reply_internal_submission_ids: StdMutex::new(HashSet::new()),
+            hook_nero_msg_throttle: StdMutex::new(HashMap::new()),
+            hook_auto_reply_guard_state: StdMutex::new(HookAutoReplyGuardState::default()),
             next_internal_sub_id: AtomicU64::new(0),
         });
         if let Some(network_policy_decider_session) = network_policy_decider_session {
@@ -1636,6 +1753,284 @@ impl Session {
             .next_internal_sub_id
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         format!("auto-compact-{id}")
+    }
+
+    fn next_internal_sub_id_with_prefix(&self, prefix: &str) -> String {
+        let id = self
+            .next_internal_sub_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        format!("{prefix}{id}")
+    }
+
+    async fn begin_new_user_submission_generation(&self) -> u64 {
+        let next_epoch = {
+            let mut guard = match self.hook_auto_reply_guard_state.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.epoch = guard.epoch.saturating_add(1);
+            guard.chain_depth = 0;
+            guard.epoch
+        };
+        let cleared_markers = {
+            let mut seen = self.hook_seen_terminal_turn_ids.lock().await;
+            let len = seen.len();
+            seen.clear();
+            len
+        };
+        if cleared_markers > 0 {
+            debug!(
+                generation_epoch = next_epoch,
+                cleared_markers, "cleared hook terminal markers for new user submission generation"
+            );
+        }
+        next_epoch
+    }
+
+    fn current_hook_auto_reply_epoch(&self) -> u64 {
+        let guard = match self.hook_auto_reply_guard_state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.epoch
+    }
+
+    fn reset_nero_hook_msg_throttle(&self) {
+        let mut guard = match self.hook_nero_msg_throttle.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let cleared = guard.len();
+        guard.clear();
+        debug!(cleared, "reset nero_hook_msg throttle cache");
+    }
+
+    fn nero_hook_msg_throttle_remaining(
+        &self,
+        hook_name: &str,
+        mode: &NeroHookMsgMode,
+        format: &NeroHookMsgFormat,
+        show_agent: bool,
+        show_tui: bool,
+        full: &str,
+        short: &str,
+        status: Option<&codex_hooks::NeroHookMsgStatus>,
+        freq_seconds: u64,
+    ) -> Option<StdDuration> {
+        if freq_seconds == 0 {
+            return None;
+        }
+        let now = StdInstant::now();
+        let key = nero_hook_msg_throttle_key(
+            hook_name,
+            mode,
+            format,
+            show_agent,
+            show_tui,
+            full,
+            short,
+            status.map(|s| s.kind.as_str()),
+            status.map(|s| s.text.as_str()),
+        );
+        let mut guard = match self.hook_nero_msg_throttle.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let window = StdDuration::from_secs(freq_seconds);
+        if let Some(last_seen) = guard.get(&key) {
+            let elapsed = now.saturating_duration_since(*last_seen);
+            if elapsed < window {
+                return Some(window - elapsed);
+            }
+        }
+        guard.insert(key, now);
+        None
+    }
+
+    pub(crate) async fn mark_turn_terminal_event_emitted(&self, turn_id: &str) {
+        self.hook_seen_terminal_turn_ids
+            .lock()
+            .await
+            .insert(turn_id.to_string());
+    }
+
+    async fn clear_turn_terminal_marker(&self, turn_id: &str) {
+        self.hook_seen_terminal_turn_ids
+            .lock()
+            .await
+            .remove(turn_id);
+    }
+
+    fn try_reserve_hook_auto_reply_chain_slot(&self) -> Option<(u32, u64)> {
+        let mut guard = match self.hook_auto_reply_guard_state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if guard.chain_depth >= HOOK_AUTO_REPLY_MAX_CHAIN_DEPTH {
+            return None;
+        }
+        guard.chain_depth += 1;
+        Some((guard.chain_depth, guard.epoch))
+    }
+
+    fn release_hook_auto_reply_chain_slot_for_epoch(&self, epoch: u64) {
+        let mut guard = match self.hook_auto_reply_guard_state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if guard.epoch != epoch {
+            debug!(
+                guard_epoch = guard.epoch,
+                release_epoch = epoch,
+                "skipping hook auto-reply slot release for stale epoch"
+            );
+            return;
+        }
+        guard.chain_depth = guard.chain_depth.saturating_sub(1);
+    }
+
+    fn register_internal_hook_auto_submission_id(&self, submission_id: String) {
+        let mut ids = match self.hook_auto_reply_internal_submission_ids.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        ids.insert(submission_id);
+    }
+
+    fn take_internal_hook_auto_submission_id(&self, submission_id: &str) -> bool {
+        let mut ids = match self.hook_auto_reply_internal_submission_ids.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        ids.remove(submission_id)
+    }
+
+    fn spawn_deferred_auto_user_reply(
+        self: &Arc<Self>,
+        source_turn_id: String,
+        hook_name: String,
+        text: String,
+    ) {
+        let Some((chain_depth, reservation_epoch)) = self.try_reserve_hook_auto_reply_chain_slot()
+        else {
+            info!(
+                turn_id = %source_turn_id,
+                hook_name = %hook_name,
+                max_chain_depth = HOOK_AUTO_REPLY_MAX_CHAIN_DEPTH,
+                "skipping synthetic user reply from hook action (auto-reply chain depth exhausted)"
+            );
+            return;
+        };
+
+        let sess = Arc::clone(self);
+        tokio::spawn(async move {
+            let wait_started = StdInstant::now();
+            loop {
+                if sess.current_hook_auto_reply_epoch() != reservation_epoch {
+                    sess.release_hook_auto_reply_chain_slot_for_epoch(reservation_epoch);
+                    info!(
+                        turn_id = %source_turn_id,
+                        hook_name = %hook_name,
+                        reservation_epoch,
+                        current_epoch = sess.current_hook_auto_reply_epoch(),
+                        "dropping deferred synthetic user reply while waiting because a newer generation is active"
+                    );
+                    sess.clear_turn_terminal_marker(&source_turn_id).await;
+                    return;
+                }
+                let source_turn_terminal_event_emitted = {
+                    let guard = sess.hook_seen_terminal_turn_ids.lock().await;
+                    guard.contains(source_turn_id.as_str())
+                };
+                if source_turn_terminal_event_emitted {
+                    break;
+                }
+                if wait_started.elapsed()
+                    >= StdDuration::from_millis(HOOK_AUTO_REPLY_WAIT_FOR_TERMINAL_TIMEOUT_MS)
+                {
+                    sess.release_hook_auto_reply_chain_slot_for_epoch(reservation_epoch);
+                    sess.clear_turn_terminal_marker(&source_turn_id).await;
+                    warn!(
+                        turn_id = %source_turn_id,
+                        hook_name = %hook_name,
+                        reservation_epoch,
+                        timeout_ms = HOOK_AUTO_REPLY_WAIT_FOR_TERMINAL_TIMEOUT_MS,
+                        "timed out waiting for source turn terminal marker; dropping synthetic user reply"
+                    );
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let apply_tab_priority_grace = {
+                let state = sess.state.lock().await;
+                matches!(
+                    state.session_configuration.session_source,
+                    SessionSource::Cli | SessionSource::VSCode
+                )
+            };
+            if apply_tab_priority_grace && HOOK_AUTO_REPLY_TAB_PRIORITY_GRACE_MS > 0 {
+                debug!(
+                    turn_id = %source_turn_id,
+                    hook_name = %hook_name,
+                    grace_ms = HOOK_AUTO_REPLY_TAB_PRIORITY_GRACE_MS,
+                    "delaying synthetic user reply to prioritize queued user input"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    HOOK_AUTO_REPLY_TAB_PRIORITY_GRACE_MS,
+                ))
+                .await;
+            }
+            if sess.current_hook_auto_reply_epoch() != reservation_epoch {
+                sess.release_hook_auto_reply_chain_slot_for_epoch(reservation_epoch);
+                info!(
+                    turn_id = %source_turn_id,
+                    hook_name = %hook_name,
+                    reservation_epoch,
+                    current_epoch = sess.current_hook_auto_reply_epoch(),
+                    "dropping stale synthetic user reply because a newer user submission generation is active"
+                );
+                sess.clear_turn_terminal_marker(&source_turn_id).await;
+                return;
+            }
+            sess.clear_turn_terminal_marker(&source_turn_id).await;
+
+            let hook_auto_submission_prefix =
+                format!("{HOOK_AUTO_REPLY_SUBMISSION_PREFIX}{reservation_epoch}-");
+            let submission_id = sess.next_internal_sub_id_with_prefix(&hook_auto_submission_prefix);
+            sess.register_internal_hook_auto_submission_id(submission_id.clone());
+            let send_result = sess.tx_sub.send(Submission {
+                id: submission_id.clone(),
+                op: Op::UserInput {
+                    items: vec![UserInput::Text {
+                        text,
+                        text_elements: Vec::new(),
+                    }],
+                    final_output_json_schema: None,
+                },
+            });
+            match send_result.await {
+                Ok(()) => {
+                    info!(
+                        turn_id = %source_turn_id,
+                        hook_name = %hook_name,
+                        chain_depth,
+                        reservation_epoch,
+                        %submission_id,
+                        "queued synthetic user reply from hook action"
+                    );
+                }
+                Err(err) => {
+                    let _ = sess.take_internal_hook_auto_submission_id(&submission_id);
+                    sess.release_hook_auto_reply_chain_slot_for_epoch(reservation_epoch);
+                    warn!(
+                        turn_id = %source_turn_id,
+                        hook_name = %hook_name,
+                        error = %err,
+                        "failed to queue synthetic user reply from hook action"
+                    );
+                }
+            }
+        });
     }
 
     pub(crate) async fn route_realtime_text_input(self: &Arc<Self>, text: String) {
@@ -2330,6 +2725,7 @@ impl Session {
         turn_context: &TurnContext,
         item: TurnItem,
     ) {
+        let is_context_compaction = matches!(item, TurnItem::ContextCompaction(_));
         self.send_event(
             turn_context,
             EventMsg::ItemCompleted(ItemCompletedEvent {
@@ -2339,6 +2735,9 @@ impl Session {
             }),
         )
         .await;
+        if is_context_compaction {
+            self.reset_nero_hook_msg_throttle();
+        }
     }
 
     /// Adds an execpolicy amendment to both the in-memory and on-disk policies so future
@@ -2991,6 +3390,9 @@ impl Session {
     }
 
     pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) {
+        let contains_compaction = items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::Compacted(_)));
         let recorder = {
             let guard = self.services.rollout.lock().await;
             guard.clone()
@@ -2999,6 +3401,9 @@ impl Session {
             && let Err(e) = rec.record_items(items).await
         {
             error!("failed to record rollout items: {e:#}");
+        }
+        if contains_compaction {
+            self.reset_nero_hook_msg_throttle();
         }
     }
 
@@ -3598,6 +4003,52 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                 .await;
             }
             Op::UserInput { .. } | Op::UserTurn { .. } => {
+                let is_hook_auto_reply = sub.id.starts_with(HOOK_AUTO_REPLY_SUBMISSION_PREFIX)
+                    && sess.take_internal_hook_auto_submission_id(&sub.id);
+                if !is_hook_auto_reply {
+                    let generation_epoch = sess.begin_new_user_submission_generation().await;
+                    debug!(
+                        submission_id = %sub.id,
+                        generation_epoch,
+                        "started new user submission generation"
+                    );
+                } else {
+                    let hook_epoch = parse_hook_auto_reply_epoch(&sub.id);
+                    if hook_epoch.is_none() {
+                        warn!(
+                            submission_id = %sub.id,
+                            "dropping hook synthetic user reply with invalid epoch format"
+                        );
+                        continue;
+                    }
+                    if let Some(epoch) = hook_epoch {
+                        let current_epoch = sess.current_hook_auto_reply_epoch();
+                        if epoch != current_epoch {
+                            info!(
+                                submission_id = %sub.id,
+                                hook_epoch = epoch,
+                                current_epoch,
+                                "skipping stale hook synthetic user reply from older generation"
+                            );
+                            continue;
+                        }
+                    }
+                    if sess.active_turn.lock().await.is_some() {
+                        if let Some(epoch) = hook_epoch {
+                            sess.release_hook_auto_reply_chain_slot_for_epoch(epoch);
+                        } else {
+                            warn!(
+                                submission_id = %sub.id,
+                                "skipping hook synthetic user reply with unparseable epoch"
+                            );
+                        }
+                        info!(
+                            submission_id = %sub.id,
+                            "skipping hook synthetic user reply because another turn is already active"
+                        );
+                        continue;
+                    }
+                }
                 handlers::user_input_or_turn(&sess, sub.id.clone(), sub.op).await;
             }
             Op::ExecApproval {
@@ -4947,6 +5398,10 @@ pub(crate) async fn run_turn(
 
                 if !needs_follow_up {
                     last_agent_message = sampling_request_last_agent_message;
+                    let hook_thread_name = {
+                        let state = sess.state.lock().await;
+                        state.session_configuration.thread_name.clone()
+                    };
                     let hook_outcomes = sess
                         .hooks()
                         .dispatch(HookPayload {
@@ -4957,6 +5412,7 @@ pub(crate) async fn run_turn(
                             hook_event: HookEvent::AfterAgent {
                                 event: HookEventAfterAgent {
                                     thread_id: sess.conversation_id,
+                                    thread_name: hook_thread_name,
                                     turn_id: turn_context.sub_id.clone(),
                                     input_messages: sampling_request_input_messages,
                                     last_assistant_message: last_agent_message.clone(),
@@ -4964,11 +5420,200 @@ pub(crate) async fn run_turn(
                             },
                         })
                         .await;
+                    debug!(
+                        turn_id = %turn_context.sub_id,
+                        hook_outcomes = hook_outcomes.len(),
+                        "after_agent hooks dispatched"
+                    );
 
                     let mut abort_message = None;
+                    let mut deferred_auto_user_replies: Vec<(String, String)> = Vec::new();
                     for hook_outcome in hook_outcomes {
                         let hook_name = hook_outcome.hook_name;
-                        match hook_outcome.result {
+                        let result = hook_outcome.result;
+                        let actions = hook_outcome.actions;
+                        if matches!(&result, HookResult::Success) {
+                            debug!(
+                                turn_id = %turn_context.sub_id,
+                                hook_name = %hook_name,
+                                actions = actions.len(),
+                                "processing after_agent hook actions"
+                            );
+                            for action in actions {
+                                match action {
+                                    HookAction::NeroHookMsg {
+                                        mode,
+                                        show,
+                                        freq,
+                                        format,
+                                        status,
+                                        msg,
+                                    } => {
+                                        if let Some(remaining) = sess
+                                            .nero_hook_msg_throttle_remaining(
+                                                &hook_name,
+                                                &mode,
+                                                &format,
+                                                show.agent,
+                                                show.tui,
+                                                &msg.full,
+                                                &msg.short,
+                                                status.as_ref(),
+                                                freq,
+                                            )
+                                        {
+                                            if show.tui {
+                                                let remaining_secs =
+                                                    nero_hook_msg_remaining_secs_ceil(remaining);
+                                                let content = format!("throttled (freq={freq}s)");
+                                                let countdown =
+                                                    format!("next update in {remaining_secs}s");
+                                                let message = nero_hook_tui_warning_message(
+                                                    &content,
+                                                    NeroHookMsgFormat::Block,
+                                                    Some(("countdown", &countdown)),
+                                                );
+                                                sess.send_event(
+                                                    &turn_context,
+                                                    EventMsg::Warning(WarningEvent { message }),
+                                                )
+                                                .await;
+                                            }
+                                            debug!(
+                                                turn_id = %turn_context.sub_id,
+                                                hook_name = %hook_name,
+                                                show_agent = show.agent,
+                                                show_tui = show.tui,
+                                                ?mode,
+                                                freq,
+                                                remaining_ms = remaining.as_millis(),
+                                                "skipped nero_hook_msg due to freq throttle"
+                                            );
+                                            continue;
+                                        }
+                                        if show.tui {
+                                            let tui_body = match mode {
+                                                NeroHookMsgMode::Synced => msg.full.clone(),
+                                                NeroHookMsgMode::TuiShort => msg.short.clone(),
+                                            };
+                                            let message = nero_hook_tui_warning_message(
+                                                &tui_body,
+                                                format,
+                                                status
+                                                    .as_ref()
+                                                    .map(|s| (s.kind.as_str(), s.text.as_str())),
+                                            );
+                                            sess.send_event(
+                                                &turn_context,
+                                                EventMsg::Warning(WarningEvent { message }),
+                                            )
+                                            .await;
+                                        }
+                                        if show.agent {
+                                            let text = nero_hook_prefixed_message(msg.full);
+                                            let response_item: ResponseItem =
+                                                DeveloperInstructions::new(text).into();
+                                            sess.record_conversation_items(
+                                                &turn_context,
+                                                std::slice::from_ref(&response_item),
+                                            )
+                                            .await;
+                                        }
+                                        debug!(
+                                            turn_id = %turn_context.sub_id,
+                                            hook_name = %hook_name,
+                                            show_agent = show.agent,
+                                            show_tui = show.tui,
+                                            ?mode,
+                                            freq,
+                                            "executed nero_hook_msg"
+                                        );
+                                    }
+                                    HookAction::VisibleNote { message } => {
+                                        let message = if message.starts_with("[nero-hook]") {
+                                            message
+                                        } else {
+                                            format!("[nero-hook] {message}")
+                                        };
+                                        sess.send_event(
+                                            &turn_context,
+                                            EventMsg::Warning(WarningEvent { message }),
+                                        )
+                                        .await;
+                                        debug!(
+                                            turn_id = %turn_context.sub_id,
+                                            hook_name = %hook_name,
+                                            "emitted visible_note warning event"
+                                        );
+                                    }
+                                    HookAction::ContextNote { message } => {
+                                        let text = if message.starts_with("[nero-hook]") {
+                                            message
+                                        } else {
+                                            format!("[nero-hook] {message}")
+                                        };
+                                        let response_item: ResponseItem =
+                                            DeveloperInstructions::new(text).into();
+                                        sess.record_conversation_items(
+                                            &turn_context,
+                                            std::slice::from_ref(&response_item),
+                                        )
+                                        .await;
+                                        debug!(
+                                            turn_id = %turn_context.sub_id,
+                                            hook_name = %hook_name,
+                                            "recorded context_note developer message"
+                                        );
+                                    }
+                                    HookAction::DualNote {
+                                        tui_message,
+                                        agent_message,
+                                    } => {
+                                        let tui_message = if tui_message.starts_with("[nero-hook]")
+                                        {
+                                            tui_message
+                                        } else {
+                                            format!("[nero-hook] {tui_message}")
+                                        };
+                                        sess.send_event(
+                                            &turn_context,
+                                            EventMsg::Warning(WarningEvent {
+                                                message: tui_message,
+                                            }),
+                                        )
+                                        .await;
+                                        let agent_text = if agent_message.starts_with("[nero-hook]")
+                                        {
+                                            agent_message
+                                        } else {
+                                            format!("[nero-hook] {agent_message}")
+                                        };
+                                        let response_item: ResponseItem =
+                                            DeveloperInstructions::new(agent_text).into();
+                                        sess.record_conversation_items(
+                                            &turn_context,
+                                            std::slice::from_ref(&response_item),
+                                        )
+                                        .await;
+                                        debug!(
+                                            turn_id = %turn_context.sub_id,
+                                            hook_name = %hook_name,
+                                            "executed dual_note (tui warning + developer context)"
+                                        );
+                                    }
+                                    HookAction::AutoUserReply { message } => {
+                                        debug!(
+                                            turn_id = %turn_context.sub_id,
+                                            hook_name = %hook_name,
+                                            "queued deferred auto_user_reply from hook"
+                                        );
+                                        deferred_auto_user_replies
+                                            .push((hook_name.clone(), message));
+                                    }
+                                }
+                            }
+                        }
+                        match result {
                             HookResult::Success => {}
                             HookResult::FailedContinue(error) => {
                                 warn!(
@@ -5004,6 +5649,13 @@ pub(crate) async fn run_turn(
                         )
                         .await;
                         return None;
+                    }
+                    for (hook_name, message) in deferred_auto_user_replies {
+                        sess.spawn_deferred_auto_user_reply(
+                            turn_context.sub_id.clone(),
+                            hook_name,
+                            message,
+                        );
                     }
                     break;
                 }
@@ -8037,6 +8689,7 @@ mod tests {
         };
 
         let (tx_event, _rx_event) = async_channel::unbounded();
+        let (tx_sub, _rx_sub) = async_channel::bounded::<Submission>(SUBMISSION_CHANNEL_CAPACITY);
         let (agent_status_tx, _agent_status_rx) = watch::channel(AgentStatus::PendingInit);
         let result = Session::new(
             session_configuration,
@@ -8044,6 +8697,7 @@ mod tests {
             auth_manager,
             models_manager,
             ExecPolicyManager::default(),
+            tx_sub,
             tx_event,
             agent_status_tx,
             InitialHistory::New,
@@ -8065,6 +8719,7 @@ mod tests {
     // todo: use online model info
     pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         let (tx_event, _rx_event) = async_channel::unbounded();
+        let (tx_sub, _rx_sub) = async_channel::bounded::<Submission>(SUBMISSION_CHANNEL_CAPACITY);
         let codex_home = tempfile::tempdir().expect("create temp dir");
         let config = build_test_config(codex_home.path()).await;
         let config = Arc::new(config);
@@ -8202,6 +8857,7 @@ mod tests {
 
         let session = Session {
             conversation_id,
+            tx_sub,
             tx_event,
             agent_status: agent_status_tx,
             state: Mutex::new(state),
@@ -8211,6 +8867,10 @@ mod tests {
             active_turn: Mutex::new(None),
             services,
             js_repl,
+            hook_seen_terminal_turn_ids: Mutex::new(HashSet::new()),
+            hook_auto_reply_internal_submission_ids: StdMutex::new(HashSet::new()),
+            hook_nero_msg_throttle: StdMutex::new(HashMap::new()),
+            hook_auto_reply_guard_state: StdMutex::new(HookAutoReplyGuardState::default()),
             next_internal_sub_id: AtomicU64::new(0),
         };
 
@@ -8225,6 +8885,7 @@ mod tests {
         async_channel::Receiver<Event>,
     ) {
         let (tx_event, rx_event) = async_channel::unbounded();
+        let (tx_sub, _rx_sub) = async_channel::bounded::<Submission>(SUBMISSION_CHANNEL_CAPACITY);
         let codex_home = tempfile::tempdir().expect("create temp dir");
         let config = build_test_config(codex_home.path()).await;
         let config = Arc::new(config);
@@ -8362,6 +9023,7 @@ mod tests {
 
         let session = Arc::new(Session {
             conversation_id,
+            tx_sub,
             tx_event,
             agent_status: agent_status_tx,
             state: Mutex::new(state),
@@ -8371,6 +9033,10 @@ mod tests {
             active_turn: Mutex::new(None),
             services,
             js_repl,
+            hook_seen_terminal_turn_ids: Mutex::new(HashSet::new()),
+            hook_auto_reply_internal_submission_ids: StdMutex::new(HashSet::new()),
+            hook_nero_msg_throttle: StdMutex::new(HashMap::new()),
+            hook_auto_reply_guard_state: StdMutex::new(HookAutoReplyGuardState::default()),
             next_internal_sub_id: AtomicU64::new(0),
         });
 
@@ -9186,6 +9852,97 @@ mod tests {
             }
             other => panic!("expected FunctionCallError::Fatal, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn hook_auto_reply_guard_state_transitions_are_stable() {
+        let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
+
+        let first = sess
+            .try_reserve_hook_auto_reply_chain_slot()
+            .expect("reserve first slot");
+        assert_eq!(first.0, 1);
+        assert_eq!(sess.try_reserve_hook_auto_reply_chain_slot(), None);
+
+        sess.release_hook_auto_reply_chain_slot_for_epoch(first.1);
+        let second = sess
+            .try_reserve_hook_auto_reply_chain_slot()
+            .expect("reserve second slot");
+        assert_eq!(second.0, 1);
+        assert_eq!(second.1, first.1);
+
+        sess.mark_turn_terminal_event_emitted("turn-a").await;
+        {
+            let seen = sess.hook_seen_terminal_turn_ids.lock().await;
+            assert!(seen.contains("turn-a"));
+        }
+        sess.clear_turn_terminal_marker("turn-a").await;
+        {
+            let seen = sess.hook_seen_terminal_turn_ids.lock().await;
+            assert!(!seen.contains("turn-a"));
+        }
+
+        let next_epoch = sess.begin_new_user_submission_generation().await;
+        assert!(next_epoch > second.1);
+        let stale_epoch = second.1;
+        sess.release_hook_auto_reply_chain_slot_for_epoch(stale_epoch);
+        let after_bump = sess
+            .try_reserve_hook_auto_reply_chain_slot()
+            .expect("reserve slot in newer generation");
+        assert_eq!(after_bump.0, 1);
+        assert_eq!(after_bump.1, next_epoch);
+    }
+
+    #[tokio::test]
+    async fn nero_hook_msg_throttle_cache_can_be_reset() {
+        let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
+
+        let remaining = sess.nero_hook_msg_throttle_remaining(
+            "test-hook",
+            &NeroHookMsgMode::TuiShort,
+            &NeroHookMsgFormat::Block,
+            true,
+            true,
+            "full",
+            "short",
+            None,
+            120,
+        );
+        assert!(remaining.is_none(), "first emit should not be throttled");
+
+        let remaining = sess.nero_hook_msg_throttle_remaining(
+            "test-hook",
+            &NeroHookMsgMode::TuiShort,
+            &NeroHookMsgFormat::Block,
+            true,
+            true,
+            "full",
+            "short",
+            None,
+            120,
+        );
+        assert!(
+            remaining.is_some(),
+            "second immediate emit should be throttled"
+        );
+
+        sess.reset_nero_hook_msg_throttle();
+
+        let remaining = sess.nero_hook_msg_throttle_remaining(
+            "test-hook",
+            &NeroHookMsgMode::TuiShort,
+            &NeroHookMsgFormat::Block,
+            true,
+            true,
+            "full",
+            "short",
+            None,
+            120,
+        );
+        assert!(
+            remaining.is_none(),
+            "emit after reset should not be throttled (compaction reset semantics)"
+        );
     }
 
     async fn sample_rollout(

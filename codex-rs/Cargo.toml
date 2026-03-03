@@ -351,6 +351,15 @@ ignored = [
     "codex-secrets",
 ]
 
+[profile.dev]
+# Keep dev builds responsive, but avoid huge debug artifacts.
+debug = 1
+
+[profile.test]
+# Test binaries account for a lot of local disk churn; level 1 keeps usable
+# backtraces while shrinking symbol payloads.
+debug = 1
+
 [profile.release]
 lto = "fat"
 split-debuginfo = "off"

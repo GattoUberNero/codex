@@ -1,4 +1,5 @@
 use tokio::process::Command;
+use tracing::debug;
 
 use crate::types::Hook;
 use crate::types::HookEvent;
@@ -26,12 +27,21 @@ impl Default for Hooks {
 // executed after specific events in the Codex lifecycle.
 impl Hooks {
     pub fn new(config: HooksConfig) -> Self {
-        let after_agent = config
+        let legacy_notify_enabled = config
+            .legacy_notify_argv
+            .as_ref()
+            .is_some_and(|argv| !argv.is_empty() && !argv[0].is_empty());
+        let after_agent: Vec<Hook> = config
             .legacy_notify_argv
             .filter(|argv| !argv.is_empty() && !argv[0].is_empty())
             .map(crate::notify_hook)
             .into_iter()
             .collect();
+        debug!(
+            legacy_notify_enabled,
+            after_agent_hook_count = after_agent.len(),
+            "initialized hook registry"
+        );
         Self {
             after_agent,
             after_tool_use: Vec::new(),
@@ -47,10 +57,30 @@ impl Hooks {
 
     pub async fn dispatch(&self, hook_payload: HookPayload) -> Vec<HookResponse> {
         let hooks = self.hooks_for_event(&hook_payload.hook_event);
+        debug!(
+            hook_count = hooks.len(),
+            event_type = match &hook_payload.hook_event {
+                HookEvent::AfterAgent { .. } => "after_agent",
+                HookEvent::AfterToolUse { .. } => "after_tool_use",
+            },
+            "dispatching hooks"
+        );
         let mut outcomes = Vec::with_capacity(hooks.len());
         for hook in hooks {
+            debug!(hook_name = %hook.name, "executing hook");
             let outcome = hook.execute(&hook_payload).await;
             let should_abort_operation = outcome.result.should_abort_operation();
+            debug!(
+                hook_name = %outcome.hook_name,
+                actions_count = outcome.actions.len(),
+                abort = should_abort_operation,
+                result = match &outcome.result {
+                    crate::HookResult::Success => "success",
+                    crate::HookResult::FailedContinue(_) => "failed_continue",
+                    crate::HookResult::FailedAbort(_) => "failed_abort",
+                },
+                "hook execution finished"
+            );
             outcomes.push(outcome);
             if should_abort_operation {
                 break;
@@ -91,8 +121,10 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
+    use crate::HookAction;
     use crate::types::HookEventAfterAgent;
     use crate::types::HookEventAfterToolUse;
+    use crate::types::HookExecution;
     use crate::types::HookResult;
     use crate::types::HookToolInput;
     use crate::types::HookToolKind;
@@ -112,6 +144,7 @@ mod tests {
             hook_event: HookEvent::AfterAgent {
                 event: HookEventAfterAgent {
                     thread_id: ThreadId::new(),
+                    thread_name: None,
                     turn_id: format!("turn-{label}"),
                     input_messages: vec![INPUT_MESSAGE.to_string()],
                     last_assistant_message: Some("hi".to_string()),
@@ -129,7 +162,10 @@ mod tests {
                 let calls = Arc::clone(&calls);
                 Box::pin(async move {
                     calls.fetch_add(1, Ordering::SeqCst);
-                    HookResult::Success
+                    HookExecution {
+                        result: HookResult::Success,
+                        actions: Vec::new(),
+                    }
                 })
             }),
         }
@@ -146,7 +182,10 @@ mod tests {
                 let message = message.clone();
                 Box::pin(async move {
                     calls.fetch_add(1, Ordering::SeqCst);
-                    HookResult::FailedContinue(std::io::Error::other(message).into())
+                    HookExecution {
+                        result: HookResult::FailedContinue(std::io::Error::other(message).into()),
+                        actions: Vec::new(),
+                    }
                 })
             }),
         }
@@ -163,7 +202,26 @@ mod tests {
                 let message = message.clone();
                 Box::pin(async move {
                     calls.fetch_add(1, Ordering::SeqCst);
-                    HookResult::FailedAbort(std::io::Error::other(message).into())
+                    HookExecution {
+                        result: HookResult::FailedAbort(std::io::Error::other(message).into()),
+                        actions: Vec::new(),
+                    }
+                })
+            }),
+        }
+    }
+
+    fn success_hook_with_actions(name: &str, actions: Vec<HookAction>) -> Hook {
+        let hook_name = name.to_string();
+        Hook {
+            name: hook_name,
+            func: Arc::new(move |_| {
+                let actions = actions.clone();
+                Box::pin(async move {
+                    HookExecution {
+                        result: HookResult::Success,
+                        actions,
+                    }
                 })
             }),
         }
@@ -314,6 +372,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_preserves_action_order_within_hook_response() {
+        let hooks = Hooks {
+            after_agent: vec![success_hook_with_actions(
+                "actions",
+                vec![
+                    HookAction::VisibleNote {
+                        message: "note".to_string(),
+                    },
+                    HookAction::ContextNote {
+                        message: "ctx".to_string(),
+                    },
+                    HookAction::DualNote {
+                        tui_message: "short".to_string(),
+                        agent_message: "full".to_string(),
+                    },
+                    HookAction::AutoUserReply {
+                        message: "continue".to_string(),
+                    },
+                ],
+            )],
+            ..Hooks::default()
+        };
+
+        let outcomes = hooks.dispatch(hook_payload("actions")).await;
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(
+            outcomes[0].actions,
+            vec![
+                HookAction::VisibleNote {
+                    message: "note".to_string()
+                },
+                HookAction::ContextNote {
+                    message: "ctx".to_string()
+                },
+                HookAction::DualNote {
+                    tui_message: "short".to_string(),
+                    agent_message: "full".to_string()
+                },
+                HookAction::AutoUserReply {
+                    message: "continue".to_string()
+                }
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn dispatch_executes_after_tool_use_hooks() {
         let calls = Arc::new(AtomicUsize::new(0));
         let hooks = Hooks {
@@ -389,7 +493,10 @@ mod tests {
                     ])
                     .expect("build command");
                     command.status().await.expect("run hook command");
-                    HookResult::Success
+                    HookExecution {
+                        result: HookResult::Success,
+                        actions: Vec::new(),
+                    }
                 })
             }),
         };
@@ -450,7 +557,10 @@ mod tests {
                     ])
                     .expect("build command");
                     command.status().await.expect("run hook command");
-                    HookResult::Success
+                    HookExecution {
+                        result: HookResult::Success,
+                        actions: Vec::new(),
+                    }
                 })
             }),
         };

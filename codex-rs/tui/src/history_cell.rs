@@ -32,7 +32,7 @@ use crate::text_formatting::truncate_text;
 use crate::tooltips;
 use crate::ui_consts::LIVE_PREFIX_COLS;
 use crate::update_action::UpdateAction;
-use crate::version::CODEX_CLI_VERSION;
+use crate::version::codex_cli_display_version;
 use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_line;
 use crate::wrapping::adaptive_wrap_lines;
@@ -513,7 +513,7 @@ impl HistoryCell for UpdateAvailableHistoryCell {
                 padded_emoji("✨").bold().cyan(),
                 "Update available!".bold().cyan(),
                 " ",
-                format!("{CODEX_CLI_VERSION} -> {}", self.latest_version).bold(),
+                format!("{} -> {}", codex_cli_display_version(), self.latest_version).bold(),
             ],
             update_instruction,
             "",
@@ -1054,7 +1054,7 @@ pub(crate) fn new_session_info(
         model.clone(),
         reasoning_effort,
         config.cwd.clone(),
-        CODEX_CLI_VERSION,
+        codex_cli_display_version(),
     );
     let mut parts: Vec<Box<dyn HistoryCell>> = vec![Box::new(header)];
 
@@ -1641,6 +1641,207 @@ fn decode_mcp_image(block: &serde_json::Value) -> Option<DynamicImage> {
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn new_warning_event(message: String) -> PrefixedWrappedHistoryCell {
     PrefixedWrappedHistoryCell::new(message.yellow(), "⚠ ".yellow(), "  ")
+}
+
+#[derive(Debug, Clone)]
+struct NeroHookTuiBlockStatusPayload {
+    kind: String,
+    text: String,
+}
+
+#[derive(Debug)]
+pub(crate) struct NeroHookBlockCell {
+    content: String,
+    status: Option<NeroHookTuiBlockStatusPayload>,
+}
+
+impl HistoryCell for NeroHookBlockCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let inner_width = width.saturating_sub(4).max(1) as usize;
+        let cream_style = Style::default().fg(Color::Rgb(244, 232, 206));
+        if self.content.starts_with("NERO HOOK SYSTEM") {
+            let mut lines: Vec<Line<'static>> =
+                vec![vec!["NERO HOOK SYSTEM".yellow().bold()].into()];
+	            let mut block_lines = adaptive_wrap_lines(
+	                self.content
+	                    .split('\n')
+	                    .skip(1)
+	                    .map(|line| {
+	                        let trimmed = line.trim_start();
+	                        if trimmed == "campaign_runtime:" {
+	                            return Line::from(line.to_string())
+	                                .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+	                        }
+	                        if trimmed.starts_with("status:")
+	                            && line.contains("campaign=unresolved")
+	                        {
+                            let token = "campaign=unresolved";
+                            if let Some(idx) = line.find(token) {
+                                let before = &line[..idx];
+                                let after = &line[idx + token.len()..];
+                                return Line::from(vec![
+                                    Span::from(before.to_string()).style(cream_style),
+                                    Span::from(token.to_string()).style(
+                                        Style::default()
+                                            .fg(Color::White)
+                                            .bg(Color::Red)
+                                            .add_modifier(Modifier::BOLD),
+                                    ),
+                                    Span::from(after.to_string()).style(cream_style),
+                                ]);
+                            }
+                            return Line::from(line.to_string()).style(cream_style);
+                        }
+                        if trimmed.starts_with("status:") {
+                            return Line::from(line.to_string()).style(cream_style);
+                        }
+	                        if trimmed == "nero-hook.system"
+	                            || trimmed == "nero-hook.msg"
+	                            || trimmed == "nero-hook.auto"
+	                        {
+	                            return Line::from(line.to_string())
+	                                .style(Style::default().yellow().add_modifier(Modifier::BOLD));
+	                        }
+	                        if trimmed.starts_with("- ")
+	                            && line.contains(":")
+	                            && let Some(idx) = line.find(':')
+	                        {
+	                            let label = &line[..=idx];
+	                            let value = &line[idx + 1..];
+	                            return Line::from(vec![
+	                                Span::from(label.to_string()).style(
+	                                    Style::default()
+	                                        .fg(Color::Cyan)
+	                                        .add_modifier(Modifier::BOLD),
+	                                ),
+	                                Span::from(value.to_string()).style(Style::default().white()),
+	                            ]);
+	                        }
+	                        if trimmed.chars().all(|c| c == '-') {
+	                            return Line::from(line.to_string())
+	                                .style(Style::default().yellow().add_modifier(Modifier::DIM));
+	                        }
+                        Line::from(line.to_string()).style(Style::default().white())
+                    }),
+                RtOptions::new(inner_width)
+                    .initial_indent("  ".into())
+                    .subsequent_indent("  ".into()),
+            );
+            lines.append(&mut block_lines);
+            return with_border_with_inner_width(lines, inner_width);
+        }
+
+        let hook_title = if self
+            .status
+            .as_ref()
+            .is_some_and(|status| status.kind.eq_ignore_ascii_case("state"))
+        {
+            "nero-hook.system"
+        } else if self
+            .status
+            .as_ref()
+            .is_some_and(|status| status.kind.eq_ignore_ascii_case("auto"))
+            || self.content.trim_start().starts_with("Auto:")
+        {
+            "nero-hook.auto"
+        } else {
+            "nero-hook.msg"
+        };
+        let mut lines: Vec<Line<'static>> = vec![
+            vec![hook_title.yellow().bold()].into(),
+            vec!["content".bold()].into(),
+        ];
+
+        let mut content_lines = adaptive_wrap_lines(
+            self.content
+                .split('\n')
+                .map(|line| Line::from(line.to_string()).style(Style::default().white())),
+            RtOptions::new(inner_width)
+                .initial_indent("  ".into())
+                .subsequent_indent("  ".into()),
+        );
+        lines.append(&mut content_lines);
+
+        if let Some(status) = &self.status {
+            let unresolved_alert = status.text.contains("campaign=unresolved");
+            let (kind_style, text_style, full_alert) = if status.kind == "error" {
+                let alert = Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Red)
+                    .add_modifier(Modifier::BOLD);
+                (alert, alert, true)
+            } else {
+                (
+                    cream_style.add_modifier(Modifier::BOLD),
+                    cream_style,
+                    false,
+                )
+            };
+            lines.push(Line::from(""));
+            lines.push(vec!["status".bold()].into());
+            let status_line = if unresolved_alert && !full_alert {
+                let token = "campaign=unresolved";
+                if let Some(idx) = status.text.find(token) {
+                    let before = &status.text[..idx];
+                    let after = &status.text[idx + token.len()..];
+                    Line::from(vec![
+                        "  ".into(),
+                        status.kind.clone().set_style(kind_style),
+                        ": ".dim(),
+                        Span::from(before.to_string()).style(text_style),
+                        Span::from(token.to_string()).style(
+                            Style::default()
+                                .fg(Color::White)
+                                .bg(Color::Red)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::from(after.to_string()).style(text_style),
+                    ])
+                } else {
+                    Line::from(vec![
+                        "  ".into(),
+                        status.kind.clone().set_style(kind_style),
+                        ": ".dim(),
+                        status.text.clone().set_style(text_style),
+                    ])
+                }
+            } else {
+                Line::from(vec![
+                    "  ".into(),
+                    status.kind.clone().set_style(kind_style),
+                    ": ".dim(),
+                    status.text.clone().set_style(text_style),
+                ])
+            };
+            let mut status_lines =
+                adaptive_wrap_lines(vec![status_line], RtOptions::new(inner_width));
+            lines.append(&mut status_lines);
+        }
+
+        with_border_with_inner_width(lines, inner_width)
+    }
+}
+
+pub(crate) fn try_new_nero_hook_warning_event(message: &str) -> Option<NeroHookBlockCell> {
+    const CONTENT_PREFIX: &str = "[nero-hook]\n------------\ncontent = ";
+    const STATUS_SEPARATOR: &str = "\n------------\nstatus = ";
+
+    let body = message.strip_prefix(CONTENT_PREFIX)?;
+    let (content, status) =
+        if let Some((content, status_payload)) = body.split_once(STATUS_SEPARATOR) {
+            let (kind, text) = status_payload
+                .split_once(": ")
+                .map(|(kind, text)| (kind.to_string(), text.to_string()))
+                .unwrap_or_else(|| ("info".to_string(), status_payload.to_string()));
+            (
+                content.to_string(),
+                Some(NeroHookTuiBlockStatusPayload { kind, text }),
+            )
+        } else {
+            (body.to_string(), None)
+        };
+
+    Some(NeroHookBlockCell { content, status })
 }
 
 #[derive(Debug)]
