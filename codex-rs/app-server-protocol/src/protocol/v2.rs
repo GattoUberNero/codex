@@ -1318,6 +1318,8 @@ pub struct LogoutAccountResponse {}
 pub enum ChatgptAuthTokensRefreshReason {
     /// Codex attempted a backend request and received `401 Unauthorized`.
     Unauthorized,
+    /// Codex hit an account usage/quota limit and requests external account rotation.
+    UsageLimitReached,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

@@ -1144,6 +1144,29 @@ mod tests {
     }
 
     #[test]
+    fn serialize_chatgpt_auth_tokens_refresh_request_usage_limit_reason() -> Result<()> {
+        let request = ServerRequest::ChatgptAuthTokensRefresh {
+            request_id: RequestId::Integer(8),
+            params: v2::ChatgptAuthTokensRefreshParams {
+                reason: v2::ChatgptAuthTokensRefreshReason::UsageLimitReached,
+                previous_account_id: Some("org-123".to_string()),
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "account/chatgptAuthTokens/refresh",
+                "id": 8,
+                "params": {
+                    "reason": "usageLimitReached",
+                    "previousAccountId": "org-123"
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn serialize_get_account_rate_limits() -> Result<()> {
         let request = ClientRequest::GetAccountRateLimits {
             request_id: RequestId::Integer(1),

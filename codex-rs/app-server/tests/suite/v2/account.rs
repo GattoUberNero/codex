@@ -306,6 +306,7 @@ async fn account_read_refresh_token_is_noop_in_external_mode() -> Result<()> {
 
 async fn respond_to_refresh_request(
     mcp: &mut McpProcess,
+    expected_reason: ChatgptAuthTokensRefreshReason,
     access_token: &str,
     chatgpt_account_id: &str,
     chatgpt_plan_type: Option<&str>,
@@ -318,7 +319,7 @@ async fn respond_to_refresh_request(
     let ServerRequest::ChatgptAuthTokensRefresh { request_id, params } = refresh_req else {
         bail!("expected account/chatgptAuthTokens/refresh request, got {refresh_req:?}");
     };
-    assert_eq!(params.reason, ChatgptAuthTokensRefreshReason::Unauthorized);
+    assert_eq!(params.reason, expected_reason);
     let response = ChatgptAuthTokensRefreshResponse {
         access_token: access_token.to_string(),
         chatgpt_account_id: chatgpt_account_id.to_string(),
@@ -419,11 +420,285 @@ async fn external_auth_refreshes_on_unauthorized() -> Result<()> {
         .await?;
     respond_to_refresh_request(
         &mut mcp,
+        ChatgptAuthTokensRefreshReason::Unauthorized,
         &refreshed_access_token,
         "org-refreshed",
         Some("pro"),
     )
     .await?;
+    let _turn_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turn_req)),
+    )
+    .await??;
+    let _turn_completed = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let requests = responses_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some(format!("Bearer {initial_access_token}"))
+    );
+    assert_eq!(
+        requests[1].header("authorization"),
+        Some(format!("Bearer {refreshed_access_token}"))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+// usage_limit_reached response triggers account/chatgptAuthTokens/refresh and retries with new tokens.
+async fn external_auth_refreshes_on_usage_limit() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let mock_server = MockServer::start().await;
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            requires_openai_auth: Some(true),
+            base_url: Some(format!("{}/v1", mock_server.uri())),
+            ..Default::default()
+        },
+    )?;
+    write_models_cache(codex_home.path())?;
+
+    let success_sse = responses::sse(vec![
+        responses::ev_response_created("resp-turn"),
+        responses::ev_assistant_message("msg-turn", "turn ok"),
+        responses::ev_completed("resp-turn"),
+    ]);
+    let usage_limit = ResponseTemplate::new(429).set_body_json(json!({
+        "error": { "type": "usage_limit_reached", "plan_type": "pro" }
+    }));
+    let responses_mock = responses::mount_response_sequence(
+        &mock_server,
+        vec![usage_limit, responses::sse_response(success_sse)],
+    )
+    .await;
+
+    let initial_access_token = encode_id_token(
+        &ChatGptIdTokenClaims::new()
+            .email("initial@example.com")
+            .plan_type("pro")
+            .chatgpt_account_id("org-initial"),
+    )?;
+    let refreshed_access_token = encode_id_token(
+        &ChatGptIdTokenClaims::new()
+            .email("refreshed@example.com")
+            .plan_type("pro")
+            .chatgpt_account_id("org-refreshed"),
+    )?;
+
+    let mut mcp = McpProcess::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let set_id = mcp
+        .send_chatgpt_auth_tokens_login_request(
+            initial_access_token.clone(),
+            "org-initial".to_string(),
+            Some("pro".to_string()),
+        )
+        .await?;
+    let set_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(set_id)),
+    )
+    .await??;
+    let response: LoginAccountResponse = to_response(set_resp)?;
+    assert_eq!(response, LoginAccountResponse::ChatgptAuthTokens {});
+    let _updated = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/updated"),
+    )
+    .await??;
+
+    let thread_req = mcp
+        .send_thread_start_request(codex_app_server_protocol::ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let thread_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
+    )
+    .await??;
+    let thread = to_response::<codex_app_server_protocol::ThreadStartResponse>(thread_resp)?;
+
+    let turn_req = mcp
+        .send_turn_start_request(codex_app_server_protocol::TurnStartParams {
+            thread_id: thread.thread.id,
+            input: vec![codex_app_server_protocol::UserInput::Text {
+                text: "Hello".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    respond_to_refresh_request(
+        &mut mcp,
+        ChatgptAuthTokensRefreshReason::UsageLimitReached,
+        &refreshed_access_token,
+        "org-refreshed",
+        Some("pro"),
+    )
+    .await?;
+    let _turn_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turn_req)),
+    )
+    .await??;
+    let _turn_completed = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let requests = responses_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some(format!("Bearer {initial_access_token}"))
+    );
+    assert_eq!(
+        requests[1].header("authorization"),
+        Some(format!("Bearer {refreshed_access_token}"))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+// If client does not accept `usageLimitReached`, app server retries refresh with `unauthorized`.
+async fn external_auth_refresh_usage_limit_falls_back_to_unauthorized_reason() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let mock_server = MockServer::start().await;
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            requires_openai_auth: Some(true),
+            base_url: Some(format!("{}/v1", mock_server.uri())),
+            ..Default::default()
+        },
+    )?;
+    write_models_cache(codex_home.path())?;
+
+    let success_sse = responses::sse(vec![
+        responses::ev_response_created("resp-turn"),
+        responses::ev_assistant_message("msg-turn", "turn ok"),
+        responses::ev_completed("resp-turn"),
+    ]);
+    let usage_limit = ResponseTemplate::new(429).set_body_json(json!({
+        "error": { "type": "usage_limit_reached", "plan_type": "pro" }
+    }));
+    let responses_mock = responses::mount_response_sequence(
+        &mock_server,
+        vec![usage_limit, responses::sse_response(success_sse)],
+    )
+    .await;
+
+    let initial_access_token = encode_id_token(
+        &ChatGptIdTokenClaims::new()
+            .email("initial@example.com")
+            .plan_type("pro")
+            .chatgpt_account_id("org-initial"),
+    )?;
+    let refreshed_access_token = encode_id_token(
+        &ChatGptIdTokenClaims::new()
+            .email("refreshed@example.com")
+            .plan_type("pro")
+            .chatgpt_account_id("org-refreshed"),
+    )?;
+
+    let mut mcp = McpProcess::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let set_id = mcp
+        .send_chatgpt_auth_tokens_login_request(
+            initial_access_token.clone(),
+            "org-initial".to_string(),
+            Some("pro".to_string()),
+        )
+        .await?;
+    let set_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(set_id)),
+    )
+    .await??;
+    let response: LoginAccountResponse = to_response(set_resp)?;
+    assert_eq!(response, LoginAccountResponse::ChatgptAuthTokens {});
+    let _updated = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/updated"),
+    )
+    .await??;
+
+    let thread_req = mcp
+        .send_thread_start_request(codex_app_server_protocol::ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let thread_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
+    )
+    .await??;
+    let thread = to_response::<codex_app_server_protocol::ThreadStartResponse>(thread_resp)?;
+
+    let turn_req = mcp
+        .send_turn_start_request(codex_app_server_protocol::TurnStartParams {
+            thread_id: thread.thread.id,
+            input: vec![codex_app_server_protocol::UserInput::Text {
+                text: "Hello".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+
+    let refresh_req: ServerRequest = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_request_message(),
+    )
+    .await??;
+    let ServerRequest::ChatgptAuthTokensRefresh { request_id, params } = refresh_req else {
+        bail!("expected account/chatgptAuthTokens/refresh request, got {refresh_req:?}");
+    };
+    assert_eq!(params.reason, ChatgptAuthTokensRefreshReason::UsageLimitReached);
+    mcp.send_error(
+        request_id,
+        JSONRPCErrorError {
+            code: -32_602,
+            message: "unsupported reason".to_string(),
+            data: None,
+        },
+    )
+    .await?;
+
+    let refresh_req: ServerRequest = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_request_message(),
+    )
+    .await??;
+    let ServerRequest::ChatgptAuthTokensRefresh { request_id, params } = refresh_req else {
+        bail!("expected fallback account/chatgptAuthTokens/refresh request, got {refresh_req:?}");
+    };
+    assert_eq!(params.reason, ChatgptAuthTokensRefreshReason::Unauthorized);
+    mcp.send_response(
+        request_id,
+        serde_json::to_value(ChatgptAuthTokensRefreshResponse {
+            access_token: refreshed_access_token.clone(),
+            chatgpt_account_id: "org-refreshed".to_string(),
+            chatgpt_plan_type: Some("pro".to_string()),
+        })?,
+    )
+    .await?;
+
     let _turn_resp: JSONRPCResponse = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_response_message(RequestId::Integer(turn_req)),

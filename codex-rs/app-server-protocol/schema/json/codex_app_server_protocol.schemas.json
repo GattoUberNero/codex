@@ -281,6 +281,13 @@
             "unauthorized"
           ],
           "type": "string"
+        },
+        {
+          "description": "Codex hit an account usage/quota limit and requests external account rotation.",
+          "enum": [
+            "usageLimitReached"
+          ],
+          "type": "string"
         }
       ]
     },

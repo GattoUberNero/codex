@@ -34,6 +34,8 @@ use std::sync::atomic::Ordering;
 use crate::api_bridge::CoreAuthProvider;
 use crate::api_bridge::auth_provider_from_auth;
 use crate::api_bridge::map_api_error;
+use crate::auth::ExternalAuthRecovery;
+use crate::auth::ExternalAuthRefreshReason;
 use crate::auth::UnauthorizedRecovery;
 use codex_api::CompactClient as ApiCompactClient;
 use codex_api::CompactionInput as ApiCompactionInput;
@@ -726,6 +728,13 @@ impl ModelClientSession {
         self.websocket_session.connection = Some(connection);
         Ok(())
     }
+
+    fn reset_websocket_session(&mut self) {
+        self.websocket_session.connection = None;
+        self.websocket_session.last_request = None;
+        self.websocket_session.last_response_rx = None;
+    }
+
     /// Returns a websocket connection for this turn.
     async fn websocket_connection(
         &mut self,
@@ -810,6 +819,9 @@ impl ModelClientSession {
         let mut auth_recovery = auth_manager
             .as_ref()
             .map(super::auth::AuthManager::unauthorized_recovery);
+        let mut usage_limit_recovery = auth_manager.as_ref().map(|manager| {
+            manager.external_auth_recovery(ExternalAuthRefreshReason::UsageLimitReached)
+        });
         loop {
             let client_setup = self.client.current_client_setup().await?;
             let transport = ReqwestTransport::new(build_reqwest_client());
@@ -843,6 +855,10 @@ impl ModelClientSession {
                     handle_unauthorized(unauthorized_transport, &mut auth_recovery).await?;
                     continue;
                 }
+                Err(err) if is_usage_limit_or_quota_error(&err) => {
+                    recover_from_usage_limit_or_quota(err, &mut usage_limit_recovery).await?;
+                    continue;
+                }
                 Err(err) => return Err(map_api_error(err)),
             }
         }
@@ -866,6 +882,9 @@ impl ModelClientSession {
         let mut auth_recovery = auth_manager
             .as_ref()
             .map(super::auth::AuthManager::unauthorized_recovery);
+        let mut usage_limit_recovery = auth_manager.as_ref().map(|manager| {
+            manager.external_auth_recovery(ExternalAuthRefreshReason::UsageLimitReached)
+        });
         loop {
             let client_setup = self.client.current_client_setup().await?;
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
@@ -906,7 +925,13 @@ impl ModelClientSession {
                 Err(ApiError::Transport(
                     unauthorized_transport @ TransportError::Http { status, .. },
                 )) if status == StatusCode::UNAUTHORIZED => {
+                    self.reset_websocket_session();
                     handle_unauthorized(unauthorized_transport, &mut auth_recovery).await?;
+                    continue;
+                }
+                Err(err) if is_usage_limit_or_quota_error(&err) => {
+                    self.reset_websocket_session();
+                    recover_from_usage_limit_or_quota(err, &mut usage_limit_recovery).await?;
                     continue;
                 }
                 Err(err) => return Err(map_api_error(err)),
@@ -924,8 +949,23 @@ impl ModelClientSession {
                     ))
                 })?
                 .stream_request(ws_request)
-                .await
-                .map_err(map_api_error)?;
+                .await;
+            let stream_result = match stream_result {
+                Ok(stream) => stream,
+                Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                )) if status == StatusCode::UNAUTHORIZED => {
+                    self.reset_websocket_session();
+                    handle_unauthorized(unauthorized_transport, &mut auth_recovery).await?;
+                    continue;
+                }
+                Err(err) if is_usage_limit_or_quota_error(&err) => {
+                    self.reset_websocket_session();
+                    recover_from_usage_limit_or_quota(err, &mut usage_limit_recovery).await?;
+                    continue;
+                }
+                Err(err) => return Err(map_api_error(err)),
+            };
             let (stream, last_request_rx) =
                 map_response_stream(stream_result, otel_manager.clone());
             self.websocket_session.last_response_rx = Some(last_request_rx);
@@ -1080,9 +1120,7 @@ impl ModelClientSession {
                 &[("from_wire_api", "responses_websocket")],
             );
 
-            self.websocket_session.connection = None;
-            self.websocket_session.last_request = None;
-            self.websocket_session.last_response_rx = None;
+            self.reset_websocket_session();
         }
         activated
     }
@@ -1239,6 +1277,54 @@ async fn handle_unauthorized(
     }
 
     Err(map_api_error(ApiError::Transport(transport)))
+}
+
+fn is_usage_limit_or_quota_error(err: &ApiError) -> bool {
+    match err {
+        ApiError::QuotaExceeded => true,
+        ApiError::Transport(transport) => is_usage_limit_reached_transport(transport),
+        _ => false,
+    }
+}
+
+fn is_usage_limit_reached_transport(transport: &TransportError) -> bool {
+    match transport {
+        TransportError::Http { status, body, .. } if *status == StatusCode::TOO_MANY_REQUESTS => {
+            body.as_deref().is_some_and(is_usage_limit_reached_body)
+        }
+        _ => false,
+    }
+}
+
+fn is_usage_limit_reached_body(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|json| {
+            json.get("error")
+                .and_then(|error| error.get("type"))
+                .and_then(serde_json::Value::as_str)
+                .map(|error_type| error_type == "usage_limit_reached")
+        })
+        .unwrap_or_else(|| body.contains("usage_limit_reached"))
+}
+
+/// Handles usage/quota failures by asking the external auth owner for a fresh
+/// token set once, then allowing the caller to retry the request.
+async fn recover_from_usage_limit_or_quota(
+    err: ApiError,
+    usage_limit_recovery: &mut Option<ExternalAuthRecovery>,
+) -> Result<()> {
+    if let Some(recovery) = usage_limit_recovery
+        && recovery.has_next()
+    {
+        return match recovery.next().await {
+            Ok(_) => Ok(()),
+            Err(RefreshTokenError::Permanent(failed)) => Err(CodexErr::RefreshTokenFailed(failed)),
+            Err(RefreshTokenError::Transient(other)) => Err(CodexErr::Io(other)),
+        };
+    }
+
+    Err(map_api_error(err))
 }
 
 struct ApiTelemetry {

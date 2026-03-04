@@ -71,21 +71,16 @@ impl ExternalAuthRefreshBridge {
     fn map_reason(reason: ExternalAuthRefreshReason) -> ChatgptAuthTokensRefreshReason {
         match reason {
             ExternalAuthRefreshReason::Unauthorized => ChatgptAuthTokensRefreshReason::Unauthorized,
+            ExternalAuthRefreshReason::UsageLimitReached => {
+                ChatgptAuthTokensRefreshReason::UsageLimitReached
+            }
         }
     }
-}
 
-#[async_trait]
-impl ExternalAuthRefresher for ExternalAuthRefreshBridge {
-    async fn refresh(
+    async fn send_refresh_request(
         &self,
-        context: ExternalAuthRefreshContext,
-    ) -> std::io::Result<ExternalAuthTokens> {
-        let params = ChatgptAuthTokensRefreshParams {
-            reason: Self::map_reason(context.reason),
-            previous_account_id: context.previous_account_id,
-        };
-
+        params: ChatgptAuthTokensRefreshParams,
+    ) -> std::io::Result<ChatgptAuthTokensRefreshResponse> {
         let (request_id, rx) = self
             .outgoing
             .send_request(ServerRequestPayload::ChatgptAuthTokensRefresh(params))
@@ -115,8 +110,49 @@ impl ExternalAuthRefresher for ExternalAuthRefreshBridge {
             }
         };
 
-        let response: ChatgptAuthTokensRefreshResponse =
-            serde_json::from_value(result).map_err(std::io::Error::other)?;
+        serde_json::from_value(result).map_err(std::io::Error::other)
+    }
+
+    fn should_fallback_to_unauthorized(error: &std::io::Error) -> bool {
+        let msg = error.to_string().to_ascii_lowercase();
+        msg.contains("code=-32602")
+            || msg.contains("invalid params")
+            || msg.contains("unknown variant")
+            || msg.contains("unknown enum variant")
+    }
+}
+
+#[async_trait]
+impl ExternalAuthRefresher for ExternalAuthRefreshBridge {
+    async fn refresh(
+        &self,
+        context: ExternalAuthRefreshContext,
+    ) -> std::io::Result<ExternalAuthTokens> {
+        let previous_account_id = context.previous_account_id;
+        let primary_reason = Self::map_reason(context.reason);
+        let response = match self
+            .send_refresh_request(ChatgptAuthTokensRefreshParams {
+                reason: primary_reason,
+                previous_account_id: previous_account_id.clone(),
+            })
+            .await
+        {
+            Ok(response) => response,
+            Err(primary_error)
+                if primary_reason == ChatgptAuthTokensRefreshReason::UsageLimitReached
+                    && Self::should_fallback_to_unauthorized(&primary_error) =>
+            {
+                tracing::warn!(
+                    "usage-limit auth refresh failed; retrying with unauthorized reason for compatibility: {primary_error}"
+                );
+                self.send_refresh_request(ChatgptAuthTokensRefreshParams {
+                    reason: ChatgptAuthTokensRefreshReason::Unauthorized,
+                    previous_account_id,
+                })
+                .await?
+            }
+            Err(error) => return Err(error),
+        };
 
         Ok(ExternalAuthTokens {
             access_token: response.access_token,
