@@ -77,10 +77,12 @@ use http::HeaderMap as ApiHeaderMap;
 use http::HeaderValue;
 use http::StatusCode as HttpStatusCode;
 use reqwest::StatusCode;
+use std::ffi::OsString;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
+use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Error;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::trace;
@@ -108,6 +110,8 @@ pub const X_CODEX_TURN_METADATA_HEADER: &str = "x-codex-turn-metadata";
 pub const X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER: &str =
     "x-responsesapi-include-timing-metrics";
 const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
+const CODEXN_AUTH_ROTATE_CMD_ENV: &str = "CODEXN_AUTH_ROTATE_CMD";
+const AUTH_ROTATE_CMD_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponsesWebsocketVersion {
@@ -822,6 +826,7 @@ impl ModelClientSession {
         let mut usage_limit_recovery = auth_manager.as_ref().map(|manager| {
             manager.external_auth_recovery(ExternalAuthRefreshReason::UsageLimitReached)
         });
+        let mut command_recovery_attempted = false;
         loop {
             let client_setup = self.client.current_client_setup().await?;
             let transport = ReqwestTransport::new(build_reqwest_client());
@@ -856,7 +861,13 @@ impl ModelClientSession {
                     continue;
                 }
                 Err(err) if is_usage_limit_or_quota_error(&err) => {
-                    recover_from_usage_limit_or_quota(err, &mut usage_limit_recovery).await?;
+                    recover_from_usage_limit_or_quota(
+                        err,
+                        &mut usage_limit_recovery,
+                        auth_manager.as_ref(),
+                        &mut command_recovery_attempted,
+                    )
+                    .await?;
                     continue;
                 }
                 Err(err) => return Err(map_api_error(err)),
@@ -885,6 +896,7 @@ impl ModelClientSession {
         let mut usage_limit_recovery = auth_manager.as_ref().map(|manager| {
             manager.external_auth_recovery(ExternalAuthRefreshReason::UsageLimitReached)
         });
+        let mut command_recovery_attempted = false;
         loop {
             let client_setup = self.client.current_client_setup().await?;
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
@@ -931,7 +943,13 @@ impl ModelClientSession {
                 }
                 Err(err) if is_usage_limit_or_quota_error(&err) => {
                     self.reset_websocket_session();
-                    recover_from_usage_limit_or_quota(err, &mut usage_limit_recovery).await?;
+                    recover_from_usage_limit_or_quota(
+                        err,
+                        &mut usage_limit_recovery,
+                        auth_manager.as_ref(),
+                        &mut command_recovery_attempted,
+                    )
+                    .await?;
                     continue;
                 }
                 Err(err) => return Err(map_api_error(err)),
@@ -961,7 +979,13 @@ impl ModelClientSession {
                 }
                 Err(err) if is_usage_limit_or_quota_error(&err) => {
                     self.reset_websocket_session();
-                    recover_from_usage_limit_or_quota(err, &mut usage_limit_recovery).await?;
+                    recover_from_usage_limit_or_quota(
+                        err,
+                        &mut usage_limit_recovery,
+                        auth_manager.as_ref(),
+                        &mut command_recovery_attempted,
+                    )
+                    .await?;
                     continue;
                 }
                 Err(err) => return Err(map_api_error(err)),
@@ -1313,18 +1337,113 @@ fn is_usage_limit_reached_body(body: &str) -> bool {
 async fn recover_from_usage_limit_or_quota(
     err: ApiError,
     usage_limit_recovery: &mut Option<ExternalAuthRecovery>,
+    auth_manager: Option<&Arc<AuthManager>>,
+    command_recovery_attempted: &mut bool,
 ) -> Result<()> {
     if let Some(recovery) = usage_limit_recovery
         && recovery.has_next()
     {
-        return match recovery.next().await {
+        let external_result = recovery.next().await;
+        return match external_result {
             Ok(_) => Ok(()),
             Err(RefreshTokenError::Permanent(failed)) => Err(CodexErr::RefreshTokenFailed(failed)),
-            Err(RefreshTokenError::Transient(other)) => Err(CodexErr::Io(other)),
+            Err(RefreshTokenError::Transient(other)) => {
+                if try_recover_with_auth_rotate_command(auth_manager, command_recovery_attempted)
+                    .await?
+                {
+                    Ok(())
+                } else {
+                    Err(CodexErr::Io(other))
+                }
+            }
         };
     }
 
+    if try_recover_with_auth_rotate_command(auth_manager, command_recovery_attempted).await? {
+        return Ok(());
+    }
+
     Err(map_api_error(err))
+}
+
+async fn try_recover_with_auth_rotate_command(
+    auth_manager: Option<&Arc<AuthManager>>,
+    command_recovery_attempted: &mut bool,
+) -> Result<bool> {
+    if *command_recovery_attempted {
+        return Ok(false);
+    }
+
+    let rotate_cmd = std::env::var(CODEXN_AUTH_ROTATE_CMD_ENV)
+        .ok()
+        .map(|cmd| cmd.trim().to_string())
+        .filter(|cmd| !cmd.is_empty());
+    let Some(rotate_cmd) = rotate_cmd else {
+        return Ok(false);
+    };
+
+    *command_recovery_attempted = true;
+    warn!("attempting auth rotation via command fallback");
+
+    let (program, args) = parse_auth_rotate_command(&rotate_cmd)?;
+    let mut command = tokio::process::Command::new(program);
+    command.args(args);
+    command.env("CODEXN_ROTATION_REASON", "usage_limit_reached");
+    command.stderr(std::process::Stdio::piped());
+    command.stdout(std::process::Stdio::null());
+
+    let output = timeout(AUTH_ROTATE_CMD_TIMEOUT, command.output())
+        .await
+        .map_err(|_| {
+            CodexErr::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "auth rotation command timed out after {}s",
+                    AUTH_ROTATE_CMD_TIMEOUT.as_secs()
+                ),
+            ))
+        })?
+        .map_err(CodexErr::Io)?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let message = if stderr.is_empty() {
+            format!(
+                "auth rotation command failed with status {}",
+                output.status
+            )
+        } else {
+            format!(
+                "auth rotation command failed with status {}: {}",
+                output.status, stderr
+            )
+        };
+        return Err(CodexErr::Io(std::io::Error::other(message)));
+    }
+
+    if let Some(auth_manager) = auth_manager {
+        auth_manager.reload();
+    }
+    Ok(true)
+}
+
+fn parse_auth_rotate_command(raw: &str) -> Result<(OsString, Vec<OsString>)> {
+    let parts = shlex::split(raw).ok_or_else(|| {
+        CodexErr::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid auth rotation command quoting",
+        ))
+    })?;
+
+    let mut iter = parts.into_iter();
+    let program = iter.next().ok_or_else(|| {
+        CodexErr::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "auth rotation command is empty",
+        ))
+    })?;
+    let args = iter.map(OsString::from).collect::<Vec<_>>();
+    Ok((OsString::from(program), args))
 }
 
 struct ApiTelemetry {
@@ -1387,7 +1506,10 @@ impl WebsocketTelemetry for ApiTelemetry {
 #[cfg(test)]
 mod tests {
     use super::ModelClient;
+    use super::CODEXN_AUTH_ROTATE_CMD_ENV;
     use super::is_usage_limit_or_quota_error;
+    use super::parse_auth_rotate_command;
+    use super::try_recover_with_auth_rotate_command;
     use codex_api::TransportError;
     use codex_api::error::ApiError;
     use codex_otel::OtelManager;
@@ -1397,6 +1519,7 @@ mod tests {
     use codex_protocol::protocol::SubAgentSource;
     use pretty_assertions::assert_eq;
     use reqwest::StatusCode;
+    use serial_test::serial;
     use serde_json::json;
 
     fn test_model_client(session_source: SessionSource) -> ModelClient {
@@ -1521,5 +1644,96 @@ mod tests {
             ),
         });
         assert!(!is_usage_limit_or_quota_error(&err));
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            unsafe { std::env::set_var(key, value) };
+            Self { key, original }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let original = std::env::var(key).ok();
+            unsafe { std::env::remove_var(key) };
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn auth_rotate_command_recovery_returns_false_when_unconfigured() {
+        let _guard = EnvVarGuard::remove(CODEXN_AUTH_ROTATE_CMD_ENV);
+        let mut attempted = false;
+        let recovered = try_recover_with_auth_rotate_command(None, &mut attempted)
+            .await
+            .expect("missing command should not error");
+        assert!(!recovered);
+        assert!(!attempted);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn auth_rotate_command_recovery_succeeds_without_auth_manager() {
+        let _guard = EnvVarGuard::set(CODEXN_AUTH_ROTATE_CMD_ENV, "true");
+        let mut attempted = false;
+        let recovered = try_recover_with_auth_rotate_command(None, &mut attempted)
+            .await
+            .expect("configured command should succeed");
+        assert!(recovered);
+        assert!(attempted);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn auth_rotate_command_recovery_surfaces_command_failure() {
+        let _guard = EnvVarGuard::set(CODEXN_AUTH_ROTATE_CMD_ENV, "false");
+        let mut attempted = false;
+        let err = try_recover_with_auth_rotate_command(None, &mut attempted)
+            .await
+            .expect_err("failing command should return error");
+        assert!(attempted);
+        let rendered = err.to_string();
+        assert!(rendered.contains("auth rotation command failed"));
+    }
+
+    #[test]
+    fn parse_auth_rotate_command_supports_quoted_args() {
+        let (program, args) = parse_auth_rotate_command(
+            r#"codex-auth-rotate --reason "usage limit reached" --quiet"#,
+        )
+        .expect("parse valid command");
+
+        assert_eq!(program.to_string_lossy(), "codex-auth-rotate");
+        assert_eq!(
+            args.iter()
+                .map(|arg| arg.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            vec![
+                "--reason".to_string(),
+                "usage limit reached".to_string(),
+                "--quiet".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_auth_rotate_command_rejects_empty_command() {
+        let err = parse_auth_rotate_command("   ").expect_err("empty command should fail");
+        assert!(err.to_string().contains("empty"));
     }
 }
