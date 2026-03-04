@@ -1862,22 +1862,14 @@ async fn rate_limit_warnings_emit_thresholds() {
     let mut state = RateLimitWarningState::default();
     let mut warnings: Vec<String> = Vec::new();
 
-    warnings.extend(state.take_warnings(Some(10.0), Some(10079), Some(55.0), Some(299)));
-    warnings.extend(state.take_warnings(Some(55.0), Some(10081), Some(10.0), Some(299)));
-    warnings.extend(state.take_warnings(Some(10.0), Some(10081), Some(80.0), Some(299)));
-    warnings.extend(state.take_warnings(Some(80.0), Some(10081), Some(10.0), Some(299)));
+    warnings.extend(state.take_warnings(Some(10.0), Some(10079), Some(94.0), Some(299)));
+    warnings.extend(state.take_warnings(Some(94.0), Some(10081), Some(10.0), Some(299)));
     warnings.extend(state.take_warnings(Some(10.0), Some(10081), Some(95.0), Some(299)));
     warnings.extend(state.take_warnings(Some(95.0), Some(10079), Some(10.0), Some(299)));
 
     assert_eq!(
         warnings,
         vec![
-            String::from(
-                "Heads up, you have less than 25% of your 5h limit left. Run /status for a breakdown."
-            ),
-            String::from(
-                "Heads up, you have less than 25% of your weekly limit left. Run /status for a breakdown.",
-            ),
             String::from(
                 "Heads up, you have less than 5% of your 5h limit left. Run /status for a breakdown."
             ),
@@ -1894,11 +1886,11 @@ async fn test_rate_limit_warnings_monthly() {
     let mut state = RateLimitWarningState::default();
     let mut warnings: Vec<String> = Vec::new();
 
-    warnings.extend(state.take_warnings(Some(75.0), Some(43199), None, None));
+    warnings.extend(state.take_warnings(Some(95.0), Some(43199), None, None));
     assert_eq!(
         warnings,
         vec![String::from(
-            "Heads up, you have less than 25% of your monthly limit left. Run /status for a breakdown.",
+            "Heads up, you have less than 5% of your monthly limit left. Run /status for a breakdown.",
         ),],
         "expected one warning per limit for the highest crossed threshold"
     );
@@ -2117,7 +2109,7 @@ async fn rate_limit_switch_prompt_shows_once_per_session() {
     let (mut chat, _, _) = make_chatwidget_manual(Some("gpt-5")).await;
     chat.auth_manager = codex_core::test_support::auth_manager_from_auth(auth);
 
-    chat.on_rate_limit_snapshot(Some(snapshot(90.0)));
+    chat.on_rate_limit_snapshot(Some(snapshot(95.0)));
     assert!(
         chat.rate_limit_warnings.primary_index >= 1,
         "warnings not emitted"
@@ -2157,7 +2149,7 @@ async fn rate_limit_switch_prompt_defers_until_task_complete() {
     chat.auth_manager = codex_core::test_support::auth_manager_from_auth(auth);
 
     chat.bottom_pane.set_task_running(true);
-    chat.on_rate_limit_snapshot(Some(snapshot(90.0)));
+    chat.on_rate_limit_snapshot(Some(snapshot(95.0)));
     assert!(matches!(
         chat.rate_limit_switch_prompt,
         RateLimitSwitchPromptState::Pending
@@ -2178,7 +2170,7 @@ async fn rate_limit_switch_prompt_popup_snapshot() {
         CodexAuth::create_dummy_chatgpt_auth_for_testing(),
     );
 
-    chat.on_rate_limit_snapshot(Some(snapshot(92.0)));
+    chat.on_rate_limit_snapshot(Some(snapshot(95.0)));
     chat.maybe_show_pending_rate_limit_prompt();
 
     let popup = render_bottom_popup(&chat, 80);
@@ -2763,7 +2755,7 @@ async fn plan_implementation_popup_skips_when_rate_limit_prompt_pending() {
             status: StepStatus::Pending,
         }],
     });
-    chat.on_rate_limit_snapshot(Some(snapshot(92.0)));
+    chat.on_rate_limit_snapshot(Some(snapshot(95.0)));
     chat.on_task_complete(None, false);
 
     let popup = render_bottom_popup(&chat, 80);

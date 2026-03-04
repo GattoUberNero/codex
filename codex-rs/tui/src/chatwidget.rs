@@ -453,9 +453,9 @@ fn is_standard_tool_call(parsed_cmd: &[ParsedCommand]) -> bool {
             .all(|parsed| !matches!(parsed, ParsedCommand::Unknown { .. }))
 }
 
-const RATE_LIMIT_WARNING_THRESHOLDS: [f64; 3] = [75.0, 90.0, 95.0];
+const RATE_LIMIT_WARNING_THRESHOLDS: [f64; 1] = [95.0];
 const NUDGE_MODEL_SLUG: &str = "gpt-5.1-codex-mini";
-const RATE_LIMIT_SWITCH_PROMPT_THRESHOLD: f64 = 90.0;
+const RATE_LIMIT_SWITCH_PROMPT_THRESHOLD: f64 = 95.0;
 
 #[derive(Default)]
 struct RateLimitWarningState {
