@@ -1387,12 +1387,16 @@ impl WebsocketTelemetry for ApiTelemetry {
 #[cfg(test)]
 mod tests {
     use super::ModelClient;
+    use super::is_usage_limit_or_quota_error;
+    use codex_api::TransportError;
+    use codex_api::error::ApiError;
     use codex_otel::OtelManager;
     use codex_protocol::ThreadId;
     use codex_protocol::openai_models::ModelInfo;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::SubAgentSource;
     use pretty_assertions::assert_eq;
+    use reqwest::StatusCode;
     use serde_json::json;
 
     fn test_model_client(session_source: SessionSource) -> ModelClient {
@@ -1480,5 +1484,42 @@ mod tests {
             .await
             .expect("empty summarize request should succeed");
         assert_eq!(output.len(), 0);
+    }
+
+    #[test]
+    fn usage_limit_or_quota_error_matches_quota_exceeded() {
+        assert!(is_usage_limit_or_quota_error(&ApiError::QuotaExceeded));
+    }
+
+    #[test]
+    fn usage_limit_or_quota_error_matches_usage_limit_transport_error() {
+        let err = ApiError::Transport(TransportError::Http {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            url: Some("https://example.com/v1/responses".to_string()),
+            headers: None,
+            body: Some(
+                serde_json::json!({
+                    "error": { "type": "usage_limit_reached" }
+                })
+                .to_string(),
+            ),
+        });
+        assert!(is_usage_limit_or_quota_error(&err));
+    }
+
+    #[test]
+    fn usage_limit_or_quota_error_ignores_non_usage_429_transport_error() {
+        let err = ApiError::Transport(TransportError::Http {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            url: Some("https://example.com/v1/responses".to_string()),
+            headers: None,
+            body: Some(
+                serde_json::json!({
+                    "error": { "type": "slow_down" }
+                })
+                .to_string(),
+            ),
+        });
+        assert!(!is_usage_limit_or_quota_error(&err));
     }
 }
