@@ -41,7 +41,7 @@ async fn summarize_context_three_requests_and_instructions() -> anyhow::Result<(
 set -e
 payload_path="$(dirname "${0}")/notify.txt"
 tmp_path="${payload_path}.tmp"
-echo -n "${@: -1}" > "${tmp_path}"
+cat > "${tmp_path}"
 mv "${tmp_path}" "${payload_path}""#,
     )?;
     std::fs::set_permissions(&notify_script, std::fs::Permissions::from_mode(0o755))?;

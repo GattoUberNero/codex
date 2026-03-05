@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 use tracing::debug;
 use tracing::warn;
 
@@ -18,7 +19,7 @@ use crate::parse_hook_actions_from_stdout;
 const LEGACY_NOTIFY_TIMEOUT: Duration = Duration::from_millis(1500);
 const LEGACY_NOTIFY_KILL_REAP_TIMEOUT: Duration = Duration::from_millis(250);
 
-/// Legacy notify payload appended as the final argv argument for backward compatibility.
+/// Notify payload sent to the external hook process over stdin.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 enum UserNotification {
@@ -75,9 +76,7 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                         };
                     }
                 };
-                if let Ok(notify_payload) = legacy_notify_json(payload) {
-                    command.arg(notify_payload);
-                }
+                let notify_payload = legacy_notify_json(payload).ok();
                 debug!(
                     hook_name = "legacy_notify",
                     argv0 = argv.first().map(String::as_str).unwrap_or(""),
@@ -85,9 +84,8 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                     "spawning legacy notify hook process"
                 );
 
-                // Backwards-compat payload shape is preserved (argv + JSON arg).
                 // We await completion so hooks can optionally emit JSON actions on stdout.
-                command.stdin(Stdio::null()).stderr(Stdio::null());
+                command.stdin(Stdio::piped()).stderr(Stdio::null());
 
                 command.stdout(Stdio::piped());
 
@@ -100,6 +98,58 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                         };
                     }
                 };
+
+                if let Some(mut stdin) = child.stdin.take() {
+                    if let Some(notify_payload) = notify_payload {
+                        match tokio::time::timeout(
+                            LEGACY_NOTIFY_TIMEOUT,
+                            stdin.write_all(notify_payload.as_bytes()),
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(err)) if err.kind() == std::io::ErrorKind::BrokenPipe => {
+                                debug!(
+                                    hook_name = "legacy_notify",
+                                    "legacy notify stdin closed before payload was fully consumed"
+                                );
+                            }
+                            Ok(Err(err)) => {
+                                if let Some(stdout) = child.stdout.take() {
+                                    drop(stdout);
+                                }
+                                let _ = child.start_kill();
+                                let _ = tokio::time::timeout(
+                                    LEGACY_NOTIFY_KILL_REAP_TIMEOUT,
+                                    child.wait(),
+                                )
+                                .await;
+                                return HookExecution {
+                                    result: HookResult::FailedContinue(err.into()),
+                                    actions: Vec::new(),
+                                };
+                            }
+                            Err(_) => {
+                                let _ = child.start_kill();
+                                let _ = tokio::time::timeout(
+                                    LEGACY_NOTIFY_KILL_REAP_TIMEOUT,
+                                    child.wait(),
+                                )
+                                .await;
+                                warn!(
+                                    timeout_ms = LEGACY_NOTIFY_TIMEOUT.as_millis() as u64,
+                                    kill_reap_timeout_ms =
+                                        LEGACY_NOTIFY_KILL_REAP_TIMEOUT.as_millis() as u64,
+                                    "legacy_notify stdin writer timed out; attempted to kill/reap direct child and continuing without actions"
+                                );
+                                return HookExecution {
+                                    result: HookResult::Success,
+                                    actions: Vec::new(),
+                                };
+                            }
+                        }
+                    }
+                }
 
                 let stdout_task = child.stdout.take().map(|mut stdout| {
                     tokio::spawn(async move {
@@ -334,6 +384,114 @@ mod tests {
                 message: "hello".to_string()
             }]
         );
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn notify_hook_writes_payload_to_stdin() -> Result<()> {
+        let hook = notify_hook(vec![
+            "python3".to_string(),
+            "-c".to_string(),
+            "import json,sys; payload=json.load(sys.stdin); print(json.dumps({'actions':[{'type':'visible_note','message': payload.get('thread-name') or 'missing'}]}), end='')".to_string(),
+        ]);
+
+        let payload = HookPayload {
+            session_id: ThreadId::new(),
+            cwd: tempdir()?.path().to_path_buf(),
+            client: None,
+            triggered_at: chrono::Utc::now(),
+            hook_event: HookEvent::AfterAgent {
+                event: crate::HookEventAfterAgent {
+                    thread_id: ThreadId::new(),
+                    thread_name: Some("example-A-".to_string()),
+                    turn_id: "turn-stdin".to_string(),
+                    input_messages: vec!["hi".to_string()],
+                    last_assistant_message: Some("done".to_string()),
+                },
+            },
+        };
+
+        let outcome = hook.execute(&payload).await;
+        assert!(matches!(outcome.result, HookResult::Success));
+        assert_eq!(
+            outcome.actions,
+            vec![crate::HookAction::VisibleNote {
+                message: "example-A-".to_string()
+            }]
+        );
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn notify_hook_handles_large_payload_over_stdin() -> Result<()> {
+        let hook = notify_hook(vec![
+            "python3".to_string(),
+            "-c".to_string(),
+            "import json,sys; payload=json.load(sys.stdin); msg=payload.get('last-assistant-message') or ''; print(json.dumps({'actions':[{'type':'visible_note','message': str(len(msg))}]}), end='')".to_string(),
+        ]);
+
+        let large_message = "x".repeat(300_000);
+        let payload = HookPayload {
+            session_id: ThreadId::new(),
+            cwd: tempdir()?.path().to_path_buf(),
+            client: None,
+            triggered_at: chrono::Utc::now(),
+            hook_event: HookEvent::AfterAgent {
+                event: crate::HookEventAfterAgent {
+                    thread_id: ThreadId::new(),
+                    thread_name: Some("example-A-".to_string()),
+                    turn_id: "turn-large".to_string(),
+                    input_messages: vec!["hi".to_string()],
+                    last_assistant_message: Some(large_message.clone()),
+                },
+            },
+        };
+
+        let outcome = hook.execute(&payload).await;
+        assert!(matches!(outcome.result, HookResult::Success));
+        assert_eq!(
+            outcome.actions,
+            vec![crate::HookAction::VisibleNote {
+                message: large_message.len().to_string()
+            }]
+        );
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn notify_hook_times_out_when_stdin_consumer_stalls_fail_open() -> Result<()> {
+        let hook = notify_hook(vec![
+            "python3".to_string(),
+            "-c".to_string(),
+            "import time; time.sleep(3)".to_string(),
+        ]);
+
+        let payload = HookPayload {
+            session_id: ThreadId::new(),
+            cwd: tempdir()?.path().to_path_buf(),
+            client: None,
+            triggered_at: chrono::Utc::now(),
+            hook_event: HookEvent::AfterAgent {
+                event: crate::HookEventAfterAgent {
+                    thread_id: ThreadId::new(),
+                    thread_name: Some("example-A-".to_string()),
+                    turn_id: "turn-stalled-stdin".to_string(),
+                    input_messages: vec!["hi".to_string()],
+                    last_assistant_message: Some("x".repeat(2_000_000)),
+                },
+            },
+        };
+
+        let started = std::time::Instant::now();
+        let outcome = hook.execute(&payload).await;
+        let elapsed = started.elapsed();
+
+        assert!(matches!(outcome.result, HookResult::Success));
+        assert!(outcome.actions.is_empty());
+        assert!(elapsed < Duration::from_secs(3));
         Ok(())
     }
 
