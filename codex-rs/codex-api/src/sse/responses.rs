@@ -282,6 +282,13 @@ pub fn process_responses_event(
                 {
                     if is_context_window_error(&error) {
                         response_error = ApiError::ContextWindowExceeded;
+                    } else if is_usage_limit_reached_error(&error) {
+                        response_error = ApiError::Transport(TransportError::Http {
+                            status: http::StatusCode::TOO_MANY_REQUESTS,
+                            url: None,
+                            headers: None,
+                            body: Some(usage_limit_error_body(&error)),
+                        });
                     } else if is_quota_exceeded_error(&error) {
                         response_error = ApiError::QuotaExceeded;
                     } else if is_usage_not_included(&error) {
@@ -492,8 +499,25 @@ fn is_context_window_error(error: &Error) -> bool {
     error.code.as_deref() == Some("context_length_exceeded")
 }
 
+fn is_usage_limit_reached_error(error: &Error) -> bool {
+    error.r#type.as_deref() == Some("usage_limit_reached")
+        || error.code.as_deref() == Some("usage_limit_reached")
+}
+
 fn is_quota_exceeded_error(error: &Error) -> bool {
     error.code.as_deref() == Some("insufficient_quota")
+}
+
+fn usage_limit_error_body(error: &Error) -> String {
+    serde_json::json!({
+        "error": {
+            "type": "usage_limit_reached",
+            "message": error.message,
+            "plan_type": error.plan_type,
+            "resets_at": error.resets_at,
+        }
+    })
+    .to_string()
 }
 
 fn is_usage_not_included(error: &Error) -> bool {
@@ -839,6 +863,35 @@ mod tests {
         assert_eq!(events.len(), 1);
 
         assert_matches!(events[0], Err(ApiError::QuotaExceeded));
+    }
+
+    #[tokio::test]
+    async fn usage_limit_error_type_is_mapped_to_too_many_requests_transport() {
+        let raw_error = r#"{"type":"response.failed","sequence_number":3,"response":{"id":"resp_usage_limit","object":"response","created_at":1759771627,"status":"failed","background":false,"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"pro","resets_at":1704067242},"incomplete_details":null}}"#;
+
+        let sse1 = format!("event: response.failed\ndata: {raw_error}\n\n");
+
+        let events = collect_events(&[sse1.as_bytes()]).await;
+
+        assert_eq!(events.len(), 1);
+
+        match &events[0] {
+            Err(ApiError::Transport(TransportError::Http {
+                status,
+                body,
+                url,
+                headers,
+            })) => {
+                assert_eq!(*status, http::StatusCode::TOO_MANY_REQUESTS);
+                assert!(url.is_none());
+                assert!(headers.is_none());
+                assert!(
+                    body.as_deref()
+                        .is_some_and(|value| value.contains("usage_limit_reached"))
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -207,6 +207,8 @@ pub struct ModelClientSession {
     /// keep sending it unchanged between turn requests (e.g., for retries, incremental
     /// appends, or continuation requests), and must not send it between different turns.
     turn_state: Arc<OnceLock<String>>,
+    usage_limit_recovery: Option<ExternalAuthRecovery>,
+    command_recovery_attempted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -271,6 +273,10 @@ impl ModelClient {
             client: self.clone(),
             websocket_session: self.take_cached_websocket_session(),
             turn_state: Arc::new(OnceLock::new()),
+            usage_limit_recovery: self.state.auth_manager.as_ref().map(|manager| {
+                manager.external_auth_recovery(ExternalAuthRefreshReason::UsageLimitReached)
+            }),
+            command_recovery_attempted: false,
         }
     }
 
@@ -783,6 +789,33 @@ impl ModelClientSession {
             ))
     }
 
+    pub(crate) async fn try_recover_stream_usage_limit_or_quota(
+        &mut self,
+        err: &CodexErr,
+    ) -> Result<bool> {
+        if !matches!(
+            err,
+            CodexErr::UsageLimitReached(_) | CodexErr::QuotaExceeded
+        ) {
+            return Ok(false);
+        }
+
+        self.reset_websocket_session();
+        try_recover_usage_limit_or_quota(
+            &mut self.usage_limit_recovery,
+            self.client.state.auth_manager.as_ref(),
+            &mut self.command_recovery_attempted,
+        )
+        .await
+    }
+
+    pub(crate) fn reset_usage_limit_recovery_budget(&mut self) {
+        self.usage_limit_recovery = self.client.state.auth_manager.as_ref().map(|manager| {
+            manager.external_auth_recovery(ExternalAuthRefreshReason::UsageLimitReached)
+        });
+        self.command_recovery_attempted = false;
+    }
+
     fn responses_request_compression(&self, auth: Option<&crate::auth::CodexAuth>) -> Compression {
         if self.client.state.enable_request_compression
             && auth.is_some_and(CodexAuth::is_chatgpt_auth)
@@ -800,7 +833,7 @@ impl ModelClientSession {
     /// `text` controls used for output schemas.
     #[allow(clippy::too_many_arguments)]
     async fn stream_responses_api(
-        &self,
+        &mut self,
         prompt: &Prompt,
         model_info: &ModelInfo,
         otel_manager: &OtelManager,
@@ -823,10 +856,6 @@ impl ModelClientSession {
         let mut auth_recovery = auth_manager
             .as_ref()
             .map(super::auth::AuthManager::unauthorized_recovery);
-        let mut usage_limit_recovery = auth_manager.as_ref().map(|manager| {
-            manager.external_auth_recovery(ExternalAuthRefreshReason::UsageLimitReached)
-        });
-        let mut command_recovery_attempted = false;
         loop {
             let client_setup = self.client.current_client_setup().await?;
             let transport = ReqwestTransport::new(build_reqwest_client());
@@ -863,9 +892,9 @@ impl ModelClientSession {
                 Err(err) if is_usage_limit_or_quota_error(&err) => {
                     recover_from_usage_limit_or_quota(
                         err,
-                        &mut usage_limit_recovery,
+                        &mut self.usage_limit_recovery,
                         auth_manager.as_ref(),
-                        &mut command_recovery_attempted,
+                        &mut self.command_recovery_attempted,
                     )
                     .await?;
                     continue;
@@ -893,10 +922,6 @@ impl ModelClientSession {
         let mut auth_recovery = auth_manager
             .as_ref()
             .map(super::auth::AuthManager::unauthorized_recovery);
-        let mut usage_limit_recovery = auth_manager.as_ref().map(|manager| {
-            manager.external_auth_recovery(ExternalAuthRefreshReason::UsageLimitReached)
-        });
-        let mut command_recovery_attempted = false;
         loop {
             let client_setup = self.client.current_client_setup().await?;
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
@@ -945,9 +970,9 @@ impl ModelClientSession {
                     self.reset_websocket_session();
                     recover_from_usage_limit_or_quota(
                         err,
-                        &mut usage_limit_recovery,
+                        &mut self.usage_limit_recovery,
                         auth_manager.as_ref(),
-                        &mut command_recovery_attempted,
+                        &mut self.command_recovery_attempted,
                     )
                     .await?;
                     continue;
@@ -981,9 +1006,9 @@ impl ModelClientSession {
                     self.reset_websocket_session();
                     recover_from_usage_limit_or_quota(
                         err,
-                        &mut usage_limit_recovery,
+                        &mut self.usage_limit_recovery,
                         auth_manager.as_ref(),
-                        &mut command_recovery_attempted,
+                        &mut self.command_recovery_attempted,
                     )
                     .await?;
                     continue;
@@ -1340,18 +1365,36 @@ async fn recover_from_usage_limit_or_quota(
     auth_manager: Option<&Arc<AuthManager>>,
     command_recovery_attempted: &mut bool,
 ) -> Result<()> {
+    if try_recover_usage_limit_or_quota(
+        usage_limit_recovery,
+        auth_manager,
+        command_recovery_attempted,
+    )
+    .await?
+    {
+        return Ok(());
+    }
+
+    Err(map_api_error(err))
+}
+
+async fn try_recover_usage_limit_or_quota(
+    usage_limit_recovery: &mut Option<ExternalAuthRecovery>,
+    auth_manager: Option<&Arc<AuthManager>>,
+    command_recovery_attempted: &mut bool,
+) -> Result<bool> {
     if let Some(recovery) = usage_limit_recovery
         && recovery.has_next()
     {
         let external_result = recovery.next().await;
         return match external_result {
-            Ok(_) => Ok(()),
+            Ok(_) => Ok(true),
             Err(RefreshTokenError::Permanent(failed)) => Err(CodexErr::RefreshTokenFailed(failed)),
             Err(RefreshTokenError::Transient(other)) => {
                 if try_recover_with_auth_rotate_command(auth_manager, command_recovery_attempted)
                     .await?
                 {
-                    Ok(())
+                    Ok(true)
                 } else {
                     Err(CodexErr::Io(other))
                 }
@@ -1359,11 +1402,7 @@ async fn recover_from_usage_limit_or_quota(
         };
     }
 
-    if try_recover_with_auth_rotate_command(auth_manager, command_recovery_attempted).await? {
-        return Ok(());
-    }
-
-    Err(map_api_error(err))
+    try_recover_with_auth_rotate_command(auth_manager, command_recovery_attempted).await
 }
 
 async fn try_recover_with_auth_rotate_command(
@@ -1408,10 +1447,7 @@ async fn try_recover_with_auth_rotate_command(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let message = if stderr.is_empty() {
-            format!(
-                "auth rotation command failed with status {}",
-                output.status
-            )
+            format!("auth rotation command failed with status {}", output.status)
         } else {
             format!(
                 "auth rotation command failed with status {}: {}",
@@ -1505,8 +1541,8 @@ impl WebsocketTelemetry for ApiTelemetry {
 
 #[cfg(test)]
 mod tests {
-    use super::ModelClient;
     use super::CODEXN_AUTH_ROTATE_CMD_ENV;
+    use super::ModelClient;
     use super::is_usage_limit_or_quota_error;
     use super::parse_auth_rotate_command;
     use super::try_recover_with_auth_rotate_command;
@@ -1519,8 +1555,8 @@ mod tests {
     use codex_protocol::protocol::SubAgentSource;
     use pretty_assertions::assert_eq;
     use reqwest::StatusCode;
-    use serial_test::serial;
     use serde_json::json;
+    use serial_test::serial;
 
     fn test_model_client(session_source: SessionSource) -> ModelClient {
         let provider = crate::model_provider_info::create_oss_provider_with_base_url(

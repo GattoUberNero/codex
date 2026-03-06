@@ -7604,10 +7604,7 @@ impl ChatWidget {
                 };
                 let action_label = match action {
                     NeroAutoHotkeyAction::ToggleEnabled => {
-                        format!(
-                            "Nero-auto {}",
-                            if next.enabled { "ON" } else { "OFF" }
-                        )
+                        format!("Nero-auto {}", if next.enabled { "ON" } else { "OFF" })
                     }
                     NeroAutoHotkeyAction::IncreaseDifficulty => {
                         format!("Nero-auto diff-check -> {}", next.autonomy_level)
@@ -8310,7 +8307,10 @@ fn read_nero_auto_runtime_config(doc: &TomlValue) -> NeroAutoRuntimeConfig {
     let policy = auto.and_then(|v| v.get("policy"));
 
     NeroAutoRuntimeConfig {
-        enabled: toml_bool(auto.and_then(|v| v.get("enabled")), NeroAutoRuntimeConfig::default().enabled),
+        enabled: toml_bool(
+            auto.and_then(|v| v.get("enabled")),
+            NeroAutoRuntimeConfig::default().enabled,
+        ),
         autonomy_level: clamp_autonomy_level(toml_int(
             policy.and_then(|v| v.get("autonomy_level")),
             NeroAutoRuntimeConfig::default().autonomy_level,
@@ -8323,19 +8323,11 @@ fn read_nero_auto_runtime_config(doc: &TomlValue) -> NeroAutoRuntimeConfig {
 }
 
 fn bump_wrapping(value: i64, min: i64, max: i64) -> i64 {
-    if value >= max {
-        min
-    } else {
-        value + 1
-    }
+    if value >= max { min } else { value + 1 }
 }
 
 fn bump_wrapping_down(value: i64, min: i64, max: i64) -> i64 {
-    if value <= min {
-        max
-    } else {
-        value - 1
-    }
+    if value <= min { max } else { value - 1 }
 }
 
 fn update_nero_auto_runtime_config(
@@ -8385,7 +8377,8 @@ fn update_nero_auto_runtime_config(
         auto.insert("enabled".to_string(), TomlValue::Boolean(next.enabled));
     }
     {
-        let policy = ensure_nested_table_mut(&mut doc, &["nero", "hook", "runtime", "auto", "policy"]);
+        let policy =
+            ensure_nested_table_mut(&mut doc, &["nero", "hook", "runtime", "auto", "policy"]);
         policy.insert(
             "autonomy_level".to_string(),
             TomlValue::Integer(next.autonomy_level),

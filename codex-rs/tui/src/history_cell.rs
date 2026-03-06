@@ -1662,67 +1662,65 @@ impl HistoryCell for NeroHookBlockCell {
         if self.content.starts_with("NERO HOOK SYSTEM") {
             let mut lines: Vec<Line<'static>> =
                 vec![vec!["NERO HOOK SYSTEM".yellow().bold()].into()];
-	            let mut block_lines = adaptive_wrap_lines(
-	                self.content
-	                    .split('\n')
-	                    .skip(1)
-	                    .map(|line| {
-	                        let trimmed = line.trim_start();
-	                        if trimmed == "campaign_runtime:" {
-	                            return Line::from(line.to_string())
-	                                .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
-	                        }
-	                        if trimmed.starts_with("status:")
-	                            && line.contains("campaign=unresolved")
-	                        {
-                            let token = "campaign=unresolved";
-                            if let Some(idx) = line.find(token) {
-                                let before = &line[..idx];
-                                let after = &line[idx + token.len()..];
-                                return Line::from(vec![
-                                    Span::from(before.to_string()).style(cream_style),
-                                    Span::from(token.to_string()).style(
-                                        Style::default()
-                                            .fg(Color::White)
-                                            .bg(Color::Red)
-                                            .add_modifier(Modifier::BOLD),
-                                    ),
-                                    Span::from(after.to_string()).style(cream_style),
-                                ]);
-                            }
-                            return Line::from(line.to_string()).style(cream_style);
+            let mut block_lines = adaptive_wrap_lines(
+                self.content.split('\n').skip(1).map(|line| {
+                    let trimmed = line.trim_start();
+                    if trimmed == "campaign_runtime:" {
+                        return Line::from(line.to_string()).style(
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        );
+                    }
+                    if trimmed.starts_with("status:") && line.contains("campaign=unresolved") {
+                        let token = "campaign=unresolved";
+                        if let Some(idx) = line.find(token) {
+                            let before = &line[..idx];
+                            let after = &line[idx + token.len()..];
+                            return Line::from(vec![
+                                Span::from(before.to_string()).style(cream_style),
+                                Span::from(token.to_string()).style(
+                                    Style::default()
+                                        .fg(Color::White)
+                                        .bg(Color::Red)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::from(after.to_string()).style(cream_style),
+                            ]);
                         }
-                        if trimmed.starts_with("status:") {
-                            return Line::from(line.to_string()).style(cream_style);
-                        }
-	                        if trimmed == "nero-hook.system"
-	                            || trimmed == "nero-hook.msg"
-	                            || trimmed == "nero-hook.auto"
-	                        {
-	                            return Line::from(line.to_string())
-	                                .style(Style::default().yellow().add_modifier(Modifier::BOLD));
-	                        }
-	                        if trimmed.starts_with("- ")
-	                            && line.contains(":")
-	                            && let Some(idx) = line.find(':')
-	                        {
-	                            let label = &line[..=idx];
-	                            let value = &line[idx + 1..];
-	                            return Line::from(vec![
-	                                Span::from(label.to_string()).style(
-	                                    Style::default()
-	                                        .fg(Color::Cyan)
-	                                        .add_modifier(Modifier::BOLD),
-	                                ),
-	                                Span::from(value.to_string()).style(Style::default().white()),
-	                            ]);
-	                        }
-	                        if trimmed.chars().all(|c| c == '-') {
-	                            return Line::from(line.to_string())
-	                                .style(Style::default().yellow().add_modifier(Modifier::DIM));
-	                        }
-                        Line::from(line.to_string()).style(Style::default().white())
-                    }),
+                        return Line::from(line.to_string()).style(cream_style);
+                    }
+                    if trimmed.starts_with("status:") {
+                        return Line::from(line.to_string()).style(cream_style);
+                    }
+                    if trimmed == "nero-hook.system"
+                        || trimmed == "nero-hook.msg"
+                        || trimmed == "nero-hook.auto"
+                    {
+                        return Line::from(line.to_string())
+                            .style(Style::default().yellow().add_modifier(Modifier::BOLD));
+                    }
+                    if trimmed.starts_with("- ")
+                        && line.contains(":")
+                        && let Some(idx) = line.find(':')
+                    {
+                        let label = &line[..=idx];
+                        let value = &line[idx + 1..];
+                        return Line::from(vec![
+                            Span::from(label.to_string()).style(
+                                Style::default()
+                                    .fg(Color::Cyan)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::from(value.to_string()).style(Style::default().white()),
+                        ]);
+                    }
+                    if trimmed.chars().all(|c| c == '-') {
+                        return Line::from(line.to_string())
+                            .style(Style::default().yellow().add_modifier(Modifier::DIM));
+                    }
+                    Line::from(line.to_string()).style(Style::default().white())
+                }),
                 RtOptions::new(inner_width)
                     .initial_indent("  ".into())
                     .subsequent_indent("  ".into()),
@@ -1771,11 +1769,7 @@ impl HistoryCell for NeroHookBlockCell {
                     .add_modifier(Modifier::BOLD);
                 (alert, alert, true)
             } else {
-                (
-                    cream_style.add_modifier(Modifier::BOLD),
-                    cream_style,
-                    false,
-                )
+                (cream_style.add_modifier(Modifier::BOLD), cream_style, false)
             };
             lines.push(Line::from(""));
             lines.push(vec!["status".bold()].into());

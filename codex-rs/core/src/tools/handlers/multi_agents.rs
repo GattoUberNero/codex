@@ -87,14 +87,13 @@ async fn ensure_resume_target_allowed(
 
     let status = session.services.agent_control.get_status(agent_id).await;
     if matches!(status, AgentStatus::NotFound) {
-        if session
-            .services
-            .agent_control
-            .manages_known_agent(agent_id)
-        {
+        if session.services.agent_control.manages_known_agent(agent_id) {
             return Ok(());
         }
-        return Err(collab_agent_error(agent_id, CodexErr::ThreadNotFound(agent_id)));
+        return Err(collab_agent_error(
+            agent_id,
+            CodexErr::ThreadNotFound(agent_id),
+        ));
     }
 
     Err(outside_scope_error(agent_id))

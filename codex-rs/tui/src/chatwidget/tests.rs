@@ -4380,7 +4380,9 @@ async fn nero_auto_hotkeys_adjust_policy_and_respect_composer_focus() {
         Some(6)
     );
     assert_eq!(
-        policy.get("max_auto_rounds").and_then(TomlValue::as_integer),
+        policy
+            .get("max_auto_rounds")
+            .and_then(TomlValue::as_integer),
         Some(8)
     );
 
@@ -4432,7 +4434,9 @@ async fn nero_auto_hotkeys_function_key_fallbacks_work() {
         Some(6)
     );
     assert_eq!(
-        policy.get("max_auto_rounds").and_then(TomlValue::as_integer),
+        policy
+            .get("max_auto_rounds")
+            .and_then(TomlValue::as_integer),
         Some(8)
     );
 }
@@ -4464,7 +4468,9 @@ async fn nero_auto_hotkeys_function_key_fallbacks_work_without_modifiers() {
         Some(6)
     );
     assert_eq!(
-        policy.get("max_auto_rounds").and_then(TomlValue::as_integer),
+        policy
+            .get("max_auto_rounds")
+            .and_then(TomlValue::as_integer),
         Some(8)
     );
 }
@@ -4498,7 +4504,9 @@ async fn nero_auto_hotkeys_function_key_shift_supports_decrement() {
         Some(5)
     );
     assert_eq!(
-        policy.get("max_auto_rounds").and_then(TomlValue::as_integer),
+        policy
+            .get("max_auto_rounds")
+            .and_then(TomlValue::as_integer),
         Some(7)
     );
 }

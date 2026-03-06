@@ -48,11 +48,13 @@ use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_message_item_added;
 use core_test_support::responses::ev_output_text_delta;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_response_sequence;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::sse_failed;
+use core_test_support::responses::sse_response;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
@@ -61,6 +63,7 @@ use dunce::canonicalize as normalize_path;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use serial_test::serial;
 use std::io::Write;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -87,6 +90,28 @@ fn message_input_texts(item: &serde_json::Value) -> Vec<&str> {
         .iter()
         .filter_map(|entry| entry.get("text").and_then(|text| text.as_str()))
         .collect()
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let original = std::env::var(key).ok();
+        unsafe { std::env::set_var(key, value) };
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(value) => unsafe { std::env::set_var(self.key, value) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
+    }
 }
 
 /// Writes an `auth.json` into the provided `codex_home` with the specified parameters.
@@ -1987,6 +2012,210 @@ async fn usage_limit_error_emits_rate_limit_event() -> anyhow::Result<()> {
         error_event.message.to_lowercase().contains("usage limit"),
         "unexpected error message for submission {submission_id}: {}",
         error_event.message
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(auth_rotate_cmd_env)]
+async fn usage_limit_stream_error_recovers_via_auth_rotate_command() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    const AUTH_ROTATE_CMD_ENV: &str = "CODEXN_AUTH_ROTATE_CMD";
+
+    let _guard = EnvVarGuard::set(AUTH_ROTATE_CMD_ENV, "true");
+    let server = MockServer::start().await;
+    let failed_stream = sse(vec![
+        ev_response_created("resp-limit"),
+        json!({
+            "type": "response.failed",
+            "response": {
+                "id": "resp-limit",
+                "error": {
+                    "type": "usage_limit_reached",
+                    "message": "limit reached",
+                    "plan_type": "pro"
+                }
+            }
+        }),
+    ]);
+    let success_stream = sse(vec![
+        ev_response_created("resp-ok"),
+        ev_message_item_added("msg-ok", "rotated account works"),
+        ev_completed("resp-ok"),
+    ]);
+    let requests = mount_response_sequence(
+        &server,
+        vec![sse_response(failed_stream), sse_response(success_stream)],
+    )
+    .await;
+
+    let mut builder = test_codex().with_config(|config| {
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(0);
+    });
+    let codex_fixture = builder.build(&server).await?;
+    let codex = codex_fixture.codex.clone();
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+        })
+        .await
+        .expect("submission should survive usage limit via auth rotation");
+
+    let mut saw_turn_complete = false;
+    while !saw_turn_complete {
+        match wait_for_event(&codex, |_| true).await {
+            EventMsg::Error(err) => panic!("unexpected error after rotation recovery: {err:?}"),
+            EventMsg::TurnComplete(_) => saw_turn_complete = true,
+            _ => {}
+        }
+    }
+
+    assert_eq!(
+        requests.requests().len(),
+        2,
+        "expected one retry after rotation"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(auth_rotate_cmd_env)]
+async fn quota_stream_error_recovers_via_auth_rotate_command() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    const AUTH_ROTATE_CMD_ENV: &str = "CODEXN_AUTH_ROTATE_CMD";
+
+    let _guard = EnvVarGuard::set(AUTH_ROTATE_CMD_ENV, "true");
+    let server = MockServer::start().await;
+    let failed_stream = sse(vec![
+        ev_response_created("resp-quota"),
+        json!({
+            "type": "response.failed",
+            "response": {
+                "id": "resp-quota",
+                "error": {
+                    "code": "insufficient_quota",
+                    "message": "quota exceeded"
+                }
+            }
+        }),
+    ]);
+    let success_stream = sse(vec![
+        ev_response_created("resp-ok"),
+        ev_message_item_added("msg-ok", "rotated account works"),
+        ev_completed("resp-ok"),
+    ]);
+    let requests = mount_response_sequence(
+        &server,
+        vec![sse_response(failed_stream), sse_response(success_stream)],
+    )
+    .await;
+
+    let mut builder = test_codex().with_config(|config| {
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(0);
+    });
+    let codex_fixture = builder.build(&server).await?;
+    let codex = codex_fixture.codex.clone();
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+        })
+        .await
+        .expect("submission should survive quota error via auth rotation");
+
+    let mut saw_turn_complete = false;
+    while !saw_turn_complete {
+        match wait_for_event(&codex, |_| true).await {
+            EventMsg::Error(err) => panic!("unexpected error after quota recovery: {err:?}"),
+            EventMsg::TurnComplete(_) => saw_turn_complete = true,
+            _ => {}
+        }
+    }
+
+    assert_eq!(
+        requests.requests().len(),
+        2,
+        "expected one retry after rotation"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(auth_rotate_cmd_env)]
+async fn usage_limit_stream_error_after_output_does_not_retry_auth_rotation() -> anyhow::Result<()>
+{
+    skip_if_no_network!(Ok(()));
+
+    const AUTH_ROTATE_CMD_ENV: &str = "CODEXN_AUTH_ROTATE_CMD";
+
+    let _guard = EnvVarGuard::set(AUTH_ROTATE_CMD_ENV, "true");
+    let server = MockServer::start().await;
+    let failed_stream = sse(vec![
+        ev_response_created("resp-partial"),
+        ev_message_item_added("msg-partial", "partial output"),
+        json!({
+            "type": "response.failed",
+            "response": {
+                "id": "resp-partial",
+                "error": {
+                    "type": "usage_limit_reached",
+                    "message": "limit reached",
+                    "plan_type": "pro"
+                }
+            }
+        }),
+    ]);
+    let requests = mount_response_sequence(&server, vec![sse_response(failed_stream)]).await;
+
+    let mut builder = test_codex().with_config(|config| {
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(0);
+    });
+    let codex_fixture = builder.build(&server).await?;
+    let codex = codex_fixture.codex.clone();
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+        })
+        .await
+        .expect("submission should emit an error without retrying");
+
+    let error_event = wait_for_event(&codex, |msg| matches!(msg, EventMsg::Error(_))).await;
+    let EventMsg::Error(error_event) = error_event else {
+        unreachable!();
+    };
+    assert!(
+        error_event.message.to_lowercase().contains("usage limit"),
+        "unexpected error message: {}",
+        error_event.message
+    );
+
+    wait_for_event(&codex, |msg| matches!(msg, EventMsg::TurnComplete(_))).await;
+    assert_eq!(
+        requests.requests().len(),
+        1,
+        "partial output must not retry"
     );
 
     Ok(())

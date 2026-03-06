@@ -6732,314 +6732,343 @@ async fn try_run_sampling_request(
         auth_mode = sess.services.auth_manager.auth_mode(),
         features = sess.features.enabled_features(),
     );
-    let mut stream = client_session
-        .stream(
-            prompt,
-            &turn_context.model_info,
-            &turn_context.otel_manager,
-            turn_context.reasoning_effort,
-            turn_context.reasoning_summary,
-            turn_metadata_header,
-        )
-        .instrument(trace_span!("stream_request"))
-        .or_cancel(&cancellation_token)
-        .await??;
-
     let tool_runtime = ToolCallRuntime::new(
         Arc::clone(&router),
         Arc::clone(&sess),
         Arc::clone(&turn_context),
         Arc::clone(&turn_diff_tracker),
     );
-    let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
-        FuturesOrdered::new();
-    let mut needs_follow_up = false;
-    let mut last_agent_message: Option<String> = None;
-    let mut active_item: Option<TurnItem> = None;
-    let mut should_emit_turn_diff = false;
     let plan_mode = turn_context.collaboration_mode.mode == ModeKind::Plan;
-    let mut assistant_message_stream_parsers = AssistantMessageStreamParsers::new(plan_mode);
-    let mut plan_mode_state = plan_mode.then(|| PlanModeStreamState::new(&turn_context.sub_id));
     let receiving_span = trace_span!("receiving_stream");
-    let outcome: CodexResult<SamplingRequestResult> = loop {
-        let handle_responses = trace_span!(
-            parent: &receiving_span,
-            "handle_responses",
-            otel.name = field::Empty,
-            tool_name = field::Empty,
-            from = field::Empty,
-        );
-
-        let event = match stream
-            .next()
-            .instrument(trace_span!(parent: &handle_responses, "receiving"))
+    'request: loop {
+        client_session.reset_usage_limit_recovery_budget();
+        let mut stream = client_session
+            .stream(
+                prompt,
+                &turn_context.model_info,
+                &turn_context.otel_manager,
+                turn_context.reasoning_effort,
+                turn_context.reasoning_summary,
+                turn_metadata_header,
+            )
+            .instrument(trace_span!("stream_request"))
             .or_cancel(&cancellation_token)
-            .await
-        {
-            Ok(event) => event,
-            Err(codex_async_utils::CancelErr::Cancelled) => break Err(CodexErr::TurnAborted),
-        };
+            .await??;
 
-        let event = match event {
-            Some(res) => res?,
-            None => {
-                break Err(CodexErr::Stream(
-                    "stream closed before response.completed".into(),
-                    None,
-                ));
-            }
-        };
+        let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
+            FuturesOrdered::new();
+        let mut needs_follow_up = false;
+        let mut last_agent_message: Option<String> = None;
+        let mut active_item: Option<TurnItem> = None;
+        let mut should_emit_turn_diff = false;
+        let mut saw_response_output = false;
+        let mut assistant_message_stream_parsers = AssistantMessageStreamParsers::new(plan_mode);
+        let mut plan_mode_state = plan_mode.then(|| PlanModeStreamState::new(&turn_context.sub_id));
+        let outcome: CodexResult<SamplingRequestResult> = loop {
+            let handle_responses = trace_span!(
+                parent: &receiving_span,
+                "handle_responses",
+                otel.name = field::Empty,
+                tool_name = field::Empty,
+                from = field::Empty,
+            );
 
-        sess.services
-            .otel_manager
-            .record_responses(&handle_responses, &event);
+            let event = match stream
+                .next()
+                .instrument(trace_span!(parent: &handle_responses, "receiving"))
+                .or_cancel(&cancellation_token)
+                .await
+            {
+                Ok(event) => event,
+                Err(codex_async_utils::CancelErr::Cancelled) => break Err(CodexErr::TurnAborted),
+            };
 
-        match event {
-            ResponseEvent::Created => {}
-            ResponseEvent::OutputItemDone(item) => {
-                let previously_active_item = active_item.take();
-                if let Some(previous) = previously_active_item.as_ref()
-                    && matches!(previous, TurnItem::AgentMessage(_))
-                {
-                    let item_id = previous.id();
-                    flush_assistant_text_segments_for_item(
+            let event = match event {
+                Some(res) => match res {
+                    Ok(event) => event,
+                    Err(err) => {
+                        let can_retry_after_rotation =
+                            !saw_response_output && active_item.is_none() && in_flight.is_empty();
+                        if can_retry_after_rotation
+                            && client_session
+                                .try_recover_stream_usage_limit_or_quota(&err)
+                                .await?
+                        {
+                            continue 'request;
+                        }
+                        break Err(err);
+                    }
+                },
+                None => {
+                    break Err(CodexErr::Stream(
+                        "stream closed before response.completed".into(),
+                        None,
+                    ));
+                }
+            };
+
+            sess.services
+                .otel_manager
+                .record_responses(&handle_responses, &event);
+
+            match event {
+                ResponseEvent::Created => {}
+                ResponseEvent::OutputItemDone(item) => {
+                    saw_response_output = true;
+                    let previously_active_item = active_item.take();
+                    if let Some(previous) = previously_active_item.as_ref()
+                        && matches!(previous, TurnItem::AgentMessage(_))
+                    {
+                        let item_id = previous.id();
+                        flush_assistant_text_segments_for_item(
+                            &sess,
+                            &turn_context,
+                            plan_mode_state.as_mut(),
+                            &mut assistant_message_stream_parsers,
+                            &item_id,
+                        )
+                        .await;
+                    }
+                    if let Some(state) = plan_mode_state.as_mut()
+                        && handle_assistant_item_done_in_plan_mode(
+                            &sess,
+                            &turn_context,
+                            &item,
+                            state,
+                            previously_active_item.as_ref(),
+                            &mut last_agent_message,
+                        )
+                        .await
+                    {
+                        continue;
+                    }
+
+                    let mut ctx = HandleOutputCtx {
+                        sess: sess.clone(),
+                        turn_context: turn_context.clone(),
+                        tool_runtime: tool_runtime.clone(),
+                        cancellation_token: cancellation_token.child_token(),
+                    };
+
+                    let output_result =
+                        handle_output_item_done(&mut ctx, item, previously_active_item)
+                            .instrument(handle_responses)
+                            .await?;
+                    if let Some(tool_future) = output_result.tool_future {
+                        in_flight.push_back(tool_future);
+                    }
+                    if let Some(agent_message) = output_result.last_agent_message {
+                        last_agent_message = Some(agent_message);
+                    }
+                    needs_follow_up |= output_result.needs_follow_up;
+                }
+                ResponseEvent::OutputItemAdded(item) => {
+                    saw_response_output = true;
+                    if let Some(turn_item) = handle_non_tool_response_item(&item, plan_mode) {
+                        let mut turn_item = turn_item;
+                        let mut seeded_parsed: Option<ParsedAssistantTextDelta> = None;
+                        let mut seeded_item_id: Option<String> = None;
+                        if matches!(turn_item, TurnItem::AgentMessage(_))
+                            && let Some(raw_text) = raw_assistant_output_text_from_item(&item)
+                        {
+                            let item_id = turn_item.id();
+                            let mut seeded = assistant_message_stream_parsers
+                                .seed_item_text(&item_id, &raw_text);
+                            if let TurnItem::AgentMessage(agent_message) = &mut turn_item {
+                                agent_message.content =
+                                    vec![codex_protocol::items::AgentMessageContent::Text {
+                                        text: if plan_mode {
+                                            String::new()
+                                        } else {
+                                            std::mem::take(&mut seeded.visible_text)
+                                        },
+                                    }];
+                            }
+                            seeded_parsed = plan_mode.then_some(seeded);
+                            seeded_item_id = Some(item_id);
+                        }
+                        if let Some(state) = plan_mode_state.as_mut()
+                            && matches!(turn_item, TurnItem::AgentMessage(_))
+                        {
+                            let item_id = turn_item.id();
+                            state
+                                .pending_agent_message_items
+                                .insert(item_id, turn_item.clone());
+                        } else {
+                            sess.emit_turn_item_started(&turn_context, &turn_item).await;
+                        }
+                        if let (Some(state), Some(item_id), Some(parsed)) = (
+                            plan_mode_state.as_mut(),
+                            seeded_item_id.as_deref(),
+                            seeded_parsed,
+                        ) {
+                            emit_streamed_assistant_text_delta(
+                                &sess,
+                                &turn_context,
+                                Some(state),
+                                item_id,
+                                parsed,
+                            )
+                            .await;
+                        }
+                        active_item = Some(turn_item);
+                    }
+                }
+                ResponseEvent::ServerModel(server_model) => {
+                    if !*server_model_warning_emitted_for_turn
+                        && sess
+                            .maybe_warn_on_server_model_mismatch(&turn_context, server_model)
+                            .await
+                    {
+                        *server_model_warning_emitted_for_turn = true;
+                    }
+                }
+                ResponseEvent::ServerReasoningIncluded(included) => {
+                    sess.set_server_reasoning_included(included).await;
+                }
+                ResponseEvent::RateLimits(snapshot) => {
+                    // Update internal state with latest rate limits, but defer sending until
+                    // token usage is available to avoid duplicate TokenCount events.
+                    sess.update_rate_limits(&turn_context, snapshot).await;
+                }
+                ResponseEvent::ModelsEtag(etag) => {
+                    // Update internal state with latest models etag
+                    sess.services.models_manager.refresh_if_new_etag(etag).await;
+                }
+                ResponseEvent::Completed {
+                    response_id: _,
+                    token_usage,
+                    can_append: _,
+                } => {
+                    flush_assistant_text_segments_all(
                         &sess,
                         &turn_context,
                         plan_mode_state.as_mut(),
                         &mut assistant_message_stream_parsers,
-                        &item_id,
                     )
                     .await;
-                }
-                if let Some(state) = plan_mode_state.as_mut()
-                    && handle_assistant_item_done_in_plan_mode(
-                        &sess,
-                        &turn_context,
-                        &item,
-                        state,
-                        previously_active_item.as_ref(),
-                        &mut last_agent_message,
-                    )
-                    .await
-                {
-                    continue;
-                }
+                    sess.update_token_usage_info(&turn_context, token_usage.as_ref())
+                        .await;
+                    should_emit_turn_diff = true;
 
-                let mut ctx = HandleOutputCtx {
-                    sess: sess.clone(),
-                    turn_context: turn_context.clone(),
-                    tool_runtime: tool_runtime.clone(),
-                    cancellation_token: cancellation_token.child_token(),
-                };
+                    needs_follow_up |= sess.has_pending_input().await;
 
-                let output_result = handle_output_item_done(&mut ctx, item, previously_active_item)
-                    .instrument(handle_responses)
-                    .await?;
-                if let Some(tool_future) = output_result.tool_future {
-                    in_flight.push_back(tool_future);
+                    break Ok(SamplingRequestResult {
+                        needs_follow_up,
+                        last_agent_message,
+                    });
                 }
-                if let Some(agent_message) = output_result.last_agent_message {
-                    last_agent_message = Some(agent_message);
-                }
-                needs_follow_up |= output_result.needs_follow_up;
-            }
-            ResponseEvent::OutputItemAdded(item) => {
-                if let Some(turn_item) = handle_non_tool_response_item(&item, plan_mode) {
-                    let mut turn_item = turn_item;
-                    let mut seeded_parsed: Option<ParsedAssistantTextDelta> = None;
-                    let mut seeded_item_id: Option<String> = None;
-                    if matches!(turn_item, TurnItem::AgentMessage(_))
-                        && let Some(raw_text) = raw_assistant_output_text_from_item(&item)
-                    {
-                        let item_id = turn_item.id();
-                        let mut seeded =
-                            assistant_message_stream_parsers.seed_item_text(&item_id, &raw_text);
-                        if let TurnItem::AgentMessage(agent_message) = &mut turn_item {
-                            agent_message.content =
-                                vec![codex_protocol::items::AgentMessageContent::Text {
-                                    text: if plan_mode {
-                                        String::new()
-                                    } else {
-                                        std::mem::take(&mut seeded.visible_text)
-                                    },
-                                }];
+                ResponseEvent::OutputTextDelta(delta) => {
+                    saw_response_output = true;
+                    // In review child threads, suppress assistant text deltas; the
+                    // UI will show a selection popup from the final ReviewOutput.
+                    if let Some(active) = active_item.as_ref() {
+                        let item_id = active.id();
+                        if matches!(active, TurnItem::AgentMessage(_)) {
+                            let parsed =
+                                assistant_message_stream_parsers.parse_delta(&item_id, &delta);
+                            emit_streamed_assistant_text_delta(
+                                &sess,
+                                &turn_context,
+                                plan_mode_state.as_mut(),
+                                &item_id,
+                                parsed,
+                            )
+                            .await;
+                        } else {
+                            let event = AgentMessageContentDeltaEvent {
+                                thread_id: sess.conversation_id.to_string(),
+                                turn_id: turn_context.sub_id.clone(),
+                                item_id,
+                                delta,
+                            };
+                            sess.send_event(
+                                &turn_context,
+                                EventMsg::AgentMessageContentDelta(event),
+                            )
+                            .await;
                         }
-                        seeded_parsed = plan_mode.then_some(seeded);
-                        seeded_item_id = Some(item_id);
-                    }
-                    if let Some(state) = plan_mode_state.as_mut()
-                        && matches!(turn_item, TurnItem::AgentMessage(_))
-                    {
-                        let item_id = turn_item.id();
-                        state
-                            .pending_agent_message_items
-                            .insert(item_id, turn_item.clone());
                     } else {
-                        sess.emit_turn_item_started(&turn_context, &turn_item).await;
+                        error_or_panic("OutputTextDelta without active item".to_string());
                     }
-                    if let (Some(state), Some(item_id), Some(parsed)) = (
-                        plan_mode_state.as_mut(),
-                        seeded_item_id.as_deref(),
-                        seeded_parsed,
-                    ) {
-                        emit_streamed_assistant_text_delta(
-                            &sess,
-                            &turn_context,
-                            Some(state),
-                            item_id,
-                            parsed,
-                        )
-                        .await;
-                    }
-                    active_item = Some(turn_item);
                 }
-            }
-            ResponseEvent::ServerModel(server_model) => {
-                if !*server_model_warning_emitted_for_turn
-                    && sess
-                        .maybe_warn_on_server_model_mismatch(&turn_context, server_model)
-                        .await
-                {
-                    *server_model_warning_emitted_for_turn = true;
-                }
-            }
-            ResponseEvent::ServerReasoningIncluded(included) => {
-                sess.set_server_reasoning_included(included).await;
-            }
-            ResponseEvent::RateLimits(snapshot) => {
-                // Update internal state with latest rate limits, but defer sending until
-                // token usage is available to avoid duplicate TokenCount events.
-                sess.update_rate_limits(&turn_context, snapshot).await;
-            }
-            ResponseEvent::ModelsEtag(etag) => {
-                // Update internal state with latest models etag
-                sess.services.models_manager.refresh_if_new_etag(etag).await;
-            }
-            ResponseEvent::Completed {
-                response_id: _,
-                token_usage,
-                can_append: _,
-            } => {
-                flush_assistant_text_segments_all(
-                    &sess,
-                    &turn_context,
-                    plan_mode_state.as_mut(),
-                    &mut assistant_message_stream_parsers,
-                )
-                .await;
-                sess.update_token_usage_info(&turn_context, token_usage.as_ref())
-                    .await;
-                should_emit_turn_diff = true;
-
-                needs_follow_up |= sess.has_pending_input().await;
-
-                break Ok(SamplingRequestResult {
-                    needs_follow_up,
-                    last_agent_message,
-                });
-            }
-            ResponseEvent::OutputTextDelta(delta) => {
-                // In review child threads, suppress assistant text deltas; the
-                // UI will show a selection popup from the final ReviewOutput.
-                if let Some(active) = active_item.as_ref() {
-                    let item_id = active.id();
-                    if matches!(active, TurnItem::AgentMessage(_)) {
-                        let parsed = assistant_message_stream_parsers.parse_delta(&item_id, &delta);
-                        emit_streamed_assistant_text_delta(
-                            &sess,
-                            &turn_context,
-                            plan_mode_state.as_mut(),
-                            &item_id,
-                            parsed,
-                        )
-                        .await;
-                    } else {
-                        let event = AgentMessageContentDeltaEvent {
+                ResponseEvent::ReasoningSummaryDelta {
+                    delta,
+                    summary_index,
+                } => {
+                    saw_response_output = true;
+                    if let Some(active) = active_item.as_ref() {
+                        let event = ReasoningContentDeltaEvent {
                             thread_id: sess.conversation_id.to_string(),
                             turn_id: turn_context.sub_id.clone(),
-                            item_id,
-                            delta,
-                        };
-                        sess.send_event(&turn_context, EventMsg::AgentMessageContentDelta(event))
-                            .await;
-                    }
-                } else {
-                    error_or_panic("OutputTextDelta without active item".to_string());
-                }
-            }
-            ResponseEvent::ReasoningSummaryDelta {
-                delta,
-                summary_index,
-            } => {
-                if let Some(active) = active_item.as_ref() {
-                    let event = ReasoningContentDeltaEvent {
-                        thread_id: sess.conversation_id.to_string(),
-                        turn_id: turn_context.sub_id.clone(),
-                        item_id: active.id(),
-                        delta,
-                        summary_index,
-                    };
-                    sess.send_event(&turn_context, EventMsg::ReasoningContentDelta(event))
-                        .await;
-                } else {
-                    error_or_panic("ReasoningSummaryDelta without active item".to_string());
-                }
-            }
-            ResponseEvent::ReasoningSummaryPartAdded { summary_index } => {
-                if let Some(active) = active_item.as_ref() {
-                    let event =
-                        EventMsg::AgentReasoningSectionBreak(AgentReasoningSectionBreakEvent {
                             item_id: active.id(),
+                            delta,
                             summary_index,
-                        });
-                    sess.send_event(&turn_context, event).await;
-                } else {
-                    error_or_panic("ReasoningSummaryPartAdded without active item".to_string());
+                        };
+                        sess.send_event(&turn_context, EventMsg::ReasoningContentDelta(event))
+                            .await;
+                    } else {
+                        error_or_panic("ReasoningSummaryDelta without active item".to_string());
+                    }
+                }
+                ResponseEvent::ReasoningSummaryPartAdded { summary_index } => {
+                    saw_response_output = true;
+                    if let Some(active) = active_item.as_ref() {
+                        let event =
+                            EventMsg::AgentReasoningSectionBreak(AgentReasoningSectionBreakEvent {
+                                item_id: active.id(),
+                                summary_index,
+                            });
+                        sess.send_event(&turn_context, event).await;
+                    } else {
+                        error_or_panic("ReasoningSummaryPartAdded without active item".to_string());
+                    }
+                }
+                ResponseEvent::ReasoningContentDelta {
+                    delta,
+                    content_index,
+                } => {
+                    saw_response_output = true;
+                    if let Some(active) = active_item.as_ref() {
+                        let event = ReasoningRawContentDeltaEvent {
+                            thread_id: sess.conversation_id.to_string(),
+                            turn_id: turn_context.sub_id.clone(),
+                            item_id: active.id(),
+                            delta,
+                            content_index,
+                        };
+                        sess.send_event(&turn_context, EventMsg::ReasoningRawContentDelta(event))
+                            .await;
+                    } else {
+                        error_or_panic("ReasoningRawContentDelta without active item".to_string());
+                    }
                 }
             }
-            ResponseEvent::ReasoningContentDelta {
-                delta,
-                content_index,
-            } => {
-                if let Some(active) = active_item.as_ref() {
-                    let event = ReasoningRawContentDeltaEvent {
-                        thread_id: sess.conversation_id.to_string(),
-                        turn_id: turn_context.sub_id.clone(),
-                        item_id: active.id(),
-                        delta,
-                        content_index,
-                    };
-                    sess.send_event(&turn_context, EventMsg::ReasoningRawContentDelta(event))
-                        .await;
-                } else {
-                    error_or_panic("ReasoningRawContentDelta without active item".to_string());
-                }
-            }
-        }
-    };
-
-    flush_assistant_text_segments_all(
-        &sess,
-        &turn_context,
-        plan_mode_state.as_mut(),
-        &mut assistant_message_stream_parsers,
-    )
-    .await;
-
-    drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?;
-
-    if should_emit_turn_diff {
-        let unified_diff = {
-            let mut tracker = turn_diff_tracker.lock().await;
-            tracker.get_unified_diff()
         };
-        if let Ok(Some(unified_diff)) = unified_diff {
-            let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
-            sess.clone().send_event(&turn_context, msg).await;
-        }
-    }
 
-    outcome
+        flush_assistant_text_segments_all(
+            &sess,
+            &turn_context,
+            plan_mode_state.as_mut(),
+            &mut assistant_message_stream_parsers,
+        )
+        .await;
+
+        drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?;
+
+        if should_emit_turn_diff {
+            let unified_diff = {
+                let mut tracker = turn_diff_tracker.lock().await;
+                tracker.get_unified_diff()
+            };
+            if let Ok(Some(unified_diff)) = unified_diff {
+                let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
+                sess.clone().send_event(&turn_context, msg).await;
+            }
+        }
+
+        break outcome;
+    }
 }
 
 pub(super) fn get_last_assistant_message_from_turn(responses: &[ResponseItem]) -> Option<String> {
@@ -9862,7 +9891,10 @@ mod tests {
             .try_reserve_hook_auto_reply_chain_slot()
             .expect("reserve first slot");
         assert_eq!(first.0, 1);
-        assert_eq!(sess.try_reserve_hook_auto_reply_chain_slot(), Some((2, first.1)));
+        assert_eq!(
+            sess.try_reserve_hook_auto_reply_chain_slot(),
+            Some((2, first.1))
+        );
 
         sess.release_hook_auto_reply_chain_slot_for_epoch(first.1);
         let second = sess

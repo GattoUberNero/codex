@@ -42,6 +42,7 @@ use futures::StreamExt;
 use opentelemetry_sdk::metrics::InMemoryMetricExporter;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use serial_test::serial;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -51,6 +52,28 @@ const MODEL: &str = "gpt-5.2-codex";
 const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 const OPENAI_BETA_RESPONSES_WEBSOCKETS: &str = "responses_websockets=2026-02-04";
 const WS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
+
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let original = std::env::var(key).ok();
+        unsafe { std::env::set_var(key, value) };
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(value) => unsafe { std::env::set_var(self.key, value) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
+    }
+}
 
 struct WebsocketTestHarness {
     _codex_home: TempDir,
@@ -889,6 +912,68 @@ async fn responses_websocket_usage_limit_error_emits_rate_limit_event() {
         error_event.message
     );
 
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(auth_rotate_cmd_env)]
+async fn responses_websocket_usage_limit_stream_error_recovers_via_auth_rotate_command() {
+    skip_if_no_network!();
+
+    const AUTH_ROTATE_CMD_ENV: &str = "CODEXN_AUTH_ROTATE_CMD";
+
+    let _guard = EnvVarGuard::set(AUTH_ROTATE_CMD_ENV, "true");
+    let usage_limit_error = json!({
+        "type": "error",
+        "status": 429,
+        "error": {
+            "type": "usage_limit_reached",
+            "message": "The usage limit has been reached",
+            "plan_type": "pro",
+        }
+    });
+    let success_response = vec![
+        ev_response_created("resp-rotated"),
+        ev_assistant_message("msg-rotated", "rotated account works"),
+        ev_completed("resp-rotated"),
+    ];
+
+    let server =
+        start_websocket_server(vec![vec![vec![usage_limit_error]], vec![success_response]]).await;
+    let mut builder = test_codex().with_config(|config| {
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(0);
+    });
+    let test = builder
+        .build_with_websocket_server(&server)
+        .await
+        .expect("build websocket codex");
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+        })
+        .await
+        .expect("submission should survive usage limit via auth rotation");
+
+    let mut saw_turn_complete = false;
+    while !saw_turn_complete {
+        match wait_for_event(&test.codex, |_| true).await {
+            EventMsg::Error(err) => panic!("unexpected error after rotation recovery: {err:?}"),
+            EventMsg::TurnComplete(_) => saw_turn_complete = true,
+            _ => {}
+        }
+    }
+
+    assert_eq!(
+        server.handshakes().len(),
+        2,
+        "expected reconnect after rotation"
+    );
     server.shutdown().await;
 }
 
