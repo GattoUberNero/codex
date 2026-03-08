@@ -432,7 +432,9 @@ impl Codex {
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
 
-        let loaded_skills = skills_manager.skills_for_config(&config);
+        let loaded_skills = skills_manager
+            .skills_for_config(&config)
+            .filter_for_session_source(&session_source);
 
         for err in &loaded_skills.errors {
             error!(
@@ -2450,7 +2452,8 @@ impl Session {
             self.services
                 .skills_manager
                 .skills_for_cwd(&session_configuration.cwd, false)
-                .await,
+                .await
+                .filter_for_session_source(&session_configuration.session_source),
         );
         let mut turn_context: TurnContext = Self::make_turn_context(
             Some(Arc::clone(&self.services.auth_manager)),
@@ -4531,17 +4534,24 @@ mod handlers {
         cwds: Vec<PathBuf>,
         force_reload: bool,
     ) {
-        let cwds = if cwds.is_empty() {
+        let (session_source, cwds) = if cwds.is_empty() {
             let state = sess.state.lock().await;
-            vec![state.session_configuration.cwd.clone()]
+            (
+                state.session_configuration.session_source.clone(),
+                vec![state.session_configuration.cwd.clone()],
+            )
         } else {
-            cwds
+            let state = sess.state.lock().await;
+            (state.session_configuration.session_source.clone(), cwds)
         };
 
         let skills_manager = &sess.services.skills_manager;
         let mut skills = Vec::new();
         for cwd in cwds {
-            let outcome = skills_manager.skills_for_cwd(&cwd, force_reload).await;
+            let outcome = skills_manager
+                .skills_for_cwd(&cwd, force_reload)
+                .await
+                .filter_for_session_source(&session_source);
             let errors = super::errors_to_info(&outcome.errors);
             let skills_metadata = super::skills_to_info(&outcome.skills, &outcome.disabled_paths);
             skills.push(SkillsListEntry {
@@ -8869,7 +8879,12 @@ mod tests {
             config.js_repl_node_module_dirs.clone(),
         ));
 
-        let skills_outcome = Arc::new(services.skills_manager.skills_for_config(&per_turn_config));
+        let skills_outcome = Arc::new(
+            services
+                .skills_manager
+                .skills_for_config(&per_turn_config)
+                .filter_for_session_source(&session_configuration.session_source),
+        );
         let turn_context = Session::make_turn_context(
             Some(Arc::clone(&auth_manager)),
             &otel_manager,
@@ -9034,7 +9049,12 @@ mod tests {
             config.js_repl_node_module_dirs.clone(),
         ));
 
-        let skills_outcome = Arc::new(services.skills_manager.skills_for_config(&per_turn_config));
+        let skills_outcome = Arc::new(
+            services
+                .skills_manager
+                .skills_for_config(&per_turn_config)
+                .filter_for_session_source(&session_configuration.session_source),
+        );
         let turn_context = Arc::new(Session::make_turn_context(
             Some(Arc::clone(&auth_manager)),
             &otel_manager,

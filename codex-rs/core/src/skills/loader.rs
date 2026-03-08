@@ -44,6 +44,14 @@ struct SkillFrontmatter {
 struct SkillFrontmatterMetadata {
     #[serde(default, rename = "short-description")]
     short_description: Option<String>,
+    #[serde(
+        default,
+        rename = "allow-agent-whitelist",
+        alias = "allow_agent_whitelist"
+    )]
+    allow_agent_whitelist: Option<bool>,
+    #[serde(default, rename = "allowed-agent-types", alias = "allowed_agent_types")]
+    allowed_agent_types: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -519,10 +527,12 @@ fn parse_skill_file(path: &Path, scope: SkillScope) -> Result<SkillMetadata, Ski
     let LoadedSkillMetadata {
         interface,
         dependencies,
-        policy,
+        policy: metadata_policy,
         permission_profile,
         permissions,
     } = load_skill_metadata(path);
+    let frontmatter_policy = resolve_frontmatter_policy(&parsed.metadata)?;
+    let policy = merge_skill_policy(metadata_policy, frontmatter_policy);
 
     validate_len(&name, MAX_NAME_LEN, "name")?;
     validate_len(&description, MAX_DESCRIPTION_LEN, "description")?;
@@ -654,7 +664,72 @@ fn resolve_dependencies(dependencies: Option<Dependencies>) -> Option<SkillDepen
 fn resolve_policy(policy: Option<Policy>) -> Option<SkillPolicy> {
     policy.map(|policy| SkillPolicy {
         allow_implicit_invocation: policy.allow_implicit_invocation,
+        allow_agent_whitelist: None,
+        allowed_agent_types: None,
     })
+}
+
+fn resolve_frontmatter_policy(
+    metadata: &SkillFrontmatterMetadata,
+) -> Result<Option<SkillPolicy>, SkillParseError> {
+    if metadata.allow_agent_whitelist.is_none() && metadata.allowed_agent_types.is_none() {
+        return Ok(None);
+    }
+
+    let mut allowed_agent_types = None;
+    if let Some(raw_types) = metadata.allowed_agent_types.as_ref() {
+        let normalized = normalize_agent_types(raw_types)?;
+        allowed_agent_types = Some(normalized);
+    }
+
+    let has_non_empty_allowed_types = match allowed_agent_types.as_ref() {
+        Some(types) => !types.is_empty(),
+        None => false,
+    };
+    if metadata.allow_agent_whitelist == Some(true) && !has_non_empty_allowed_types {
+        return Err(SkillParseError::InvalidField {
+            field: "metadata.allowed-agent-types",
+            reason: "must be non-empty when metadata.allow-agent-whitelist=true".to_string(),
+        });
+    }
+
+    Ok(Some(SkillPolicy {
+        allow_implicit_invocation: None,
+        allow_agent_whitelist: metadata.allow_agent_whitelist,
+        allowed_agent_types,
+    }))
+}
+
+fn merge_skill_policy(
+    metadata_policy: Option<SkillPolicy>,
+    frontmatter_policy: Option<SkillPolicy>,
+) -> Option<SkillPolicy> {
+    match (metadata_policy, frontmatter_policy) {
+        (None, None) => None,
+        (Some(policy), None) => Some(policy),
+        (None, Some(policy)) => Some(policy),
+        (Some(base), Some(overlay)) => Some(SkillPolicy {
+            allow_implicit_invocation: base.allow_implicit_invocation,
+            allow_agent_whitelist: overlay.allow_agent_whitelist.or(base.allow_agent_whitelist),
+            allowed_agent_types: overlay.allowed_agent_types.or(base.allowed_agent_types),
+        }),
+    }
+}
+
+fn normalize_agent_types(raw_types: &[String]) -> Result<Vec<String>, SkillParseError> {
+    let mut unique = HashSet::new();
+    let mut normalized = Vec::new();
+    for raw in raw_types {
+        let value = sanitize_single_line(raw).trim().to_ascii_lowercase();
+        if value.is_empty() {
+            continue;
+        }
+        validate_len(&value, MAX_NAME_LEN, "metadata.allowed-agent-types")?;
+        if unique.insert(value.clone()) {
+            normalized.push(value);
+        }
+    }
+    Ok(normalized)
 }
 
 fn resolve_dependency_tool(tool: DependencyTool) -> Option<SkillToolDependency> {
@@ -1306,6 +1381,8 @@ policy:
             outcome.skills[0].policy,
             Some(SkillPolicy {
                 allow_implicit_invocation: Some(false),
+                allow_agent_whitelist: None,
+                allowed_agent_types: None,
             })
         );
         assert!(outcome.allowed_skills_for_implicit_invocation().is_empty());
@@ -1337,11 +1414,76 @@ policy: {}
             outcome.skills[0].policy,
             Some(SkillPolicy {
                 allow_implicit_invocation: None,
+                allow_agent_whitelist: None,
+                allowed_agent_types: None,
             })
         );
         assert_eq!(
             outcome.allowed_skills_for_implicit_invocation(),
             outcome.skills
+        );
+    }
+
+    #[tokio::test]
+    async fn loads_agent_whitelist_policy_from_skill_frontmatter() {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        let skill_path = write_skill(
+            &codex_home,
+            "demo",
+            "policy-frontmatter",
+            "from frontmatter",
+        );
+        fs::write(
+            &skill_path,
+            "---\nname: policy-frontmatter\ndescription: |-\n  from frontmatter\nmetadata:\n  allow-agent-whitelist: true\n  allowed-agent-types:\n    - Architect\n    - explorer\n    - explorer\n---\n\n# Body\n",
+        )
+        .expect("rewrite skill frontmatter");
+
+        let cfg = make_config(&codex_home).await;
+        let outcome = load_skills_for_test(&cfg);
+
+        assert!(
+            outcome.errors.is_empty(),
+            "unexpected errors: {:?}",
+            outcome.errors
+        );
+        assert_eq!(outcome.skills.len(), 1);
+        assert_eq!(
+            outcome.skills[0].policy,
+            Some(SkillPolicy {
+                allow_implicit_invocation: None,
+                allow_agent_whitelist: Some(true),
+                allowed_agent_types: Some(vec!["architect".to_string(), "explorer".to_string()]),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_frontmatter_whitelist_when_allowed_agent_types_missing() {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        let skill_path = write_skill(
+            &codex_home,
+            "demo",
+            "policy-frontmatter-invalid",
+            "from frontmatter",
+        );
+        fs::write(
+            &skill_path,
+            "---\nname: policy-frontmatter-invalid\ndescription: |-\n  from frontmatter\nmetadata:\n  allow-agent-whitelist: true\n---\n\n# Body\n",
+        )
+        .expect("rewrite invalid skill frontmatter");
+
+        let cfg = make_config(&codex_home).await;
+        let outcome = load_skills_for_test(&cfg);
+
+        assert!(outcome.skills.is_empty());
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(
+            outcome.errors[0]
+                .message
+                .contains("metadata.allowed-agent-types"),
+            "unexpected error: {}",
+            outcome.errors[0].message
         );
     }
 

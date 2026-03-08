@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::config::Permissions;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SkillScope;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -30,11 +31,31 @@ impl SkillMetadata {
             .and_then(|policy| policy.allow_implicit_invocation)
             .unwrap_or(true)
     }
+
+    fn is_allowed_for_agent_identity(&self, agent_identity: &str) -> bool {
+        let Some(policy) = self.policy.as_ref() else {
+            return true;
+        };
+        if !policy.allow_agent_whitelist.unwrap_or(false) {
+            return true;
+        }
+        let Some(allowed_agent_types) = policy.allowed_agent_types.as_ref() else {
+            return false;
+        };
+        let Some(normalized_identity) = normalize_agent_identity_token(agent_identity) else {
+            return false;
+        };
+        allowed_agent_types
+            .iter()
+            .any(|entry| entry == &normalized_identity)
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SkillPolicy {
     pub allow_implicit_invocation: Option<bool>,
+    pub allow_agent_whitelist: Option<bool>,
+    pub allowed_agent_types: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,9 +115,162 @@ impl SkillLoadOutcome {
             .collect()
     }
 
+    pub fn filter_for_session_source(&self, session_source: &SessionSource) -> SkillLoadOutcome {
+        let agent_identity = effective_skill_agent_identity(session_source);
+        self.filter_for_agent_identity(agent_identity.as_str())
+    }
+
+    pub fn filter_for_agent_identity(&self, agent_identity: &str) -> SkillLoadOutcome {
+        let filtered_skills: Vec<SkillMetadata> = self
+            .skills
+            .iter()
+            .filter(|skill| skill.is_allowed_for_agent_identity(agent_identity))
+            .cloned()
+            .collect();
+
+        let kept_paths: HashSet<PathBuf> = filtered_skills
+            .iter()
+            .map(|skill| skill.path_to_skills_md.clone())
+            .collect();
+        let filtered_disabled_paths: HashSet<PathBuf> = self
+            .disabled_paths
+            .iter()
+            .filter(|path| kept_paths.contains(*path))
+            .cloned()
+            .collect();
+
+        let mut filtered = SkillLoadOutcome {
+            skills: filtered_skills,
+            errors: self.errors.clone(),
+            disabled_paths: filtered_disabled_paths,
+            implicit_skills_by_scripts_dir: Arc::new(HashMap::new()),
+            implicit_skills_by_doc_path: Arc::new(HashMap::new()),
+        };
+        let (by_scripts_dir, by_doc_path) = crate::skills::build_implicit_skill_path_indexes(
+            filtered.allowed_skills_for_implicit_invocation(),
+        );
+        filtered.implicit_skills_by_scripts_dir = Arc::new(by_scripts_dir);
+        filtered.implicit_skills_by_doc_path = Arc::new(by_doc_path);
+        filtered
+    }
+
     pub fn skills_with_enabled(&self) -> impl Iterator<Item = (&SkillMetadata, bool)> {
         self.skills
             .iter()
             .map(|skill| (skill, self.is_skill_enabled(skill)))
+    }
+}
+
+pub const MAIN_SKILL_AGENT_IDENTITY: &str = "architect";
+pub const DEFAULT_SUBAGENT_SKILL_IDENTITY: &str = "default";
+
+pub fn effective_skill_agent_identity(session_source: &SessionSource) -> String {
+    match session_source {
+        SessionSource::SubAgent(_) => session_source
+            .get_agent_role()
+            .and_then(|role| normalize_agent_identity_token(role.as_str()))
+            .unwrap_or_else(|| DEFAULT_SUBAGENT_SKILL_IDENTITY.to_string()),
+        _ => MAIN_SKILL_AGENT_IDENTITY.to_string(),
+    }
+}
+
+fn normalize_agent_identity_token(raw: &str) -> Option<String> {
+    let token = raw.trim().to_ascii_lowercase();
+    if token.is_empty() { None } else { Some(token) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_protocol::ThreadId;
+    use codex_protocol::protocol::SubAgentSource;
+
+    fn skill_with_policy(
+        path: &str,
+        allow_agent_whitelist: Option<bool>,
+        allowed_agent_types: Option<Vec<&str>>,
+    ) -> SkillMetadata {
+        SkillMetadata {
+            name: "demo".to_string(),
+            description: "demo".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: Some(SkillPolicy {
+                allow_implicit_invocation: Some(true),
+                allow_agent_whitelist,
+                allowed_agent_types: allowed_agent_types.map(|types| {
+                    types
+                        .into_iter()
+                        .map(|value| value.to_ascii_lowercase())
+                        .collect()
+                }),
+            }),
+            permission_profile: None,
+            permissions: None,
+            path_to_skills_md: PathBuf::from(path),
+            scope: SkillScope::User,
+        }
+    }
+
+    #[test]
+    fn effective_skill_agent_identity_defaults_to_architect_for_main_sessions() {
+        assert_eq!(
+            effective_skill_agent_identity(&SessionSource::Cli),
+            MAIN_SKILL_AGENT_IDENTITY
+        );
+        assert_eq!(
+            effective_skill_agent_identity(&SessionSource::VSCode),
+            MAIN_SKILL_AGENT_IDENTITY
+        );
+    }
+
+    #[test]
+    fn effective_skill_agent_identity_uses_subagent_role_when_present() {
+        let source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_nickname: None,
+            agent_role: Some("Explorer".to_string()),
+        });
+        assert_eq!(effective_skill_agent_identity(&source), "explorer");
+    }
+
+    #[test]
+    fn effective_skill_agent_identity_defaults_for_subagent_without_role() {
+        let source = SessionSource::SubAgent(SubAgentSource::Other("job".to_string()));
+        assert_eq!(
+            effective_skill_agent_identity(&source),
+            DEFAULT_SUBAGENT_SKILL_IDENTITY
+        );
+    }
+
+    #[test]
+    fn filter_for_agent_identity_keeps_only_whitelisted_skills() {
+        let allowed = skill_with_policy(
+            "/tmp/allowed/SKILL.md",
+            Some(true),
+            Some(vec!["architect", "explorer"]),
+        );
+        let blocked =
+            skill_with_policy("/tmp/blocked/SKILL.md", Some(true), Some(vec!["reviewer"]));
+        let unguarded = skill_with_policy("/tmp/unguarded/SKILL.md", Some(false), None);
+        let outcome = SkillLoadOutcome {
+            skills: vec![allowed.clone(), blocked, unguarded.clone()],
+            errors: Vec::new(),
+            disabled_paths: HashSet::new(),
+            implicit_skills_by_scripts_dir: Arc::new(HashMap::new()),
+            implicit_skills_by_doc_path: Arc::new(HashMap::new()),
+        };
+
+        let filtered = outcome.filter_for_agent_identity("architect");
+        let paths: HashSet<PathBuf> = filtered
+            .skills
+            .iter()
+            .map(|skill| skill.path_to_skills_md.clone())
+            .collect();
+        assert!(paths.contains(&allowed.path_to_skills_md));
+        assert!(paths.contains(&unguarded.path_to_skills_md));
+        assert_eq!(paths.len(), 2);
     }
 }
