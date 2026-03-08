@@ -698,6 +698,9 @@ pub(crate) fn deserialize_config_toml_with_base(
 }
 
 const CODEXN_CONFIG_NERO_PATH_ENV: &str = "CODEXN_CONFIG_NERO_PATH";
+const CODEXN_CONFIG_NERO_MSG_PATH_ENV: &str = "CODEXN_CONFIG_NERO_MSG_PATH";
+const CODEXN_CONFIG_NERO_AUTO_PATH_ENV: &str = "CODEXN_CONFIG_NERO_AUTO_PATH";
+const CODEXN_CONFIG_NERO_DEV_PATH_ENV: &str = "CODEXN_CONFIG_NERO_DEV_PATH";
 
 fn codexn_fork_main_agent_developer_instructions(extra_toml: &TomlValue) -> Option<String> {
     let root = extra_toml.as_table()?;
@@ -728,62 +731,234 @@ fn codexn_fork_main_agent_developer_instructions(extra_toml: &TomlValue) -> Opti
     None
 }
 
-fn apply_codexn_fork_overrides(extra_toml: &mut TomlValue) {
-    let Some(override_instructions) = codexn_fork_main_agent_developer_instructions(extra_toml)
+fn codexn_fork_root_developer_instructions(extra_toml: &TomlValue) -> Option<String> {
+    extra_toml
+        .as_table()
+        .and_then(|root| root.get("developer_instructions"))
+        .and_then(TomlValue::as_str)
+        .map(ToString::to_string)
+}
+
+fn compose_codexn_fork_developer_instructions(
+    base_instructions: Option<&str>,
+    extra_toml: &TomlValue,
+) -> Option<String> {
+    let mut sections = Vec::new();
+    if let Some(instructions) = codexn_fork_main_agent_developer_instructions(extra_toml) {
+        let trimmed = instructions.trim();
+        if !trimmed.is_empty() {
+            sections.push(trimmed.to_string());
+        }
+    } else if let Some(instructions) = base_instructions {
+        let trimmed = instructions.trim();
+        if !trimmed.is_empty() {
+            sections.push(trimmed.to_string());
+        }
+    }
+
+    if let Some(instructions) = codexn_fork_auto_developer_instructions(extra_toml) {
+        let trimmed = instructions.trim();
+        if !trimmed.is_empty() {
+            sections.retain(|existing| existing != trimmed);
+            sections.push(trimmed.to_string());
+        }
+    }
+
+    if sections.is_empty() {
+        None
+    } else {
+        Some(sections.join("\n\n"))
+    }
+}
+
+fn apply_codexn_fork_developer_instructions(target_toml: &mut TomlValue, extra_toml: &TomlValue) {
+    let base_instructions = codexn_fork_root_developer_instructions(target_toml);
+    let Some(instructions) =
+        compose_codexn_fork_developer_instructions(base_instructions.as_deref(), extra_toml)
     else {
         return;
     };
-    let Some(root) = extra_toml.as_table_mut() else {
+
+    let Some(root) = target_toml.as_table_mut() else {
         return;
     };
 
-    // Fork-scoped main-agent override is promoted to the standard root
-    // developer_instructions field before merge.
     root.insert(
         "developer_instructions".to_string(),
-        TomlValue::String(override_instructions),
+        TomlValue::String(instructions),
     );
 }
 
-fn merge_codexn_extra_config_from_env(merged_toml: &mut TomlValue) -> std::io::Result<()> {
-    let Some(extra_path) = std::env::var_os(CODEXN_CONFIG_NERO_PATH_ENV).map(PathBuf::from) else {
-        return Ok(());
-    };
-
-    if !extra_path.exists() {
-        tracing::debug!(
-            path = %extra_path.display(),
-            "codexn extra config path is set but file does not exist; skipping overlay"
-        );
-        return Ok(());
+fn codexn_fork_auto_developer_instructions(extra_toml: &TomlValue) -> Option<String> {
+    let root = extra_toml.as_table()?;
+    let nero = root.get("nero")?.as_table()?;
+    let hook = nero.get("hook")?.as_table()?;
+    let runtime = hook.get("runtime")?.as_table()?;
+    let auto = runtime.get("auto")?.as_table()?;
+    if !auto
+        .get("enabled")
+        .and_then(TomlValue::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
     }
 
-    let extra_contents = std::fs::read_to_string(&extra_path).map_err(|err| {
-        std::io::Error::new(
-            err.kind(),
-            format!(
-                "failed to read extra fork config from {}: {err}",
-                extra_path.display()
-            ),
-        )
-    })?;
+    let scoring = auto.get("scoring_system")?.as_table()?;
+    if !scoring
+        .get("enabled")
+        .and_then(TomlValue::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
 
-    let mut extra_toml: TomlValue = toml::from_str(&extra_contents).map_err(|err| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "failed to parse extra fork config TOML from {}: {err}",
-                extra_path.display()
-            ),
-        )
-    })?;
-    apply_codexn_fork_overrides(&mut extra_toml);
+    let show_agent = scoring
+        .get("show")
+        .and_then(TomlValue::as_table)
+        .and_then(|show| show.get("agent"))
+        .and_then(TomlValue::as_bool)
+        .unwrap_or(true);
+    if !show_agent {
+        return None;
+    }
 
-    tracing::debug!(
-        path = %extra_path.display(),
-        "merging codexn extra config overlay from CODEXN_CONFIG_NERO_PATH"
+    let system_text = auto.get("system_text")?.as_table()?;
+    let header = system_text.get("header")?.as_str()?.trim();
+    let scoring_on_header = system_text.get("scoring_on_header")?.as_str()?.trim();
+    let rules_label = system_text.get("rules_label")?.as_str()?.trim();
+    let json_intro = system_text.get("json_intro")?.as_str()?.trim();
+    let legacy_notice = system_text.get("legacy_notice")?.as_str()?.trim();
+    if header.is_empty()
+        || scoring_on_header.is_empty()
+        || rules_label.is_empty()
+        || json_intro.is_empty()
+        || legacy_notice.is_empty()
+    {
+        return None;
+    }
+
+    let protocol_prefix = auto
+        .get("protocol_prefix")
+        .and_then(TomlValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+
+    let mut sections = vec![
+        header.to_string(),
+        String::new(),
+        scoring_on_header.to_string(),
+        rules_label.to_string(),
+    ];
+
+    if let Some(rules_text) = scoring
+        .get("rules_text")
+        .and_then(TomlValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        sections.push(rules_text.to_string());
+    }
+
+    sections.extend([
+        String::new(),
+        json_intro.to_string(),
+        String::new(),
+        "```json".to_string(),
+        "{".to_string(),
+        "  \"nero_auto_v1\": {".to_string(),
+        "    \"score_value\": 7,".to_string(),
+        "    \"score_explanation\": \"planned low-risk next step\",".to_string(),
+        "    \"gates_done_observed\": false,".to_string(),
+        "    \"emergency_flag\": false".to_string(),
+        "  }".to_string(),
+        "}".to_string(),
+        "```".to_string(),
+        String::new(),
+        legacy_notice.replace("{protocol_prefix}", protocol_prefix),
+    ]);
+
+    Some(sections.join("\n"))
+}
+
+fn load_codexn_extra_config_from_env() -> std::io::Result<Option<TomlValue>> {
+    let extra_paths: Vec<(&str, PathBuf)> = [
+        CODEXN_CONFIG_NERO_PATH_ENV,
+        CODEXN_CONFIG_NERO_MSG_PATH_ENV,
+        CODEXN_CONFIG_NERO_AUTO_PATH_ENV,
+        CODEXN_CONFIG_NERO_DEV_PATH_ENV,
+    ]
+    .into_iter()
+    .filter_map(|env_name| {
+        std::env::var_os(env_name)
+            .map(PathBuf::from)
+            .map(|path| (env_name, path))
+    })
+    .collect();
+    if extra_paths.is_empty() {
+        return Ok(None);
+    }
+
+    let mut combined_extra_toml = TomlValue::Table(toml::map::Map::new());
+    for (env_name, extra_path) in extra_paths {
+        if !extra_path.exists() {
+            tracing::debug!(
+                env_name,
+                path = %extra_path.display(),
+                "codexn extra config path is set but file does not exist; skipping overlay"
+            );
+            continue;
+        }
+
+        let extra_contents = std::fs::read_to_string(&extra_path).map_err(|err| {
+            std::io::Error::new(
+                err.kind(),
+                format!(
+                    "failed to read extra fork config from {}: {err}",
+                    extra_path.display()
+                ),
+            )
+        })?;
+
+        let extra_toml: TomlValue = toml::from_str(&extra_contents).map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "failed to parse extra fork config TOML from {}: {err}",
+                    extra_path.display()
+                ),
+            )
+        })?;
+
+        tracing::debug!(
+            env_name,
+            path = %extra_path.display(),
+            "merging codexn extra config overlay from env path"
+        );
+        crate::config_loader::merge_toml_values(&mut combined_extra_toml, &extra_toml);
+    }
+
+    Ok(Some(combined_extra_toml))
+}
+
+fn merge_codexn_extra_config_from_env(merged_toml: &mut TomlValue) -> std::io::Result<()> {
+    let Some(combined_extra_toml) = load_codexn_extra_config_from_env()? else {
+        return Ok(());
+    };
+    crate::config_loader::merge_toml_values(merged_toml, &combined_extra_toml);
+    apply_codexn_fork_developer_instructions(merged_toml, &combined_extra_toml);
+    Ok(())
+}
+
+pub(crate) fn refresh_codexn_fork_developer_instructions(
+    config: &mut Config,
+) -> std::io::Result<()> {
+    let Some(combined_extra_toml) = load_codexn_extra_config_from_env()? else {
+        return Ok(());
+    };
+    config.developer_instructions = compose_codexn_fork_developer_instructions(
+        config.developer_instructions.as_deref(),
+        &combined_extra_toml,
     );
-    crate::config_loader::merge_toml_values(merged_toml, &extra_toml);
     Ok(())
 }
 
@@ -2653,7 +2828,8 @@ phase_2_model = "gpt-5"
         )
         .expect("parse extra toml");
 
-        apply_codexn_fork_overrides(&mut extra_toml);
+        let extra_snapshot = extra_toml.clone();
+        apply_codexn_fork_developer_instructions(&mut extra_toml, &extra_snapshot);
 
         assert_eq!(
             extra_toml
@@ -2674,7 +2850,8 @@ phase_2_model = "gpt-5"
         )
         .expect("parse extra toml");
 
-        apply_codexn_fork_overrides(&mut extra_toml);
+        let extra_snapshot = extra_toml.clone();
+        apply_codexn_fork_developer_instructions(&mut extra_toml, &extra_snapshot);
 
         assert_eq!(
             extra_toml
@@ -2695,7 +2872,8 @@ phase_2_model = "gpt-5"
         )
         .expect("parse extra toml");
 
-        apply_codexn_fork_overrides(&mut extra_toml);
+        let extra_snapshot = extra_toml.clone();
+        apply_codexn_fork_developer_instructions(&mut extra_toml, &extra_snapshot);
 
         assert_eq!(
             extra_toml
@@ -2704,6 +2882,173 @@ phase_2_model = "gpt-5"
                 .and_then(TomlValue::as_str),
             Some("singular alias")
         );
+    }
+
+    #[test]
+    fn codexn_fork_auto_prompt_promotes_to_root_developer_instructions() {
+        let mut extra_toml: TomlValue = toml::from_str(
+            r####"
+                [nero.hook.runtime.auto]
+                enabled = true
+                protocol_prefix = "NERO_AUTO_V1 "
+
+                [nero.hook.runtime.auto.scoring_system]
+                enabled = true
+
+                [nero.hook.runtime.auto.scoring_system.show]
+                agent = true
+                tui = false
+
+                [nero.hook.runtime.auto.system_text]
+                header = "## NERO-SYSTEM v1"
+                scoring_on_header = "### scoring_system: on"
+                rules_label = "SCORE_RULES:"
+                json_intro = "Emit the strict JSON block below."
+                legacy_notice = "Legacy prefix `{protocol_prefix}` is still supported."
+            "####,
+        )
+        .expect("parse extra toml");
+
+        let extra_snapshot = extra_toml.clone();
+        apply_codexn_fork_developer_instructions(&mut extra_toml, &extra_snapshot);
+
+        let instructions = extra_toml
+            .as_table()
+            .and_then(|t| t.get("developer_instructions"))
+            .and_then(TomlValue::as_str)
+            .expect("developer instructions");
+        assert!(instructions.contains("## NERO-SYSTEM v1"));
+        assert!(instructions.contains("\"nero_auto_v1\""));
+        assert!(instructions.contains("Legacy prefix"));
+        assert!(instructions.contains("NERO_AUTO_V1"));
+    }
+
+    #[test]
+    fn codexn_fork_main_agent_and_auto_prompt_are_combined() {
+        let mut extra_toml: TomlValue = toml::from_str(
+            r####"
+                [nero.main_agent]
+                developer_instructions = "architect instructions"
+
+                [nero.hook.runtime.auto]
+                enabled = true
+                protocol_prefix = "NERO_AUTO_V1 "
+
+                [nero.hook.runtime.auto.scoring_system]
+                enabled = true
+
+                [nero.hook.runtime.auto.scoring_system.show]
+                agent = true
+                tui = false
+
+                [nero.hook.runtime.auto.system_text]
+                header = "## NERO-SYSTEM v1"
+                scoring_on_header = "### scoring_system: on"
+                rules_label = "SCORE_RULES:"
+                json_intro = "Emit the strict JSON block below."
+                legacy_notice = "Legacy prefix `{protocol_prefix}` is still supported."
+            "####,
+        )
+        .expect("parse extra toml");
+
+        let extra_snapshot = extra_toml.clone();
+        apply_codexn_fork_developer_instructions(&mut extra_toml, &extra_snapshot);
+
+        let instructions = extra_toml
+            .as_table()
+            .and_then(|t| t.get("developer_instructions"))
+            .and_then(TomlValue::as_str)
+            .expect("developer instructions");
+        assert!(instructions.contains("architect instructions"));
+        assert!(instructions.contains("## NERO-SYSTEM v1"));
+    }
+
+    #[test]
+    fn codexn_fork_auto_prompt_preserves_existing_root_developer_instructions() {
+        let mut merged_toml: TomlValue = toml::from_str(
+            r#"
+                developer_instructions = "base instructions"
+            "#,
+        )
+        .expect("parse merged toml");
+        let extra_toml: TomlValue = toml::from_str(
+            r####"
+                [nero.hook.runtime.auto]
+                enabled = true
+                protocol_prefix = "NERO_AUTO_V1 "
+
+                [nero.hook.runtime.auto.scoring_system]
+                enabled = true
+
+                [nero.hook.runtime.auto.scoring_system.show]
+                agent = true
+                tui = false
+
+                [nero.hook.runtime.auto.system_text]
+                header = "## NERO-SYSTEM v1"
+                scoring_on_header = "### scoring_system: on"
+                rules_label = "SCORE_RULES:"
+                json_intro = "Emit the strict JSON block below."
+                legacy_notice = "Legacy prefix `{protocol_prefix}` is still supported."
+            "####,
+        )
+        .expect("parse extra toml");
+
+        apply_codexn_fork_developer_instructions(&mut merged_toml, &extra_toml);
+
+        let instructions = merged_toml
+            .as_table()
+            .and_then(|t| t.get("developer_instructions"))
+            .and_then(TomlValue::as_str)
+            .expect("developer instructions");
+        assert!(instructions.contains("base instructions"));
+        assert!(instructions.contains("## NERO-SYSTEM v1"));
+    }
+
+    #[test]
+    fn codexn_fork_main_agent_override_replaces_base_instructions_when_composed() {
+        let mut merged_toml: TomlValue = toml::from_str(
+            r#"
+                developer_instructions = "base instructions"
+            "#,
+        )
+        .expect("parse merged toml");
+        let extra_toml: TomlValue = toml::from_str(
+            r####"
+                [nero.main_agent]
+                developer_instructions = "fork main instructions"
+
+                [nero.hook.runtime.auto]
+                enabled = true
+                protocol_prefix = "NERO_AUTO_V1 "
+
+                [nero.hook.runtime.auto.scoring_system]
+                enabled = true
+
+                [nero.hook.runtime.auto.scoring_system.show]
+                agent = true
+                tui = false
+
+                [nero.hook.runtime.auto.system_text]
+                header = "## NERO-SYSTEM v1"
+                scoring_on_header = "### scoring_system: on"
+                rules_label = "SCORE_RULES:"
+                json_intro = "Emit the strict JSON block below."
+                legacy_notice = "Legacy prefix `{protocol_prefix}` is still supported."
+            "####,
+        )
+        .expect("parse extra toml");
+
+        apply_codexn_fork_developer_instructions(&mut merged_toml, &extra_toml);
+
+        let instructions = merged_toml
+            .as_table()
+            .and_then(|t| t.get("developer_instructions"))
+            .and_then(TomlValue::as_str)
+            .expect("developer instructions");
+        assert!(!instructions.contains("base instructions"));
+        assert!(instructions.contains("fork main instructions"));
+        assert!(instructions.contains("## NERO-SYSTEM v1"));
     }
 
     #[test]

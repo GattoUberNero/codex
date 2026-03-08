@@ -534,7 +534,6 @@ impl Codex {
             provider: config.model_provider.clone(),
             collaboration_mode,
             model_reasoning_summary: config.model_reasoning_summary,
-            developer_instructions: config.developer_instructions.clone(),
             user_instructions,
             personality: config.personality,
             base_instructions,
@@ -905,9 +904,6 @@ pub(crate) struct SessionConfiguration {
     collaboration_mode: CollaborationMode,
     model_reasoning_summary: Option<ReasoningSummaryConfig>,
 
-    /// Developer instructions that supplement the base instructions.
-    developer_instructions: Option<String>,
-
     /// Model instructions that are appended to the base instructions.
     user_instructions: Option<String>,
 
@@ -1095,6 +1091,14 @@ impl Session {
             );
         }
         per_turn_config.features = config.features.clone();
+        if let Err(err) =
+            crate::config::refresh_codexn_fork_developer_instructions(&mut per_turn_config)
+        {
+            tracing::warn!(
+                error = %err,
+                "failed to refresh codexn fork developer instructions for turn"
+            );
+        }
         per_turn_config
     }
 
@@ -1187,7 +1191,7 @@ impl Session {
             current_date: Some(current_date),
             timezone: Some(timezone),
             app_server_client_name: session_configuration.app_server_client_name.clone(),
-            developer_instructions: session_configuration.developer_instructions.clone(),
+            developer_instructions: per_turn_config.developer_instructions.clone(),
             compact_prompt: session_configuration.compact_prompt.clone(),
             user_instructions: session_configuration.user_instructions.clone(),
             collaboration_mode: session_configuration.collaboration_mode.clone(),
@@ -8236,7 +8240,6 @@ mod tests {
             provider: config.model_provider.clone(),
             collaboration_mode,
             model_reasoning_summary: config.model_reasoning_summary,
-            developer_instructions: config.developer_instructions.clone(),
             user_instructions: config.user_instructions.clone(),
             personality: config.personality,
             base_instructions: config
@@ -8329,7 +8332,6 @@ mod tests {
             provider: config.model_provider.clone(),
             collaboration_mode,
             model_reasoning_summary: config.model_reasoning_summary,
-            developer_instructions: config.developer_instructions.clone(),
             user_instructions: config.user_instructions.clone(),
             personality: config.personality,
             base_instructions: config
@@ -8641,7 +8643,6 @@ mod tests {
             provider: config.model_provider.clone(),
             collaboration_mode,
             model_reasoning_summary: config.model_reasoning_summary,
-            developer_instructions: config.developer_instructions.clone(),
             user_instructions: config.user_instructions.clone(),
             personality: config.personality,
             base_instructions: config
@@ -8695,7 +8696,6 @@ mod tests {
             provider: config.model_provider.clone(),
             collaboration_mode,
             model_reasoning_summary: config.model_reasoning_summary,
-            developer_instructions: config.developer_instructions.clone(),
             user_instructions: config.user_instructions.clone(),
             personality: config.personality,
             base_instructions: config
@@ -8780,7 +8780,6 @@ mod tests {
             provider: config.model_provider.clone(),
             collaboration_mode,
             model_reasoning_summary: config.model_reasoning_summary,
-            developer_instructions: config.developer_instructions.clone(),
             user_instructions: config.user_instructions.clone(),
             personality: config.personality,
             base_instructions: config
@@ -8946,7 +8945,6 @@ mod tests {
             provider: config.model_provider.clone(),
             collaboration_mode,
             model_reasoning_summary: config.model_reasoning_summary,
-            developer_instructions: config.developer_instructions.clone(),
             user_instructions: config.user_instructions.clone(),
             personality: config.personality,
             base_instructions: config
