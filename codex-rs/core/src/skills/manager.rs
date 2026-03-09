@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::env;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,7 +25,11 @@ use crate::skills::loader::load_skills_from_roots;
 use crate::skills::loader::skill_roots_from_layer_stack_with_agents;
 use crate::skills::model::SkillAgentFilterDefaults;
 use crate::skills::model::SkillAgentFilterMode;
+use crate::skills::model::SkillMetadata;
 use crate::skills::system::install_system_skills;
+
+const CODEXN_EXPLICIT_SKILL_ROOTS_ENV: &str = "CODEXN_EXPLICIT_SKILL_ROOTS";
+const CODEXN_SKILL_ROOTS_ENV: &str = "CODEXN_SKILL_ROOTS";
 
 pub struct SkillsManager {
     codex_home: PathBuf,
@@ -51,12 +56,25 @@ impl SkillsManager {
             return outcome;
         }
 
-        let roots =
+        let configured_extra_user_roots =
+            configured_extra_user_roots_from_stack(&config.config_layer_stack);
+        let mut roots =
             skill_roots_from_layer_stack_with_agents(&config.config_layer_stack, &config.cwd);
+        roots.extend(
+            configured_extra_user_roots
+                .iter()
+                .cloned()
+                .map(|path| SkillRoot {
+                    path,
+                    scope: SkillScope::User,
+                }),
+        );
         let mut outcome = load_skills_from_roots(roots);
         outcome.disabled_paths = disabled_paths_from_stack(&config.config_layer_stack);
         outcome.agent_filter_defaults =
             skill_agent_filter_defaults_from_stack(&config.config_layer_stack);
+        outcome.explicit_skill_paths =
+            collect_explicit_skill_paths(&outcome.skills, &configured_extra_user_roots);
         let (by_scripts_dir, by_doc_path) =
             build_implicit_skill_path_indexes(outcome.allowed_skills_for_implicit_invocation());
         outcome.implicit_skills_by_scripts_dir = Arc::new(by_scripts_dir);
@@ -124,9 +142,15 @@ impl SkillsManager {
             }
         };
 
+        let configured_extra_user_roots =
+            configured_extra_user_roots_from_stack(&config_layer_stack);
+        let mut merged_extra_user_roots = configured_extra_user_roots.clone();
+        merged_extra_user_roots.extend(normalized_extra_user_roots);
+        let merged_extra_user_roots = normalize_extra_user_roots(&merged_extra_user_roots);
+
         let mut roots = skill_roots_from_layer_stack_with_agents(&config_layer_stack, cwd);
         roots.extend(
-            normalized_extra_user_roots
+            merged_extra_user_roots
                 .iter()
                 .cloned()
                 .map(|path| SkillRoot {
@@ -143,6 +167,8 @@ impl SkillsManager {
         }
         outcome.disabled_paths = disabled_paths_from_stack(&config_layer_stack);
         outcome.agent_filter_defaults = skill_agent_filter_defaults_from_stack(&config_layer_stack);
+        outcome.explicit_skill_paths =
+            collect_explicit_skill_paths(&outcome.skills, &merged_extra_user_roots);
         let (by_scripts_dir, by_doc_path) =
             build_implicit_skill_path_indexes(outcome.allowed_skills_for_implicit_invocation());
         outcome.implicit_skills_by_scripts_dir = Arc::new(by_scripts_dir);
@@ -223,40 +249,74 @@ fn skill_agent_filter_defaults_from_toml(config_toml: &TomlValue) -> SkillAgentF
     let Some(root) = config_toml.as_table() else {
         return SkillAgentFilterDefaults::default();
     };
-
-    let canonical = root
-        .get("skills")
-        .and_then(TomlValue::as_table)
-        .and_then(|skills| skills.get("agent_filter_default_mode"))
-        .and_then(TomlValue::as_str);
-    if let Some(raw_mode) = canonical {
-        if let Some(mode) = parse_skill_agent_filter_mode(raw_mode) {
-            return SkillAgentFilterDefaults { default_mode: mode };
-        }
-        warn!(
-            value = raw_mode,
-            "invalid skills.agent_filter_default_mode; expected one of: off, allow-all, deny-all, whitelist, blacklist"
-        );
-    }
-
-    let fork_alias = root
+    let canonical_skills = root.get("skills").and_then(TomlValue::as_table);
+    let fork_alias_skills = root
         .get("nero")
         .and_then(TomlValue::as_table)
         .and_then(|nero| nero.get("skills"))
-        .and_then(TomlValue::as_table)
-        .and_then(|skills| skills.get("default_mode"))
-        .and_then(TomlValue::as_str);
-    if let Some(raw_mode) = fork_alias {
-        if let Some(mode) = parse_skill_agent_filter_mode(raw_mode) {
-            return SkillAgentFilterDefaults { default_mode: mode };
-        }
-        warn!(
-            value = raw_mode,
-            "invalid nero.skills.default_mode; expected one of: off, allow-all, deny-all, whitelist, blacklist"
-        );
-    }
+        .and_then(TomlValue::as_table);
 
-    SkillAgentFilterDefaults::default()
+    let fallback_mode = read_skill_filter_mode(
+        canonical_skills,
+        "agent_filter_default_mode",
+        "skills.agent_filter_default_mode",
+    )
+    .or_else(|| {
+        read_skill_filter_mode(
+            fork_alias_skills,
+            "default_mode",
+            "nero.skills.default_mode",
+        )
+    })
+    .unwrap_or(SkillAgentFilterMode::Off);
+
+    let global_mode = read_skill_filter_mode(
+        canonical_skills,
+        "agent_filter_default_mode_global",
+        "skills.agent_filter_default_mode_global",
+    )
+    .or_else(|| {
+        read_skill_filter_mode(
+            fork_alias_skills,
+            "default_mode_global",
+            "nero.skills.default_mode_global",
+        )
+    })
+    .unwrap_or(fallback_mode);
+
+    let local_mode = read_skill_filter_mode(
+        canonical_skills,
+        "agent_filter_default_mode_local",
+        "skills.agent_filter_default_mode_local",
+    )
+    .or_else(|| {
+        read_skill_filter_mode(
+            fork_alias_skills,
+            "default_mode_local",
+            "nero.skills.default_mode_local",
+        )
+    })
+    .unwrap_or(fallback_mode);
+
+    let explicit_mode = read_skill_filter_mode(
+        canonical_skills,
+        "agent_filter_default_mode_explicit",
+        "skills.agent_filter_default_mode_explicit",
+    )
+    .or_else(|| {
+        read_skill_filter_mode(
+            fork_alias_skills,
+            "default_mode_explicit",
+            "nero.skills.default_mode_explicit",
+        )
+    })
+    .unwrap_or(fallback_mode);
+
+    SkillAgentFilterDefaults {
+        global_mode,
+        local_mode,
+        explicit_mode,
+    }
 }
 
 fn parse_skill_agent_filter_mode(raw: &str) -> Option<SkillAgentFilterMode> {
@@ -268,6 +328,123 @@ fn parse_skill_agent_filter_mode(raw: &str) -> Option<SkillAgentFilterMode> {
         "blacklist" => Some(SkillAgentFilterMode::Blacklist),
         _ => None,
     }
+}
+
+fn read_skill_filter_mode(
+    table: Option<&toml::map::Map<String, TomlValue>>,
+    key: &str,
+    field_name: &str,
+) -> Option<SkillAgentFilterMode> {
+    let raw_mode = table?.get(key)?.as_str()?;
+    let mode = parse_skill_agent_filter_mode(raw_mode);
+    if mode.is_none() {
+        warn!(
+            value = raw_mode,
+            field = field_name,
+            "invalid skill agent filter mode; expected one of: off, allow-all, deny-all, whitelist, blacklist"
+        );
+    }
+    mode
+}
+
+fn configured_extra_user_roots_from_stack(
+    config_layer_stack: &crate::config_loader::ConfigLayerStack,
+) -> Vec<PathBuf> {
+    let mut effective_config = config_layer_stack.effective_config();
+    if let Err(err) = apply_codexn_extra_config_overlays(&mut effective_config) {
+        warn!("failed to apply codexn extra config overlays for explicit skill roots: {err}");
+    }
+    let mut roots = configured_extra_user_roots_from_toml(&effective_config);
+    if let Some(raw_paths) = env::var_os(CODEXN_EXPLICIT_SKILL_ROOTS_ENV) {
+        roots.extend(env::split_paths(&raw_paths));
+    }
+    if let Some(raw_paths) = env::var_os(CODEXN_SKILL_ROOTS_ENV) {
+        roots.extend(env::split_paths(&raw_paths));
+    }
+    normalize_extra_user_roots(&roots)
+}
+
+fn configured_extra_user_roots_from_toml(config_toml: &TomlValue) -> Vec<PathBuf> {
+    let mut roots = Vec::<PathBuf>::new();
+    let Some(root) = config_toml.as_table() else {
+        return roots;
+    };
+
+    let canonical_skills = root.get("skills").and_then(TomlValue::as_table);
+    roots.extend(read_path_list_from_table(
+        canonical_skills,
+        "extra_roots",
+        "skills.extra_roots",
+    ));
+
+    let fork_alias_skills = root
+        .get("nero")
+        .and_then(TomlValue::as_table)
+        .and_then(|nero| nero.get("skills"))
+        .and_then(TomlValue::as_table);
+    roots.extend(read_path_list_from_table(
+        fork_alias_skills,
+        "explicit_roots",
+        "nero.skills.explicit_roots",
+    ));
+    roots.extend(read_path_list_from_table(
+        fork_alias_skills,
+        "extra_roots",
+        "nero.skills.extra_roots",
+    ));
+
+    normalize_extra_user_roots(&roots)
+}
+
+fn read_path_list_from_table(
+    table: Option<&toml::map::Map<String, TomlValue>>,
+    key: &str,
+    field_name: &str,
+) -> Vec<PathBuf> {
+    let Some(value) = table.and_then(|tbl| tbl.get(key)) else {
+        return Vec::new();
+    };
+    let Some(entries) = value.as_array() else {
+        warn!(field = field_name, "expected an array of paths");
+        return Vec::new();
+    };
+
+    let mut paths = Vec::new();
+    for entry in entries {
+        match entry.as_str() {
+            Some(raw_path) => {
+                let trimmed = raw_path.trim();
+                if !trimmed.is_empty() {
+                    paths.push(PathBuf::from(trimmed));
+                }
+            }
+            None => {
+                warn!(
+                    field = field_name,
+                    "ignored non-string extra skill root entry"
+                );
+            }
+        }
+    }
+    paths
+}
+
+fn collect_explicit_skill_paths(
+    skills: &[SkillMetadata],
+    explicit_roots: &[PathBuf],
+) -> HashSet<PathBuf> {
+    if explicit_roots.is_empty() {
+        return HashSet::new();
+    }
+    skills
+        .iter()
+        .filter(|skill| {
+            explicit_roots
+                .iter()
+                .any(|root| skill.path_to_skills_md.starts_with(root))
+        })
+        .map(|skill| skill.path_to_skills_md.clone())
+        .collect()
 }
 
 fn normalize_override_path(path: &Path) -> PathBuf {
@@ -483,7 +660,9 @@ mod tests {
         )
         .expect("valid toml");
         let defaults = skill_agent_filter_defaults_from_toml(&config_toml);
-        assert_eq!(defaults.default_mode, SkillAgentFilterMode::Whitelist);
+        assert_eq!(defaults.global_mode, SkillAgentFilterMode::Whitelist);
+        assert_eq!(defaults.local_mode, SkillAgentFilterMode::Whitelist);
+        assert_eq!(defaults.explicit_mode, SkillAgentFilterMode::Whitelist);
     }
 
     #[test]
@@ -499,7 +678,9 @@ mod tests {
         )
         .expect("valid toml");
         let defaults = skill_agent_filter_defaults_from_toml(&config_toml);
-        assert_eq!(defaults.default_mode, SkillAgentFilterMode::Blacklist);
+        assert_eq!(defaults.global_mode, SkillAgentFilterMode::Blacklist);
+        assert_eq!(defaults.local_mode, SkillAgentFilterMode::Blacklist);
+        assert_eq!(defaults.explicit_mode, SkillAgentFilterMode::Blacklist);
     }
 
     #[test]
@@ -513,7 +694,15 @@ mod tests {
         .expect("valid toml");
         let allow_all_defaults = skill_agent_filter_defaults_from_toml(&allow_all_toml);
         assert_eq!(
-            allow_all_defaults.default_mode,
+            allow_all_defaults.global_mode,
+            SkillAgentFilterMode::AllowAll
+        );
+        assert_eq!(
+            allow_all_defaults.local_mode,
+            SkillAgentFilterMode::AllowAll
+        );
+        assert_eq!(
+            allow_all_defaults.explicit_mode,
             SkillAgentFilterMode::AllowAll
         );
 
@@ -525,9 +714,47 @@ mod tests {
         )
         .expect("valid toml");
         let deny_all_defaults = skill_agent_filter_defaults_from_toml(&deny_all_toml);
+        assert_eq!(deny_all_defaults.global_mode, SkillAgentFilterMode::DenyAll);
+        assert_eq!(deny_all_defaults.local_mode, SkillAgentFilterMode::DenyAll);
         assert_eq!(
-            deny_all_defaults.default_mode,
+            deny_all_defaults.explicit_mode,
             SkillAgentFilterMode::DenyAll
+        );
+    }
+
+    #[test]
+    fn skill_agent_filter_defaults_supports_source_specific_modes() {
+        let config_toml: TomlValue = toml::from_str(
+            r#"
+            [nero.skills]
+            default_mode_global = "deny-all"
+            default_mode_local = "allow-all"
+            default_mode_explicit = "allow-all"
+            "#,
+        )
+        .expect("valid toml");
+        let defaults = skill_agent_filter_defaults_from_toml(&config_toml);
+        assert_eq!(defaults.global_mode, SkillAgentFilterMode::DenyAll);
+        assert_eq!(defaults.local_mode, SkillAgentFilterMode::AllowAll);
+        assert_eq!(defaults.explicit_mode, SkillAgentFilterMode::AllowAll);
+    }
+
+    #[test]
+    fn configured_extra_user_roots_reads_nero_alias() {
+        let config_toml: TomlValue = toml::from_str(
+            r#"
+            [nero.skills]
+            explicit_roots = ["/tmp/skills-a", "/tmp/skills-b"]
+            "#,
+        )
+        .expect("valid toml");
+        let roots = configured_extra_user_roots_from_toml(&config_toml);
+        assert_eq!(
+            roots,
+            vec![
+                PathBuf::from("/tmp/skills-a"),
+                PathBuf::from("/tmp/skills-b")
+            ]
         );
     }
 }

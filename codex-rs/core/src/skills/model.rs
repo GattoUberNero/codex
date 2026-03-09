@@ -38,11 +38,12 @@ impl SkillMetadata {
         &self,
         agent_identity: &str,
         defaults: SkillAgentFilterDefaults,
+        source: SkillAgentFilterSource,
     ) -> bool {
         let policy = self.policy.as_ref();
         let mode = policy
-            .map(|value| value.effective_agent_filter_mode(defaults))
-            .unwrap_or(defaults.default_mode);
+            .map(|value| value.effective_agent_filter_mode(defaults, source))
+            .unwrap_or(defaults.mode_for_source(source));
         let filter_list = policy
             .and_then(|value| value.allowed_agent_types.as_deref())
             .unwrap_or(&[]);
@@ -74,6 +75,7 @@ impl SkillPolicy {
     fn effective_agent_filter_mode(
         &self,
         defaults: SkillAgentFilterDefaults,
+        source: SkillAgentFilterSource,
     ) -> SkillAgentFilterMode {
         if let Some(mode) = self.agent_filter_mode {
             return mode;
@@ -85,7 +87,7 @@ impl SkillPolicy {
                 SkillAgentFilterMode::Off
             };
         }
-        defaults.default_mode
+        defaults.mode_for_source(source)
     }
 }
 
@@ -100,9 +102,28 @@ pub enum SkillAgentFilterMode {
     Blacklist,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillAgentFilterSource {
+    Global,
+    Local,
+    Explicit,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SkillAgentFilterDefaults {
-    pub default_mode: SkillAgentFilterMode,
+    pub global_mode: SkillAgentFilterMode,
+    pub local_mode: SkillAgentFilterMode,
+    pub explicit_mode: SkillAgentFilterMode,
+}
+
+impl SkillAgentFilterDefaults {
+    pub const fn mode_for_source(self, source: SkillAgentFilterSource) -> SkillAgentFilterMode {
+        match source {
+            SkillAgentFilterSource::Global => self.global_mode,
+            SkillAgentFilterSource::Local => self.local_mode,
+            SkillAgentFilterSource::Explicit => self.explicit_mode,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +163,7 @@ pub struct SkillLoadOutcome {
     pub errors: Vec<SkillError>,
     pub disabled_paths: HashSet<PathBuf>,
     pub agent_filter_defaults: SkillAgentFilterDefaults,
+    pub explicit_skill_paths: HashSet<PathBuf>,
     pub(crate) implicit_skills_by_scripts_dir: Arc<HashMap<PathBuf, SkillMetadata>>,
     pub(crate) implicit_skills_by_doc_path: Arc<HashMap<PathBuf, SkillMetadata>>,
 }
@@ -173,7 +195,12 @@ impl SkillLoadOutcome {
             .skills
             .iter()
             .filter(|skill| {
-                skill.is_allowed_for_agent_identity(agent_identity, self.agent_filter_defaults)
+                let source = self.source_for_skill(skill);
+                skill.is_allowed_for_agent_identity(
+                    agent_identity,
+                    self.agent_filter_defaults,
+                    source,
+                )
             })
             .cloned()
             .collect();
@@ -188,12 +215,19 @@ impl SkillLoadOutcome {
             .filter(|path| kept_paths.contains(*path))
             .cloned()
             .collect();
+        let filtered_explicit_paths: HashSet<PathBuf> = self
+            .explicit_skill_paths
+            .iter()
+            .filter(|path| kept_paths.contains(*path))
+            .cloned()
+            .collect();
 
         let mut filtered = SkillLoadOutcome {
             skills: filtered_skills,
             errors: self.errors.clone(),
             disabled_paths: filtered_disabled_paths,
             agent_filter_defaults: self.agent_filter_defaults,
+            explicit_skill_paths: filtered_explicit_paths,
             implicit_skills_by_scripts_dir: Arc::new(HashMap::new()),
             implicit_skills_by_doc_path: Arc::new(HashMap::new()),
         };
@@ -209,6 +243,16 @@ impl SkillLoadOutcome {
         self.skills
             .iter()
             .map(|skill| (skill, self.is_skill_enabled(skill)))
+    }
+
+    fn source_for_skill(&self, skill: &SkillMetadata) -> SkillAgentFilterSource {
+        if self.explicit_skill_paths.contains(&skill.path_to_skills_md) {
+            return SkillAgentFilterSource::Explicit;
+        }
+        if skill.scope == SkillScope::Repo {
+            return SkillAgentFilterSource::Local;
+        }
+        SkillAgentFilterSource::Global
     }
 }
 
@@ -266,6 +310,14 @@ mod tests {
         }
     }
 
+    fn defaults_for_all_sources(mode: SkillAgentFilterMode) -> SkillAgentFilterDefaults {
+        SkillAgentFilterDefaults {
+            global_mode: mode,
+            local_mode: mode,
+            explicit_mode: mode,
+        }
+    }
+
     #[test]
     fn effective_skill_agent_identity_defaults_to_architect_for_main_sessions() {
         assert_eq!(
@@ -318,6 +370,7 @@ mod tests {
             errors: Vec::new(),
             disabled_paths: HashSet::new(),
             agent_filter_defaults: SkillAgentFilterDefaults::default(),
+            explicit_skill_paths: HashSet::new(),
             implicit_skills_by_scripts_dir: Arc::new(HashMap::new()),
             implicit_skills_by_doc_path: Arc::new(HashMap::new()),
         };
@@ -352,6 +405,7 @@ mod tests {
             errors: Vec::new(),
             disabled_paths: HashSet::new(),
             agent_filter_defaults: SkillAgentFilterDefaults::default(),
+            explicit_skill_paths: HashSet::new(),
             implicit_skills_by_scripts_dir: Arc::new(HashMap::new()),
             implicit_skills_by_doc_path: Arc::new(HashMap::new()),
         };
@@ -371,9 +425,8 @@ mod tests {
             skills: vec![unguarded],
             errors: Vec::new(),
             disabled_paths: HashSet::new(),
-            agent_filter_defaults: SkillAgentFilterDefaults {
-                default_mode: SkillAgentFilterMode::Whitelist,
-            },
+            agent_filter_defaults: defaults_for_all_sources(SkillAgentFilterMode::Whitelist),
+            explicit_skill_paths: HashSet::new(),
             implicit_skills_by_scripts_dir: Arc::new(HashMap::new()),
             implicit_skills_by_doc_path: Arc::new(HashMap::new()),
         };
@@ -400,9 +453,8 @@ mod tests {
             skills: vec![skill_without_policy],
             errors: Vec::new(),
             disabled_paths: HashSet::new(),
-            agent_filter_defaults: SkillAgentFilterDefaults {
-                default_mode: SkillAgentFilterMode::Whitelist,
-            },
+            agent_filter_defaults: defaults_for_all_sources(SkillAgentFilterMode::Whitelist),
+            explicit_skill_paths: HashSet::new(),
             implicit_skills_by_scripts_dir: Arc::new(HashMap::new()),
             implicit_skills_by_doc_path: Arc::new(HashMap::new()),
         };
@@ -430,6 +482,7 @@ mod tests {
             errors: Vec::new(),
             disabled_paths: HashSet::new(),
             agent_filter_defaults: SkillAgentFilterDefaults::default(),
+            explicit_skill_paths: HashSet::new(),
             implicit_skills_by_scripts_dir: Arc::new(HashMap::new()),
             implicit_skills_by_doc_path: Arc::new(HashMap::new()),
         };
@@ -440,5 +493,68 @@ mod tests {
             filtered.skills[0].path_to_skills_md,
             allow_all.path_to_skills_md
         );
+    }
+
+    #[test]
+    fn filter_for_agent_identity_uses_source_specific_defaults() {
+        let global_skill = SkillMetadata {
+            name: "global".to_string(),
+            description: "global".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            permission_profile: None,
+            permissions: None,
+            path_to_skills_md: PathBuf::from("/tmp/global/SKILL.md"),
+            scope: SkillScope::User,
+        };
+        let local_skill = SkillMetadata {
+            name: "local".to_string(),
+            description: "local".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            permission_profile: None,
+            permissions: None,
+            path_to_skills_md: PathBuf::from("/tmp/local/SKILL.md"),
+            scope: SkillScope::Repo,
+        };
+        let explicit_skill = SkillMetadata {
+            name: "explicit".to_string(),
+            description: "explicit".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            permission_profile: None,
+            permissions: None,
+            path_to_skills_md: PathBuf::from("/tmp/explicit/SKILL.md"),
+            scope: SkillScope::User,
+        };
+        let outcome = SkillLoadOutcome {
+            skills: vec![global_skill, local_skill.clone(), explicit_skill.clone()],
+            errors: Vec::new(),
+            disabled_paths: HashSet::new(),
+            agent_filter_defaults: SkillAgentFilterDefaults {
+                global_mode: SkillAgentFilterMode::DenyAll,
+                local_mode: SkillAgentFilterMode::AllowAll,
+                explicit_mode: SkillAgentFilterMode::AllowAll,
+            },
+            explicit_skill_paths: HashSet::from([explicit_skill.path_to_skills_md.clone()]),
+            implicit_skills_by_scripts_dir: Arc::new(HashMap::new()),
+            implicit_skills_by_doc_path: Arc::new(HashMap::new()),
+        };
+
+        let filtered = outcome.filter_for_agent_identity("architect");
+        let paths: HashSet<PathBuf> = filtered
+            .skills
+            .iter()
+            .map(|skill| skill.path_to_skills_md.clone())
+            .collect();
+        assert!(paths.contains(&local_skill.path_to_skills_md));
+        assert!(paths.contains(&explicit_skill.path_to_skills_md));
+        assert_eq!(paths.len(), 2);
     }
 }
