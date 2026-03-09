@@ -949,6 +949,12 @@ fn merge_codexn_extra_config_from_env(merged_toml: &mut TomlValue) -> std::io::R
     Ok(())
 }
 
+pub(crate) fn apply_codexn_extra_config_overlays(
+    merged_toml: &mut TomlValue,
+) -> std::io::Result<()> {
+    merge_codexn_extra_config_from_env(merged_toml)
+}
+
 pub(crate) fn refresh_codexn_fork_developer_instructions(
     config: &mut Config,
 ) -> std::io::Result<()> {

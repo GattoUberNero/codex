@@ -12,6 +12,7 @@ use tracing::info;
 use tracing::warn;
 
 use crate::config::Config;
+use crate::config::apply_codexn_extra_config_overlays;
 use crate::config::types::SkillsConfig;
 use crate::config_loader::CloudRequirementsLoader;
 use crate::config_loader::LoaderOverrides;
@@ -21,6 +22,8 @@ use crate::skills::build_implicit_skill_path_indexes;
 use crate::skills::loader::SkillRoot;
 use crate::skills::loader::load_skills_from_roots;
 use crate::skills::loader::skill_roots_from_layer_stack_with_agents;
+use crate::skills::model::SkillAgentFilterDefaults;
+use crate::skills::model::SkillAgentFilterMode;
 use crate::skills::system::install_system_skills;
 
 pub struct SkillsManager {
@@ -52,6 +55,8 @@ impl SkillsManager {
             skill_roots_from_layer_stack_with_agents(&config.config_layer_stack, &config.cwd);
         let mut outcome = load_skills_from_roots(roots);
         outcome.disabled_paths = disabled_paths_from_stack(&config.config_layer_stack);
+        outcome.agent_filter_defaults =
+            skill_agent_filter_defaults_from_stack(&config.config_layer_stack);
         let (by_scripts_dir, by_doc_path) =
             build_implicit_skill_path_indexes(outcome.allowed_skills_for_implicit_invocation());
         outcome.implicit_skills_by_scripts_dir = Arc::new(by_scripts_dir);
@@ -137,6 +142,7 @@ impl SkillsManager {
                 .retain(|skill| skill.scope != SkillScope::System);
         }
         outcome.disabled_paths = disabled_paths_from_stack(&config_layer_stack);
+        outcome.agent_filter_defaults = skill_agent_filter_defaults_from_stack(&config_layer_stack);
         let (by_scripts_dir, by_doc_path) =
             build_implicit_skill_path_indexes(outcome.allowed_skills_for_implicit_invocation());
         outcome.implicit_skills_by_scripts_dir = Arc::new(by_scripts_dir);
@@ -201,6 +207,69 @@ fn disabled_paths_from_stack(
     disabled
 }
 
+fn skill_agent_filter_defaults_from_stack(
+    config_layer_stack: &crate::config_loader::ConfigLayerStack,
+) -> SkillAgentFilterDefaults {
+    let mut effective_config = config_layer_stack.effective_config();
+    if let Err(err) = apply_codexn_extra_config_overlays(&mut effective_config) {
+        warn!(
+            "failed to apply codexn extra config overlays for skill agent filter defaults: {err}"
+        );
+    }
+    skill_agent_filter_defaults_from_toml(&effective_config)
+}
+
+fn skill_agent_filter_defaults_from_toml(config_toml: &TomlValue) -> SkillAgentFilterDefaults {
+    let Some(root) = config_toml.as_table() else {
+        return SkillAgentFilterDefaults::default();
+    };
+
+    let canonical = root
+        .get("skills")
+        .and_then(TomlValue::as_table)
+        .and_then(|skills| skills.get("agent_filter_default_mode"))
+        .and_then(TomlValue::as_str);
+    if let Some(raw_mode) = canonical {
+        if let Some(mode) = parse_skill_agent_filter_mode(raw_mode) {
+            return SkillAgentFilterDefaults { default_mode: mode };
+        }
+        warn!(
+            value = raw_mode,
+            "invalid skills.agent_filter_default_mode; expected one of: off, allow-all, deny-all, whitelist, blacklist"
+        );
+    }
+
+    let fork_alias = root
+        .get("nero")
+        .and_then(TomlValue::as_table)
+        .and_then(|nero| nero.get("skills"))
+        .and_then(TomlValue::as_table)
+        .and_then(|skills| skills.get("default_mode"))
+        .and_then(TomlValue::as_str);
+    if let Some(raw_mode) = fork_alias {
+        if let Some(mode) = parse_skill_agent_filter_mode(raw_mode) {
+            return SkillAgentFilterDefaults { default_mode: mode };
+        }
+        warn!(
+            value = raw_mode,
+            "invalid nero.skills.default_mode; expected one of: off, allow-all, deny-all, whitelist, blacklist"
+        );
+    }
+
+    SkillAgentFilterDefaults::default()
+}
+
+fn parse_skill_agent_filter_mode(raw: &str) -> Option<SkillAgentFilterMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "off" => Some(SkillAgentFilterMode::Off),
+        "allow-all" | "allow_all" => Some(SkillAgentFilterMode::AllowAll),
+        "deny-all" | "deny_all" => Some(SkillAgentFilterMode::DenyAll),
+        "whitelist" => Some(SkillAgentFilterMode::Whitelist),
+        "blacklist" => Some(SkillAgentFilterMode::Blacklist),
+        _ => None,
+    }
+}
+
 fn normalize_override_path(path: &Path) -> PathBuf {
     dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
@@ -224,6 +293,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
+    use toml::Value as TomlValue;
 
     fn write_user_skill(codex_home: &TempDir, dir: &str, name: &str, description: &str) {
         let skill_dir = codex_home.path().join("skills").join(dir);
@@ -401,5 +471,63 @@ mod tests {
         let second = normalize_extra_user_roots(&[b, a]);
 
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn skill_agent_filter_defaults_reads_fork_alias() {
+        let config_toml: TomlValue = toml::from_str(
+            r#"
+            [nero.skills]
+            default_mode = "whitelist"
+            "#,
+        )
+        .expect("valid toml");
+        let defaults = skill_agent_filter_defaults_from_toml(&config_toml);
+        assert_eq!(defaults.default_mode, SkillAgentFilterMode::Whitelist);
+    }
+
+    #[test]
+    fn skill_agent_filter_defaults_prefers_canonical_value() {
+        let config_toml: TomlValue = toml::from_str(
+            r#"
+            [skills]
+            agent_filter_default_mode = "blacklist"
+
+            [nero.skills]
+            default_mode = "whitelist"
+            "#,
+        )
+        .expect("valid toml");
+        let defaults = skill_agent_filter_defaults_from_toml(&config_toml);
+        assert_eq!(defaults.default_mode, SkillAgentFilterMode::Blacklist);
+    }
+
+    #[test]
+    fn skill_agent_filter_defaults_supports_explicit_allow_all_and_deny_all() {
+        let allow_all_toml: TomlValue = toml::from_str(
+            r#"
+            [skills]
+            agent_filter_default_mode = "allow-all"
+            "#,
+        )
+        .expect("valid toml");
+        let allow_all_defaults = skill_agent_filter_defaults_from_toml(&allow_all_toml);
+        assert_eq!(
+            allow_all_defaults.default_mode,
+            SkillAgentFilterMode::AllowAll
+        );
+
+        let deny_all_toml: TomlValue = toml::from_str(
+            r#"
+            [skills]
+            agent_filter_default_mode = "deny-all"
+            "#,
+        )
+        .expect("valid toml");
+        let deny_all_defaults = skill_agent_filter_defaults_from_toml(&deny_all_toml);
+        assert_eq!(
+            deny_all_defaults.default_mode,
+            SkillAgentFilterMode::DenyAll
+        );
     }
 }

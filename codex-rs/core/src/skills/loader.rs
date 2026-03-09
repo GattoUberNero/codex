@@ -5,6 +5,7 @@ use crate::config_loader::ConfigLayerStackOrdering;
 use crate::config_loader::default_project_root_markers;
 use crate::config_loader::merge_toml_values;
 use crate::config_loader::project_root_markers_from_config;
+use crate::skills::model::SkillAgentFilterMode;
 use crate::skills::model::SkillDependencies;
 use crate::skills::model::SkillError;
 use crate::skills::model::SkillInterface;
@@ -44,6 +45,8 @@ struct SkillFrontmatter {
 struct SkillFrontmatterMetadata {
     #[serde(default, rename = "short-description")]
     short_description: Option<String>,
+    #[serde(default, rename = "agent-filter-mode", alias = "agent_filter_mode")]
+    agent_filter_mode: Option<SkillAgentFilterMode>,
     #[serde(
         default,
         rename = "allow-agent-whitelist",
@@ -664,6 +667,7 @@ fn resolve_dependencies(dependencies: Option<Dependencies>) -> Option<SkillDepen
 fn resolve_policy(policy: Option<Policy>) -> Option<SkillPolicy> {
     policy.map(|policy| SkillPolicy {
         allow_implicit_invocation: policy.allow_implicit_invocation,
+        agent_filter_mode: None,
         allow_agent_whitelist: None,
         allowed_agent_types: None,
     })
@@ -672,7 +676,10 @@ fn resolve_policy(policy: Option<Policy>) -> Option<SkillPolicy> {
 fn resolve_frontmatter_policy(
     metadata: &SkillFrontmatterMetadata,
 ) -> Result<Option<SkillPolicy>, SkillParseError> {
-    if metadata.allow_agent_whitelist.is_none() && metadata.allowed_agent_types.is_none() {
+    if metadata.agent_filter_mode.is_none()
+        && metadata.allow_agent_whitelist.is_none()
+        && metadata.allowed_agent_types.is_none()
+    {
         return Ok(None);
     }
 
@@ -686,15 +693,45 @@ fn resolve_frontmatter_policy(
         Some(types) => !types.is_empty(),
         None => false,
     };
-    if metadata.allow_agent_whitelist == Some(true) && !has_non_empty_allowed_types {
+    if metadata.allow_agent_whitelist == Some(true)
+        && metadata.agent_filter_mode.is_none()
+        && !has_non_empty_allowed_types
+    {
         return Err(SkillParseError::InvalidField {
             field: "metadata.allowed-agent-types",
             reason: "must be non-empty when metadata.allow-agent-whitelist=true".to_string(),
         });
     }
 
+    if let (Some(mode), Some(allow_whitelist)) =
+        (metadata.agent_filter_mode, metadata.allow_agent_whitelist)
+    {
+        let legacy_mode = if allow_whitelist {
+            SkillAgentFilterMode::Whitelist
+        } else {
+            SkillAgentFilterMode::Off
+        };
+        if mode != legacy_mode {
+            return Err(SkillParseError::InvalidField {
+                field: "metadata.agent-filter-mode",
+                reason: "conflicts with metadata.allow-agent-whitelist".to_string(),
+            });
+        }
+    }
+
+    let agent_filter_mode = metadata.agent_filter_mode.or_else(|| {
+        metadata.allow_agent_whitelist.map(|allow_whitelist| {
+            if allow_whitelist {
+                SkillAgentFilterMode::Whitelist
+            } else {
+                SkillAgentFilterMode::Off
+            }
+        })
+    });
+
     Ok(Some(SkillPolicy {
         allow_implicit_invocation: None,
+        agent_filter_mode,
         allow_agent_whitelist: metadata.allow_agent_whitelist,
         allowed_agent_types,
     }))
@@ -710,6 +747,7 @@ fn merge_skill_policy(
         (None, Some(policy)) => Some(policy),
         (Some(base), Some(overlay)) => Some(SkillPolicy {
             allow_implicit_invocation: base.allow_implicit_invocation,
+            agent_filter_mode: overlay.agent_filter_mode.or(base.agent_filter_mode),
             allow_agent_whitelist: overlay.allow_agent_whitelist.or(base.allow_agent_whitelist),
             allowed_agent_types: overlay.allowed_agent_types.or(base.allowed_agent_types),
         }),
@@ -1381,6 +1419,7 @@ policy:
             outcome.skills[0].policy,
             Some(SkillPolicy {
                 allow_implicit_invocation: Some(false),
+                agent_filter_mode: None,
                 allow_agent_whitelist: None,
                 allowed_agent_types: None,
             })
@@ -1414,6 +1453,7 @@ policy: {}
             outcome.skills[0].policy,
             Some(SkillPolicy {
                 allow_implicit_invocation: None,
+                agent_filter_mode: None,
                 allow_agent_whitelist: None,
                 allowed_agent_types: None,
             })
@@ -1452,6 +1492,7 @@ policy: {}
             outcome.skills[0].policy,
             Some(SkillPolicy {
                 allow_implicit_invocation: None,
+                agent_filter_mode: Some(SkillAgentFilterMode::Whitelist),
                 allow_agent_whitelist: Some(true),
                 allowed_agent_types: Some(vec!["architect".to_string(), "explorer".to_string()]),
             })
@@ -1484,6 +1525,41 @@ policy: {}
                 .contains("metadata.allowed-agent-types"),
             "unexpected error: {}",
             outcome.errors[0].message
+        );
+    }
+
+    #[tokio::test]
+    async fn loads_agent_blacklist_policy_from_skill_frontmatter() {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        let skill_path = write_skill(
+            &codex_home,
+            "demo",
+            "policy-frontmatter-blacklist",
+            "from frontmatter",
+        );
+        fs::write(
+            &skill_path,
+            "---\nname: policy-frontmatter-blacklist\ndescription: |-\n  from frontmatter\nmetadata:\n  agent-filter-mode: blacklist\n  allowed-agent-types:\n    - Reviewer\n---\n\n# Body\n",
+        )
+        .expect("rewrite skill frontmatter");
+
+        let cfg = make_config(&codex_home).await;
+        let outcome = load_skills_for_test(&cfg);
+
+        assert!(
+            outcome.errors.is_empty(),
+            "unexpected errors: {:?}",
+            outcome.errors
+        );
+        assert_eq!(outcome.skills.len(), 1);
+        assert_eq!(
+            outcome.skills[0].policy,
+            Some(SkillPolicy {
+                allow_implicit_invocation: None,
+                agent_filter_mode: Some(SkillAgentFilterMode::Blacklist),
+                allow_agent_whitelist: None,
+                allowed_agent_types: Some(vec!["reviewer".to_string()]),
+            })
         );
     }
 
