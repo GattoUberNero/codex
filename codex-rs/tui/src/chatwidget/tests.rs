@@ -77,6 +77,7 @@ use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::McpStartupCompleteEvent;
 use codex_protocol::protocol::McpStartupStatus;
 use codex_protocol::protocol::McpStartupUpdateEvent;
+use codex_protocol::protocol::NeroAutoRuntimeConfig;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::PatchApplyBeginEvent;
 use codex_protocol::protocol::PatchApplyEndEvent;
@@ -199,6 +200,8 @@ async fn resumed_initial_messages_render_history() {
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
+        session_source: codex_protocol::protocol::SessionSource::default(),
+        nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
         history_log_id: 0,
         history_entry_count: 0,
         initial_messages: Some(vec![
@@ -308,6 +311,8 @@ async fn replayed_user_message_preserves_text_elements_and_local_images() {
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
+        session_source: codex_protocol::protocol::SessionSource::default(),
+        nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
         history_log_id: 0,
         history_entry_count: 0,
         initial_messages: Some(vec![EventMsg::UserMessage(UserMessageEvent {
@@ -368,6 +373,8 @@ async fn replayed_user_message_preserves_remote_image_urls() {
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
+        session_source: codex_protocol::protocol::SessionSource::default(),
+        nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
         history_log_id: 0,
         history_entry_count: 0,
         initial_messages: Some(vec![EventMsg::UserMessage(UserMessageEvent {
@@ -435,6 +442,8 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
         sandbox_policy: expected_sandbox.clone(),
         cwd: expected_cwd.clone(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
+        session_source: codex_protocol::protocol::SessionSource::default(),
+        nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
         history_log_id: 0,
         history_entry_count: 0,
         initial_messages: None,
@@ -477,6 +486,8 @@ async fn replayed_user_message_with_only_remote_images_renders_history_cell() {
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
+        session_source: codex_protocol::protocol::SessionSource::default(),
+        nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
         history_log_id: 0,
         history_entry_count: 0,
         initial_messages: Some(vec![EventMsg::UserMessage(UserMessageEvent {
@@ -529,6 +540,8 @@ async fn replayed_user_message_with_only_local_images_does_not_render_history_ce
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
+        session_source: codex_protocol::protocol::SessionSource::default(),
+        nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
         history_log_id: 0,
         history_entry_count: 0,
         initial_messages: Some(vec![EventMsg::UserMessage(UserMessageEvent {
@@ -640,6 +653,8 @@ async fn submission_preserves_text_elements_and_local_images() {
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
+        session_source: codex_protocol::protocol::SessionSource::default(),
+        nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
         history_log_id: 0,
         history_entry_count: 0,
         initial_messages: None,
@@ -723,6 +738,8 @@ async fn submission_with_remote_and_local_images_keeps_local_placeholder_numberi
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
+        session_source: codex_protocol::protocol::SessionSource::default(),
+        nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
         history_log_id: 0,
         history_entry_count: 0,
         initial_messages: None,
@@ -817,6 +834,8 @@ async fn enter_with_only_remote_images_submits_user_turn() {
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
+        session_source: codex_protocol::protocol::SessionSource::default(),
+        nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
         history_log_id: 0,
         history_entry_count: 0,
         initial_messages: None,
@@ -881,6 +900,8 @@ async fn shift_enter_with_only_remote_images_does_not_submit_user_turn() {
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
+        session_source: codex_protocol::protocol::SessionSource::default(),
+        nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
         history_log_id: 0,
         history_entry_count: 0,
         initial_messages: None,
@@ -920,6 +941,8 @@ async fn enter_with_only_remote_images_does_not_submit_when_modal_is_active() {
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
+        session_source: codex_protocol::protocol::SessionSource::default(),
+        nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
         history_log_id: 0,
         history_entry_count: 0,
         initial_messages: None,
@@ -959,6 +982,8 @@ async fn enter_with_only_remote_images_does_not_submit_when_input_disabled() {
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
+        session_source: codex_protocol::protocol::SessionSource::default(),
+        nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
         history_log_id: 0,
         history_entry_count: 0,
         initial_messages: None,
@@ -999,6 +1024,8 @@ async fn submission_prefers_selected_duplicate_skill_path() {
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
+        session_source: codex_protocol::protocol::SessionSource::default(),
+        nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
         history_log_id: 0,
         history_entry_count: 0,
         initial_messages: None,
@@ -1877,6 +1904,8 @@ async fn make_chatwidget_manual(
         last_rendered_user_message_event: None,
         last_nero_auto_hotkey_action: None,
         last_nero_auto_hotkey_at: None,
+        nero_auto_runtime: NeroAutoRuntimeConfig::default(),
+        is_subagent_session: false,
     };
     widget.set_model(&resolved_model);
     (widget, rx, op_rx)
@@ -1891,6 +1920,21 @@ fn next_submit_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) -> Op {
             Ok(_) => continue,
             Err(TryRecvError::Empty) => panic!("expected a submit op but queue was empty"),
             Err(TryRecvError::Disconnected) => panic!("expected submit op but channel closed"),
+        }
+    }
+}
+
+fn next_override_turn_context(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) -> Op {
+    loop {
+        match op_rx.try_recv() {
+            Ok(op @ Op::OverrideTurnContext { .. }) => return op,
+            Ok(_) => continue,
+            Err(TryRecvError::Empty) => {
+                panic!("expected OverrideTurnContext op but queue was empty")
+            }
+            Err(TryRecvError::Disconnected) => {
+                panic!("expected OverrideTurnContext op but channel closed")
+            }
         }
     }
 }
@@ -5120,8 +5164,8 @@ async fn collab_mode_shift_tab_cycles_only_when_idle() {
 }
 
 #[tokio::test]
-async fn nero_auto_hotkey_toggle_writes_config_and_reports_state() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+async fn nero_auto_hotkey_toggle_updates_only_current_session_and_reports_state() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
     let tmp = tempdir().expect("tempdir");
     chat.config.codex_home = tmp.path().to_path_buf();
 
@@ -5140,23 +5184,26 @@ async fn nero_auto_hotkey_toggle_writes_config_and_reports_state() {
         messages.contains("diff-check=5"),
         "expected diff-check in status message, got: {messages:?}"
     );
+    assert!(messages.contains("scope=current-session"));
+    assert_eq!(chat.nero_auto_runtime.enabled, true);
+    assert!(!nero_auto_config_path(&chat.config.codex_home).exists());
 
-    let cfg_path = nero_auto_config_path(&chat.config.codex_home);
-    let raw = std::fs::read_to_string(&cfg_path).expect("read config file");
-    let parsed = toml::from_str::<TomlValue>(&raw).expect("parse config");
-    let enabled = parsed
-        .get("nero")
-        .and_then(|v| v.get("hook"))
-        .and_then(|v| v.get("runtime"))
-        .and_then(|v| v.get("auto"))
-        .and_then(|v| v.get("enabled"))
-        .and_then(TomlValue::as_bool);
-    assert_eq!(enabled, Some(true));
+    assert_matches!(
+        next_override_turn_context(&mut op_rx),
+        Op::OverrideTurnContext {
+            nero_auto_runtime: Some(NeroAutoRuntimeConfig {
+                enabled: true,
+                autonomy_level: 5,
+                max_auto_rounds: 7,
+            }),
+            ..
+        }
+    );
 }
 
 #[tokio::test]
 async fn nero_auto_hotkey_toggle_debounces_duplicate_press_events() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
     let tmp = tempdir().expect("tempdir");
     chat.config.codex_home = tmp.path().to_path_buf();
 
@@ -5183,23 +5230,20 @@ async fn nero_auto_hotkey_toggle_debounces_duplicate_press_events() {
         1,
         "expected exactly one toggle message, got: {messages:?}"
     );
-
-    let cfg_path = nero_auto_config_path(&chat.config.codex_home);
-    let raw = std::fs::read_to_string(&cfg_path).expect("read config file");
-    let parsed = toml::from_str::<TomlValue>(&raw).expect("parse config");
-    let enabled = parsed
-        .get("nero")
-        .and_then(|v| v.get("hook"))
-        .and_then(|v| v.get("runtime"))
-        .and_then(|v| v.get("auto"))
-        .and_then(|v| v.get("enabled"))
-        .and_then(TomlValue::as_bool);
-    assert_eq!(enabled, Some(true));
+    assert_matches!(
+        next_override_turn_context(&mut op_rx),
+        Op::OverrideTurnContext {
+            nero_auto_runtime: Some(NeroAutoRuntimeConfig { enabled: true, .. }),
+            ..
+        }
+    );
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+    assert!(!nero_auto_config_path(&chat.config.codex_home).exists());
 }
 
 #[tokio::test]
 async fn nero_auto_hotkeys_adjust_policy_and_respect_composer_focus() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
     let tmp = tempdir().expect("tempdir");
     chat.config.codex_home = tmp.path().to_path_buf();
 
@@ -5213,82 +5257,76 @@ async fn nero_auto_hotkeys_adjust_policy_and_respect_composer_focus() {
         KeyCode::Char('`'),
         KeyModifiers::ALT | KeyModifiers::SHIFT,
     ));
-
-    let cfg_path = nero_auto_config_path(&chat.config.codex_home);
-    let raw = std::fs::read_to_string(&cfg_path).expect("read config file");
-    let parsed = toml::from_str::<TomlValue>(&raw).expect("parse config");
-    let auto = parsed
-        .get("nero")
-        .and_then(|v| v.get("hook"))
-        .and_then(|v| v.get("runtime"))
-        .and_then(|v| v.get("auto"))
-        .expect("auto section should exist");
-    let policy = auto.get("policy").expect("policy section should exist");
-    assert_eq!(
-        policy.get("autonomy_level").and_then(TomlValue::as_integer),
-        Some(6)
+    assert_matches!(
+        next_override_turn_context(&mut op_rx),
+        Op::OverrideTurnContext {
+            nero_auto_runtime: Some(NeroAutoRuntimeConfig {
+                autonomy_level: 6,
+                max_auto_rounds: 7,
+                ..
+            }),
+            ..
+        }
     );
-    assert_eq!(
-        policy
-            .get("max_auto_rounds")
-            .and_then(TomlValue::as_integer),
-        Some(8)
+    assert_matches!(
+        next_override_turn_context(&mut op_rx),
+        Op::OverrideTurnContext {
+            nero_auto_runtime: Some(NeroAutoRuntimeConfig {
+                autonomy_level: 6,
+                max_auto_rounds: 8,
+                ..
+            }),
+            ..
+        }
     );
+    assert_eq!(chat.nero_auto_runtime.autonomy_level, 6);
+    assert_eq!(chat.nero_auto_runtime.max_auto_rounds, 8);
 
     // With composer draft, hotkey should not be consumed (must behave like regular typing flow).
     chat.bottom_pane
         .set_composer_text("draft".to_string(), Vec::new(), Vec::new());
     chat.handle_key_event(KeyEvent::new(KeyCode::Char('~'), KeyModifiers::SHIFT));
-    let raw_after = std::fs::read_to_string(&cfg_path).expect("read config file");
-    let parsed_after = toml::from_str::<TomlValue>(&raw_after).expect("parse config");
-    let policy_after = parsed_after
-        .get("nero")
-        .and_then(|v| v.get("hook"))
-        .and_then(|v| v.get("runtime"))
-        .and_then(|v| v.get("auto"))
-        .and_then(|v| v.get("policy"))
-        .expect("policy after draft");
-    assert_eq!(
-        policy_after
-            .get("autonomy_level")
-            .and_then(TomlValue::as_integer),
-        Some(6)
-    );
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+    assert_eq!(chat.nero_auto_runtime.autonomy_level, 6);
 }
 
 #[tokio::test]
 #[serial]
 async fn nero_auto_hotkeys_function_key_fallbacks_work() {
     let _guard = EnvVarGuard::set(NERO_AUTO_HOTKEY_F_KEY_FALLBACK_ENV, "1");
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
-    let tmp = tempdir().expect("tempdir");
-    chat.config.codex_home = tmp.path().to_path_buf();
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
 
     chat.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::CONTROL));
     chat.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::CONTROL));
     chat.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::CONTROL));
-
-    let cfg_path = nero_auto_config_path(&chat.config.codex_home);
-    let raw = std::fs::read_to_string(&cfg_path).expect("read config file");
-    let parsed = toml::from_str::<TomlValue>(&raw).expect("parse config");
-    let auto = parsed
-        .get("nero")
-        .and_then(|v| v.get("hook"))
-        .and_then(|v| v.get("runtime"))
-        .and_then(|v| v.get("auto"))
-        .expect("auto section should exist");
-    let policy = auto.get("policy").expect("policy section should exist");
-
-    assert_eq!(auto.get("enabled").and_then(TomlValue::as_bool), Some(true));
-    assert_eq!(
-        policy.get("autonomy_level").and_then(TomlValue::as_integer),
-        Some(6)
+    assert_matches!(
+        next_override_turn_context(&mut op_rx),
+        Op::OverrideTurnContext {
+            nero_auto_runtime: Some(NeroAutoRuntimeConfig { enabled: true, .. }),
+            ..
+        }
     );
-    assert_eq!(
-        policy
-            .get("max_auto_rounds")
-            .and_then(TomlValue::as_integer),
-        Some(8)
+    assert_matches!(
+        next_override_turn_context(&mut op_rx),
+        Op::OverrideTurnContext {
+            nero_auto_runtime: Some(NeroAutoRuntimeConfig {
+                autonomy_level: 6,
+                max_auto_rounds: 7,
+                ..
+            }),
+            ..
+        }
+    );
+    assert_matches!(
+        next_override_turn_context(&mut op_rx),
+        Op::OverrideTurnContext {
+            nero_auto_runtime: Some(NeroAutoRuntimeConfig {
+                autonomy_level: 6,
+                max_auto_rounds: 8,
+                ..
+            }),
+            ..
+        }
     );
 }
 
@@ -5296,54 +5334,51 @@ async fn nero_auto_hotkeys_function_key_fallbacks_work() {
 #[serial]
 async fn nero_auto_hotkeys_function_key_fallbacks_are_off_by_default() {
     let _guard = EnvVarGuard::remove(NERO_AUTO_HOTKEY_F_KEY_FALLBACK_ENV);
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
-    let tmp = tempdir().expect("tempdir");
-    chat.config.codex_home = tmp.path().to_path_buf();
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
 
     chat.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
-
-    let cfg_path = nero_auto_config_path(&chat.config.codex_home);
-    assert!(
-        !cfg_path.exists(),
-        "F-key fallback should be disabled by default and must not write config"
-    );
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
 }
 
 #[tokio::test]
 #[serial]
 async fn nero_auto_hotkeys_function_key_fallbacks_work_without_modifiers_when_enabled() {
     let _guard = EnvVarGuard::set(NERO_AUTO_HOTKEY_F_KEY_FALLBACK_ENV, "1");
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
-    let tmp = tempdir().expect("tempdir");
-    chat.config.codex_home = tmp.path().to_path_buf();
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
 
     chat.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
-
-    let cfg_path = nero_auto_config_path(&chat.config.codex_home);
-    let raw = std::fs::read_to_string(&cfg_path).expect("read config file");
-    let parsed = toml::from_str::<TomlValue>(&raw).expect("parse config");
-    let auto = parsed
-        .get("nero")
-        .and_then(|v| v.get("hook"))
-        .and_then(|v| v.get("runtime"))
-        .and_then(|v| v.get("auto"))
-        .expect("auto section should exist");
-    let policy = auto.get("policy").expect("policy section should exist");
-
-    assert_eq!(auto.get("enabled").and_then(TomlValue::as_bool), Some(true));
-    assert_eq!(
-        policy.get("autonomy_level").and_then(TomlValue::as_integer),
-        Some(6)
+    assert_matches!(
+        next_override_turn_context(&mut op_rx),
+        Op::OverrideTurnContext {
+            nero_auto_runtime: Some(NeroAutoRuntimeConfig { enabled: true, .. }),
+            ..
+        }
     );
-    assert_eq!(
-        policy
-            .get("max_auto_rounds")
-            .and_then(TomlValue::as_integer),
-        Some(8)
+    assert_matches!(
+        next_override_turn_context(&mut op_rx),
+        Op::OverrideTurnContext {
+            nero_auto_runtime: Some(NeroAutoRuntimeConfig {
+                autonomy_level: 6,
+                max_auto_rounds: 7,
+                ..
+            }),
+            ..
+        }
+    );
+    assert_matches!(
+        next_override_turn_context(&mut op_rx),
+        Op::OverrideTurnContext {
+            nero_auto_runtime: Some(NeroAutoRuntimeConfig {
+                autonomy_level: 6,
+                max_auto_rounds: 8,
+                ..
+            }),
+            ..
+        }
     );
 }
 
@@ -5351,9 +5386,7 @@ async fn nero_auto_hotkeys_function_key_fallbacks_work_without_modifiers_when_en
 #[serial]
 async fn nero_auto_hotkeys_function_key_shift_supports_decrement() {
     let _guard = EnvVarGuard::set(NERO_AUTO_HOTKEY_F_KEY_FALLBACK_ENV, "1");
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
-    let tmp = tempdir().expect("tempdir");
-    chat.config.codex_home = tmp.path().to_path_buf();
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
 
     // Increase first.
     chat.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
@@ -5361,27 +5394,49 @@ async fn nero_auto_hotkeys_function_key_shift_supports_decrement() {
     // Decrease with Shift.
     chat.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT));
     chat.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::SHIFT));
-
-    let cfg_path = nero_auto_config_path(&chat.config.codex_home);
-    let raw = std::fs::read_to_string(&cfg_path).expect("read config file");
-    let parsed = toml::from_str::<TomlValue>(&raw).expect("parse config");
-    let auto = parsed
-        .get("nero")
-        .and_then(|v| v.get("hook"))
-        .and_then(|v| v.get("runtime"))
-        .and_then(|v| v.get("auto"))
-        .expect("auto section should exist");
-    let policy = auto.get("policy").expect("policy section should exist");
-
-    assert_eq!(
-        policy.get("autonomy_level").and_then(TomlValue::as_integer),
-        Some(5)
+    assert_matches!(
+        next_override_turn_context(&mut op_rx),
+        Op::OverrideTurnContext {
+            nero_auto_runtime: Some(NeroAutoRuntimeConfig {
+                autonomy_level: 6,
+                max_auto_rounds: 7,
+                ..
+            }),
+            ..
+        }
     );
-    assert_eq!(
-        policy
-            .get("max_auto_rounds")
-            .and_then(TomlValue::as_integer),
-        Some(7)
+    assert_matches!(
+        next_override_turn_context(&mut op_rx),
+        Op::OverrideTurnContext {
+            nero_auto_runtime: Some(NeroAutoRuntimeConfig {
+                autonomy_level: 6,
+                max_auto_rounds: 8,
+                ..
+            }),
+            ..
+        }
+    );
+    assert_matches!(
+        next_override_turn_context(&mut op_rx),
+        Op::OverrideTurnContext {
+            nero_auto_runtime: Some(NeroAutoRuntimeConfig {
+                autonomy_level: 5,
+                max_auto_rounds: 8,
+                ..
+            }),
+            ..
+        }
+    );
+    assert_matches!(
+        next_override_turn_context(&mut op_rx),
+        Op::OverrideTurnContext {
+            nero_auto_runtime: Some(NeroAutoRuntimeConfig {
+                autonomy_level: 5,
+                max_auto_rounds: 7,
+                ..
+            }),
+            ..
+        }
     );
 }
 
@@ -5389,25 +5444,52 @@ async fn nero_auto_hotkeys_function_key_shift_supports_decrement() {
 #[serial]
 async fn nero_auto_hotkeys_function_key_f4_fallback_decrements_max_rounds() {
     let _guard = EnvVarGuard::set(NERO_AUTO_HOTKEY_F_KEY_FALLBACK_ENV, "1");
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
-    let tmp = tempdir().expect("tempdir");
-    chat.config.codex_home = tmp.path().to_path_buf();
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
 
     chat.handle_key_event(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
+    assert_matches!(
+        next_override_turn_context(&mut op_rx),
+        Op::OverrideTurnContext {
+            nero_auto_runtime: Some(NeroAutoRuntimeConfig {
+                max_auto_rounds: 6,
+                ..
+            }),
+            ..
+        }
+    );
+}
 
-    let cfg_path = nero_auto_config_path(&chat.config.codex_home);
-    let raw = std::fs::read_to_string(&cfg_path).expect("read config file");
-    let parsed = toml::from_str::<TomlValue>(&raw).expect("parse config");
-    let max_auto_rounds = parsed
-        .get("nero")
-        .and_then(|v| v.get("hook"))
-        .and_then(|v| v.get("runtime"))
-        .and_then(|v| v.get("auto"))
-        .and_then(|v| v.get("policy"))
-        .and_then(|v| v.get("max_auto_rounds"))
-        .and_then(TomlValue::as_integer);
+#[tokio::test]
+async fn nero_auto_hotkeys_stay_disabled_for_subagent_sessions() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.set_nero_auto_runtime_context(
+        NeroAutoRuntimeConfig {
+            enabled: true,
+            autonomy_level: 6,
+            max_auto_rounds: 8,
+        },
+        SessionSource::SubAgent(codex_protocol::protocol::SubAgentSource::Other(
+            "reviewer".to_string(),
+        )),
+    );
 
-    assert_eq!(max_auto_rounds, Some(6));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('~'), KeyModifiers::SHIFT));
+
+    let messages = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines.as_slice()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(messages.contains("Nero-auto stays OFF for subagent sessions."));
+    assert_eq!(
+        chat.nero_auto_runtime,
+        NeroAutoRuntimeConfig {
+            enabled: true,
+            autonomy_level: 6,
+            max_auto_rounds: 8,
+        }
+    );
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
 }
 
 #[tokio::test]
@@ -5561,6 +5643,8 @@ async fn plan_slash_command_with_args_submits_prompt_in_plan_mode() {
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
+        session_source: codex_protocol::protocol::SessionSource::default(),
+        nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
         history_log_id: 0,
         history_entry_count: 0,
         initial_messages: None,
@@ -7905,6 +7989,7 @@ async fn approvals_popup_navigation_skips_disabled() {
             AppEvent::CodexOp(Op::OverrideTurnContext {
                 approval_policy: Some(AskForApproval::OnRequest),
                 personality: None,
+                nero_auto_runtime: None,
                 ..
             })
         )),
@@ -7916,6 +8001,7 @@ async fn approvals_popup_navigation_skips_disabled() {
             AppEvent::CodexOp(Op::OverrideTurnContext {
                 approval_policy: Some(AskForApproval::Never),
                 personality: None,
+                nero_auto_runtime: None,
                 ..
             })
         )),

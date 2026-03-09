@@ -15,6 +15,7 @@ use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::NeroAutoRuntimeConfig;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::TokenUsage;
@@ -36,6 +37,7 @@ pub struct ThreadConfigSnapshot {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub personality: Option<Personality>,
     pub session_source: SessionSource,
+    pub nero_auto_runtime: NeroAutoRuntimeConfig,
 }
 
 pub struct CodexThread {

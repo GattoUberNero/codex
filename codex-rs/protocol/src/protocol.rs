@@ -302,6 +302,10 @@ pub enum Op {
         /// Updated personality preference.
         #[serde(skip_serializing_if = "Option::is_none")]
         personality: Option<Personality>,
+
+        /// Updated session-local NERO auto runtime policy for future turns.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        nero_auto_runtime: Option<NeroAutoRuntimeConfig>,
     },
 
     /// Approve a command execution
@@ -2805,6 +2809,23 @@ pub struct SessionNetworkProxyRuntime {
     pub admin_addr: String,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct NeroAutoRuntimeConfig {
+    pub enabled: bool,
+    pub autonomy_level: i64,
+    pub max_auto_rounds: i64,
+}
+
+impl Default for NeroAutoRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            autonomy_level: 5,
+            max_auto_rounds: 7,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct SessionConfiguredEvent {
     pub session_id: ThreadId,
@@ -2837,6 +2858,14 @@ pub struct SessionConfiguredEvent {
     /// The effort the model is putting into reasoning about the user's request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffortConfig>,
+
+    /// Source of the configured session (main CLI/UI session vs subagent, etc.).
+    #[serde(default)]
+    pub session_source: SessionSource,
+
+    /// Effective session-local nero-auto runtime for future turns.
+    #[serde(default)]
+    pub nero_auto_runtime: NeroAutoRuntimeConfig,
 
     /// Identifier of the history log file (inode on Unix, 0 otherwise).
     pub history_log_id: u64,
@@ -3572,6 +3601,8 @@ mod tests {
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 cwd: PathBuf::from("/home/user/project"),
                 reasoning_effort: Some(ReasoningEffortConfig::default()),
+                session_source: SessionSource::default(),
+                nero_auto_runtime: NeroAutoRuntimeConfig::default(),
                 history_log_id: 0,
                 history_entry_count: 0,
                 initial_messages: None,

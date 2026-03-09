@@ -2716,6 +2716,8 @@ mod tests {
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             cwd: PathBuf::from("/tmp/project"),
             reasoning_effort: None,
+            session_source: codex_protocol::protocol::SessionSource::default(),
+            nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
             history_log_id: 0,
             history_entry_count: 0,
             initial_messages: None,

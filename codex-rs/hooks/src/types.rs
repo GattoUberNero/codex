@@ -6,6 +6,7 @@ use chrono::SecondsFormat;
 use chrono::Utc;
 use codex_protocol::ThreadId;
 use codex_protocol::models::SandboxPermissions;
+use codex_protocol::protocol::NeroAutoRuntimeConfig;
 use futures::future::BoxFuture;
 use serde::Serialize;
 use serde::Serializer;
@@ -92,6 +93,12 @@ pub struct HookPayload {
     pub cwd: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client: Option<String>,
+    #[serde(skip_serializing)]
+    pub session_source: Option<String>,
+    #[serde(skip_serializing)]
+    pub session_agent_role: Option<String>,
+    #[serde(skip_serializing)]
+    pub nero_auto_runtime: Option<NeroAutoRuntimeConfig>,
     #[serde(serialize_with = "serialize_triggered_at")]
     pub triggered_at: DateTime<Utc>,
     pub hook_event: HookEvent,
@@ -211,6 +218,9 @@ mod tests {
             session_id,
             cwd: PathBuf::from("tmp"),
             client: None,
+            session_source: None,
+            session_agent_role: None,
+            nero_auto_runtime: None,
             triggered_at: Utc
                 .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
                 .single()
@@ -250,6 +260,9 @@ mod tests {
             session_id,
             cwd: PathBuf::from("tmp"),
             client: None,
+            session_source: None,
+            session_agent_role: None,
+            nero_auto_runtime: None,
             triggered_at: Utc
                 .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
                 .single()

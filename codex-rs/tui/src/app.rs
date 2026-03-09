@@ -1335,6 +1335,15 @@ impl App {
         self.active_thread_rx = Some(receiver);
 
         let init = self.chatwidget_init_for_forked_or_resumed_thread(tui, self.config.clone());
+        let nero_auto_context = if let Some(thread) = live_thread.as_ref() {
+            let config_snapshot = thread.config_snapshot().await;
+            Some((
+                config_snapshot.nero_auto_runtime,
+                config_snapshot.session_source,
+            ))
+        } else {
+            None
+        };
         let codex_op_tx = if let Some(thread) = live_thread {
             crate::chatwidget::spawn_op_forwarder(thread)
         } else {
@@ -1342,6 +1351,10 @@ impl App {
             tx
         };
         self.chat_widget = ChatWidget::new_with_op_sender(init, codex_op_tx);
+        if let Some((nero_auto_runtime, session_source)) = nero_auto_context {
+            self.chat_widget
+                .set_nero_auto_runtime_context(nero_auto_runtime, session_source);
+        }
 
         self.reset_for_thread_switch(tui)?;
         self.replay_thread_snapshot(snapshot, !is_replay_only);
@@ -2562,6 +2575,7 @@ impl App {
                                         service_tier: None,
                                         collaboration_mode: None,
                                         personality: None,
+                                        nero_auto_runtime: None,
                                     },
                                 ));
                                 self.app_event_tx.send(
@@ -2585,6 +2599,7 @@ impl App {
                                         service_tier: None,
                                         collaboration_mode: None,
                                         personality: None,
+                                        nero_auto_runtime: None,
                                     },
                                 ));
                                 self.app_event_tx
@@ -2898,6 +2913,7 @@ impl App {
                                 service_tier: None,
                                 collaboration_mode: None,
                                 personality: None,
+                                nero_auto_runtime: None,
                             }));
                     }
                 }
@@ -3384,6 +3400,8 @@ impl App {
                 sandbox_policy: config_snapshot.sandbox_policy,
                 cwd: config_snapshot.cwd,
                 reasoning_effort: config_snapshot.reasoning_effort,
+                session_source: codex_protocol::protocol::SessionSource::default(),
+                nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
                 history_log_id: 0,
                 history_entry_count: 0,
                 initial_messages: None,
@@ -3855,6 +3873,8 @@ mod tests {
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 cwd: PathBuf::from("/tmp/project"),
                 reasoning_effort: None,
+                session_source: codex_protocol::protocol::SessionSource::default(),
+                nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
                 history_log_id: 0,
                 history_entry_count: 0,
                 initial_messages: None,
@@ -4027,6 +4047,9 @@ mod tests {
                         sandbox_policy: SandboxPolicy::new_read_only_policy(),
                         cwd: PathBuf::from("/tmp/project"),
                         reasoning_effort: None,
+                        session_source: codex_protocol::protocol::SessionSource::default(),
+                        nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(
+                        ),
                         history_log_id: 0,
                         history_entry_count: 0,
                         initial_messages: None,
@@ -4104,6 +4127,8 @@ mod tests {
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 cwd: PathBuf::from("/tmp/project"),
                 reasoning_effort: None,
+                session_source: codex_protocol::protocol::SessionSource::default(),
+                nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
                 history_log_id: 0,
                 history_entry_count: 0,
                 initial_messages: None,
@@ -4185,6 +4210,8 @@ mod tests {
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 cwd: PathBuf::from("/tmp/project"),
                 reasoning_effort: None,
+                session_source: codex_protocol::protocol::SessionSource::default(),
+                nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
                 history_log_id: 0,
                 history_entry_count: 0,
                 initial_messages: None,
@@ -4265,6 +4292,8 @@ mod tests {
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 cwd: PathBuf::from("/tmp/project"),
                 reasoning_effort: None,
+                session_source: codex_protocol::protocol::SessionSource::default(),
+                nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
                 history_log_id: 0,
                 history_entry_count: 0,
                 initial_messages: None,
@@ -4339,6 +4368,8 @@ mod tests {
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 cwd: PathBuf::from("/tmp/project"),
                 reasoning_effort: None,
+                session_source: codex_protocol::protocol::SessionSource::default(),
+                nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
                 history_log_id: 0,
                 history_entry_count: 0,
                 initial_messages: None,
@@ -4452,6 +4483,9 @@ mod tests {
                         sandbox_policy: SandboxPolicy::new_read_only_policy(),
                         cwd: PathBuf::from("/tmp/project"),
                         reasoning_effort: None,
+                        session_source: codex_protocol::protocol::SessionSource::default(),
+                        nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(
+                        ),
                         history_log_id: 0,
                         history_entry_count: 0,
                         initial_messages: None,
@@ -4521,6 +4555,8 @@ mod tests {
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 cwd: PathBuf::from("/tmp/project"),
                 reasoning_effort: None,
+                session_source: codex_protocol::protocol::SessionSource::default(),
+                nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
                 history_log_id: 0,
                 history_entry_count: 0,
                 initial_messages: None,
@@ -4624,6 +4660,8 @@ mod tests {
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 cwd: PathBuf::from("/tmp/project"),
                 reasoning_effort: None,
+                session_source: codex_protocol::protocol::SessionSource::default(),
+                nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
                 history_log_id: 0,
                 history_entry_count: 0,
                 initial_messages: None,
@@ -4700,6 +4738,8 @@ mod tests {
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 cwd: PathBuf::from("/tmp/project"),
                 reasoning_effort: None,
+                session_source: codex_protocol::protocol::SessionSource::default(),
+                nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
                 history_log_id: 0,
                 history_entry_count: 0,
                 initial_messages: None,
@@ -4946,6 +4986,9 @@ mod tests {
                         sandbox_policy: SandboxPolicy::new_workspace_write_policy(),
                         cwd: PathBuf::from("/tmp/agent"),
                         reasoning_effort: None,
+                        session_source: codex_protocol::protocol::SessionSource::default(),
+                        nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(
+                        ),
                         history_log_id: 0,
                         history_entry_count: 0,
                         initial_messages: None,
@@ -5167,6 +5210,8 @@ mod tests {
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 cwd: PathBuf::from("/tmp/project"),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
+                session_source: codex_protocol::protocol::SessionSource::default(),
+                nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
                 history_log_id: 0,
                 history_entry_count: 0,
                 initial_messages: None,
@@ -5817,6 +5862,8 @@ mod tests {
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 cwd: PathBuf::from("/home/user/project"),
                 reasoning_effort: None,
+                session_source: codex_protocol::protocol::SessionSource::default(),
+                nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
                 history_log_id: 0,
                 history_entry_count: 0,
                 initial_messages: None,
@@ -5876,6 +5923,8 @@ mod tests {
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 cwd: PathBuf::from("/home/user/project"),
                 reasoning_effort: None,
+                session_source: codex_protocol::protocol::SessionSource::default(),
+                nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
                 history_log_id: 0,
                 history_entry_count: 0,
                 initial_messages: None,
@@ -5968,6 +6017,8 @@ mod tests {
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 cwd: PathBuf::from("/home/user/project"),
                 reasoning_effort: None,
+                session_source: codex_protocol::protocol::SessionSource::default(),
+                nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
                 history_log_id: 0,
                 history_entry_count: 0,
                 initial_messages: None,
@@ -6033,6 +6084,8 @@ mod tests {
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 cwd: PathBuf::from("/home/user/project"),
                 reasoning_effort: None,
+                session_source: codex_protocol::protocol::SessionSource::default(),
+                nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
                 history_log_id: 0,
                 history_entry_count: 0,
                 initial_messages: Some(vec![
@@ -6113,6 +6166,8 @@ mod tests {
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 cwd: PathBuf::from("/home/user/project"),
                 reasoning_effort: None,
+                session_source: codex_protocol::protocol::SessionSource::default(),
+                nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
                 history_log_id: 0,
                 history_entry_count: 0,
                 initial_messages: Some(vec![
@@ -6240,6 +6295,8 @@ mod tests {
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             cwd: PathBuf::from("/home/user/project"),
             reasoning_effort: None,
+            session_source: codex_protocol::protocol::SessionSource::default(),
+            nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
             history_log_id: 0,
             history_entry_count: 0,
             initial_messages: None,
@@ -6309,6 +6366,8 @@ mod tests {
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 cwd: PathBuf::from("/tmp/project"),
                 reasoning_effort: None,
+                session_source: codex_protocol::protocol::SessionSource::default(),
+                nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
                 history_log_id: 0,
                 history_entry_count: 0,
                 initial_messages: None,

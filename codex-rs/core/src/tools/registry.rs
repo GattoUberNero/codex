@@ -388,6 +388,9 @@ async fn dispatch_after_tool_use_hook(
             session_id: session.conversation_id,
             cwd: turn.cwd.clone(),
             client: turn.app_server_client_name.clone(),
+            session_source: Some(turn.session_source.to_string()),
+            session_agent_role: turn.session_source.get_agent_role(),
+            nero_auto_runtime: None,
             triggered_at: chrono::Utc::now(),
             hook_event: HookEvent::AfterToolUse {
                 event: HookEventAfterToolUse {

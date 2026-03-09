@@ -167,6 +167,7 @@ use crate::error::Result as CodexResult;
 #[cfg(test)]
 use crate::exec::StreamOutput;
 use codex_config::CONFIG_TOML_FILE;
+use codex_protocol::protocol::NeroAutoRuntimeConfig;
 
 mod rollout_reconstruction;
 #[cfg(test)]
@@ -573,6 +574,15 @@ impl Codex {
                 developer_instructions: None,
             },
         };
+        let nero_auto_runtime =
+            crate::config::resolve_codexn_fork_nero_auto_runtime_from_env(&session_source)
+                .unwrap_or_else(|err| {
+                    warn!(
+                        error = %err,
+                        "failed to resolve codexn fork nero auto runtime from env; using defaults"
+                    );
+                    effective_nero_auto_runtime(NeroAutoRuntimeConfig::default(), &session_source)
+                });
         let session_configuration = SessionConfiguration {
             provider: config.model_provider.clone(),
             collaboration_mode,
@@ -592,6 +602,7 @@ impl Codex {
             metrics_service_name,
             app_server_client_name: None,
             session_source,
+            nero_auto_runtime,
             dynamic_tools,
             persist_extended_history,
             inherited_shell_snapshot,
@@ -956,6 +967,29 @@ fn local_time_context() -> (String, String) {
     }
 }
 
+fn clamp_nero_auto_runtime(runtime: NeroAutoRuntimeConfig) -> NeroAutoRuntimeConfig {
+    NeroAutoRuntimeConfig {
+        enabled: runtime.enabled,
+        autonomy_level: runtime.autonomy_level.clamp(1, 10),
+        max_auto_rounds: runtime.max_auto_rounds.max(0),
+    }
+}
+
+fn session_source_disables_nero_auto(session_source: &SessionSource) -> bool {
+    matches!(session_source, SessionSource::SubAgent(_))
+}
+
+fn effective_nero_auto_runtime(
+    runtime: NeroAutoRuntimeConfig,
+    session_source: &SessionSource,
+) -> NeroAutoRuntimeConfig {
+    let mut runtime = clamp_nero_auto_runtime(runtime);
+    if session_source_disables_nero_auto(session_source) {
+        runtime.enabled = false;
+    }
+    runtime
+}
+
 #[derive(Clone)]
 pub(crate) struct SessionConfiguration {
     /// Provider identifier ("openai", "openrouter", ...).
@@ -1003,6 +1037,7 @@ pub(crate) struct SessionConfiguration {
     app_server_client_name: Option<String>,
     /// Source of the session (cli, vscode, exec, mcp, ...)
     session_source: SessionSource,
+    nero_auto_runtime: NeroAutoRuntimeConfig,
     dynamic_tools: Vec<DynamicToolSpec>,
     persist_extended_history: bool,
     inherited_shell_snapshot: Option<Arc<ShellSnapshot>>,
@@ -1025,6 +1060,7 @@ impl SessionConfiguration {
             reasoning_effort: self.collaboration_mode.reasoning_effort(),
             personality: self.personality,
             session_source: self.session_source.clone(),
+            nero_auto_runtime: self.nero_auto_runtime,
         }
     }
 
@@ -1057,6 +1093,10 @@ impl SessionConfiguration {
         if let Some(app_server_client_name) = updates.app_server_client_name.clone() {
             next_configuration.app_server_client_name = Some(app_server_client_name);
         }
+        if let Some(nero_auto_runtime) = updates.nero_auto_runtime {
+            next_configuration.nero_auto_runtime =
+                effective_nero_auto_runtime(nero_auto_runtime, &next_configuration.session_source);
+        }
         Ok(next_configuration)
     }
 }
@@ -1073,6 +1113,7 @@ pub(crate) struct SessionSettingsUpdate {
     pub(crate) final_output_json_schema: Option<Option<Value>>,
     pub(crate) personality: Option<Personality>,
     pub(crate) app_server_client_name: Option<String>,
+    pub(crate) nero_auto_runtime: Option<NeroAutoRuntimeConfig>,
 }
 
 impl Session {
@@ -1159,9 +1200,11 @@ impl Session {
             );
         }
         per_turn_config.features = config.features.clone();
-        if let Err(err) =
-            crate::config::refresh_codexn_fork_developer_instructions(&mut per_turn_config)
-        {
+        if let Err(err) = crate::config::refresh_codexn_fork_developer_instructions_with_runtime(
+            &mut per_turn_config,
+            session_configuration.nero_auto_runtime,
+            &session_configuration.session_source,
+        ) {
             tracing::warn!(
                 error = %err,
                 "failed to refresh codexn fork developer instructions for turn"
@@ -1712,6 +1755,8 @@ impl Session {
                 sandbox_policy: session_configuration.sandbox_policy.get().clone(),
                 cwd: session_configuration.cwd.clone(),
                 reasoning_effort: session_configuration.collaboration_mode.reasoning_effort(),
+                session_source: session_configuration.session_source.clone(),
+                nero_auto_runtime: session_configuration.nero_auto_runtime,
                 history_log_id,
                 history_entry_count,
                 initial_messages,
@@ -1998,7 +2043,18 @@ impl Session {
         source_turn_id: String,
         hook_name: String,
         text: String,
+        session_source: SessionSource,
     ) {
+        if session_source_disables_nero_auto(&session_source) {
+            debug!(
+                turn_id = %source_turn_id,
+                hook_name = %hook_name,
+                session_source = %session_source,
+                "skipping synthetic user reply from hook for subagent session"
+            );
+            return;
+        }
+
         let Some((chain_depth, reservation_epoch)) = self.try_reserve_hook_auto_reply_chain_slot()
         else {
             info!(
@@ -4155,6 +4211,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                     service_tier,
                     collaboration_mode,
                     personality,
+                    nero_auto_runtime,
                 } => {
                     let collaboration_mode = if let Some(collab_mode) = collaboration_mode {
                         collab_mode
@@ -4178,6 +4235,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                             reasoning_summary: summary,
                             service_tier,
                             personality,
+                            nero_auto_runtime,
                             ..Default::default()
                         },
                     )
@@ -4513,6 +4571,7 @@ mod handlers {
                         final_output_json_schema: Some(final_output_json_schema),
                         personality,
                         app_server_client_name: None,
+                        nero_auto_runtime: None,
                     },
                 )
             }
@@ -5701,6 +5760,15 @@ pub(crate) async fn run_turn(
                             session_id: sess.conversation_id,
                             cwd: turn_context.cwd.clone(),
                             client: turn_context.app_server_client_name.clone(),
+                            session_source: Some(turn_context.session_source.to_string()),
+                            session_agent_role: turn_context.session_source.get_agent_role(),
+                            nero_auto_runtime: Some({
+                                let state = sess.state.lock().await;
+                                effective_nero_auto_runtime(
+                                    state.session_configuration.nero_auto_runtime,
+                                    &turn_context.session_source,
+                                )
+                            }),
                             triggered_at: chrono::Utc::now(),
                             hook_event: HookEvent::AfterAgent {
                                 event: HookEventAfterAgent {
@@ -5895,6 +5963,17 @@ pub(crate) async fn run_turn(
                                         );
                                     }
                                     HookAction::AutoUserReply { message } => {
+                                        if session_source_disables_nero_auto(
+                                            &turn_context.session_source,
+                                        ) {
+                                            debug!(
+                                                turn_id = %turn_context.sub_id,
+                                                hook_name = %hook_name,
+                                                session_source = %turn_context.session_source,
+                                                "ignored auto_user_reply hook action for subagent session"
+                                            );
+                                            continue;
+                                        }
                                         debug!(
                                             turn_id = %turn_context.sub_id,
                                             hook_name = %hook_name,
@@ -5948,6 +6027,7 @@ pub(crate) async fn run_turn(
                             turn_context.sub_id.clone(),
                             hook_name,
                             message,
+                            turn_context.session_source.clone(),
                         );
                     }
                     break;
@@ -7335,10 +7415,10 @@ async fn try_run_sampling_request(
                         };
                         sess.send_event(&turn_context, EventMsg::ReasoningRawContentDelta(event))
                             .await;
-                } else {
-                    error_or_panic("ReasoningRawContentDelta without active item".to_string());
+                    } else {
+                        error_or_panic("ReasoningRawContentDelta without active item".to_string());
+                    }
                 }
-            }
             }
         };
 
@@ -8593,6 +8673,7 @@ mod tests {
             metrics_service_name: None,
             app_server_client_name: None,
             session_source: SessionSource::Exec,
+            nero_auto_runtime: NeroAutoRuntimeConfig::default(),
             dynamic_tools: Vec::new(),
             persist_extended_history: false,
             inherited_shell_snapshot: None,
@@ -8687,6 +8768,7 @@ mod tests {
             metrics_service_name: None,
             app_server_client_name: None,
             session_source: SessionSource::Exec,
+            nero_auto_runtime: NeroAutoRuntimeConfig::default(),
             dynamic_tools: Vec::new(),
             persist_extended_history: false,
             inherited_shell_snapshot: None,
@@ -9012,10 +9094,64 @@ mod tests {
             metrics_service_name: None,
             app_server_client_name: None,
             session_source: SessionSource::Exec,
+            nero_auto_runtime: NeroAutoRuntimeConfig::default(),
             dynamic_tools: Vec::new(),
             persist_extended_history: false,
             inherited_shell_snapshot: None,
         }
+    }
+
+    #[test]
+    fn effective_nero_auto_runtime_forces_subagent_sessions_off() {
+        let runtime = effective_nero_auto_runtime(
+            NeroAutoRuntimeConfig {
+                enabled: true,
+                autonomy_level: 9,
+                max_auto_rounds: 2,
+            },
+            &SessionSource::SubAgent(SubAgentSource::Other("reviewer".to_string())),
+        );
+
+        assert_eq!(
+            runtime,
+            NeroAutoRuntimeConfig {
+                enabled: false,
+                autonomy_level: 9,
+                max_auto_rounds: 2,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn session_configuration_apply_keeps_nero_auto_off_for_subagents() {
+        let mut session_configuration = make_session_configuration_for_tests().await;
+        session_configuration.session_source =
+            SessionSource::SubAgent(SubAgentSource::Other("worker".to_string()));
+        session_configuration.nero_auto_runtime = NeroAutoRuntimeConfig {
+            enabled: false,
+            autonomy_level: 5,
+            max_auto_rounds: 7,
+        };
+
+        let updated = session_configuration
+            .apply(&SessionSettingsUpdate {
+                nero_auto_runtime: Some(NeroAutoRuntimeConfig {
+                    enabled: true,
+                    autonomy_level: 8,
+                    max_auto_rounds: 3,
+                }),
+                ..Default::default()
+            })
+            .expect("subagent override should apply with forced auto-off");
+
+        assert_eq!(
+            updated.nero_auto_runtime,
+            NeroAutoRuntimeConfig {
+                enabled: false,
+                autonomy_level: 8,
+                max_auto_rounds: 3,
+            }
+        );
     }
 
     #[tokio::test]
@@ -9070,6 +9206,7 @@ mod tests {
             metrics_service_name: None,
             app_server_client_name: None,
             session_source: SessionSource::Exec,
+            nero_auto_runtime: NeroAutoRuntimeConfig::default(),
             dynamic_tools: Vec::new(),
             persist_extended_history: false,
             inherited_shell_snapshot: None,
@@ -9164,6 +9301,7 @@ mod tests {
             metrics_service_name: None,
             app_server_client_name: None,
             session_source: SessionSource::Exec,
+            nero_auto_runtime: NeroAutoRuntimeConfig::default(),
             dynamic_tools: Vec::new(),
             persist_extended_history: false,
             inherited_shell_snapshot: None,
@@ -9583,6 +9721,7 @@ mod tests {
             metrics_service_name: None,
             app_server_client_name: None,
             session_source: SessionSource::Exec,
+            nero_auto_runtime: NeroAutoRuntimeConfig::default(),
             dynamic_tools,
             persist_extended_history: false,
             inherited_shell_snapshot: None,

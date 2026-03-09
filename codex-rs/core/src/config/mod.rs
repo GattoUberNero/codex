@@ -50,8 +50,10 @@ use crate::model_provider_info::built_in_model_providers;
 use crate::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
 use crate::project_doc::LOCAL_PROJECT_DOC_FILENAME;
 use crate::protocol::AskForApproval;
+use crate::protocol::NeroAutoRuntimeConfig;
 use crate::protocol::ReadOnlyAccess;
 use crate::protocol::SandboxPolicy;
+use crate::protocol::SessionSource;
 use crate::unified_exec::DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS;
 use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
 use crate::windows_sandbox::WindowsSandboxLevelExt;
@@ -834,6 +836,101 @@ fn apply_codexn_fork_developer_instructions(target_toml: &mut TomlValue, extra_t
     );
 }
 
+fn clamp_codexn_fork_nero_auto_runtime(runtime: NeroAutoRuntimeConfig) -> NeroAutoRuntimeConfig {
+    NeroAutoRuntimeConfig {
+        enabled: runtime.enabled,
+        autonomy_level: runtime.autonomy_level.clamp(1, 10),
+        max_auto_rounds: runtime.max_auto_rounds.max(0),
+    }
+}
+
+fn ensure_codexn_fork_table_mut(value: &mut TomlValue) -> &mut toml::map::Map<String, TomlValue> {
+    if !value.is_table() {
+        *value = TomlValue::Table(toml::map::Map::new());
+    }
+    value
+        .as_table_mut()
+        .expect("table expected after normalization")
+}
+
+fn ensure_codexn_fork_nested_table_mut<'a>(
+    root: &'a mut TomlValue,
+    keys: &[&str],
+) -> &'a mut toml::map::Map<String, TomlValue> {
+    let mut table = ensure_codexn_fork_table_mut(root);
+    for key in keys {
+        let entry = table
+            .entry((*key).to_string())
+            .or_insert_with(|| TomlValue::Table(toml::map::Map::new()));
+        if !entry.is_table() {
+            *entry = TomlValue::Table(toml::map::Map::new());
+        }
+        table = entry
+            .as_table_mut()
+            .expect("table expected after normalization");
+    }
+    table
+}
+
+fn read_codexn_fork_nero_auto_runtime(extra_toml: &TomlValue) -> NeroAutoRuntimeConfig {
+    let auto = extra_toml
+        .get("nero")
+        .and_then(|v| v.get("hook"))
+        .and_then(|v| v.get("runtime"))
+        .and_then(|v| v.get("auto"));
+    let policy = auto.and_then(|v| v.get("policy"));
+    clamp_codexn_fork_nero_auto_runtime(NeroAutoRuntimeConfig {
+        enabled: auto
+            .and_then(|v| v.get("enabled"))
+            .and_then(TomlValue::as_bool)
+            .unwrap_or(NeroAutoRuntimeConfig::default().enabled),
+        autonomy_level: policy
+            .and_then(|v| v.get("autonomy_level"))
+            .and_then(TomlValue::as_integer)
+            .unwrap_or(NeroAutoRuntimeConfig::default().autonomy_level),
+        max_auto_rounds: policy
+            .and_then(|v| v.get("max_auto_rounds"))
+            .and_then(TomlValue::as_integer)
+            .unwrap_or(NeroAutoRuntimeConfig::default().max_auto_rounds),
+    })
+}
+
+fn session_source_disables_codexn_fork_nero_auto(session_source: &SessionSource) -> bool {
+    matches!(session_source, SessionSource::SubAgent(_))
+}
+
+fn apply_codexn_fork_nero_auto_runtime_to_toml(
+    extra_toml: &mut TomlValue,
+    runtime: NeroAutoRuntimeConfig,
+) {
+    let auto =
+        ensure_codexn_fork_nested_table_mut(extra_toml, &["nero", "hook", "runtime", "auto"]);
+    auto.insert("enabled".to_string(), TomlValue::Boolean(runtime.enabled));
+    let policy = ensure_codexn_fork_nested_table_mut(
+        extra_toml,
+        &["nero", "hook", "runtime", "auto", "policy"],
+    );
+    policy.insert(
+        "autonomy_level".to_string(),
+        TomlValue::Integer(runtime.autonomy_level),
+    );
+    policy.insert(
+        "max_auto_rounds".to_string(),
+        TomlValue::Integer(runtime.max_auto_rounds),
+    );
+}
+
+fn effective_codexn_fork_nero_auto_runtime(
+    mut runtime: NeroAutoRuntimeConfig,
+    session_source: &SessionSource,
+) -> NeroAutoRuntimeConfig {
+    runtime = clamp_codexn_fork_nero_auto_runtime(runtime);
+    if session_source_disables_codexn_fork_nero_auto(session_source) {
+        runtime.enabled = false;
+    }
+    runtime
+}
+
 fn codexn_fork_auto_developer_instructions(extra_toml: &TomlValue) -> Option<String> {
     let root = extra_toml.as_table()?;
     let nero = root.get("nero")?.as_table()?;
@@ -1000,14 +1097,34 @@ pub(crate) fn apply_codexn_extra_config_overlays(
     merge_codexn_extra_config_from_env(merged_toml)
 }
 
-pub(crate) fn refresh_codexn_fork_developer_instructions(
-    config: &mut Config,
-) -> std::io::Result<()> {
+pub(crate) fn resolve_codexn_fork_nero_auto_runtime_from_env(
+    session_source: &SessionSource,
+) -> std::io::Result<NeroAutoRuntimeConfig> {
     let Some(combined_extra_toml) = load_codexn_extra_config_from_env()? else {
+        return Ok(effective_codexn_fork_nero_auto_runtime(
+            NeroAutoRuntimeConfig::default(),
+            session_source,
+        ));
+    };
+    Ok(effective_codexn_fork_nero_auto_runtime(
+        read_codexn_fork_nero_auto_runtime(&combined_extra_toml),
+        session_source,
+    ))
+}
+
+pub(crate) fn refresh_codexn_fork_developer_instructions_with_runtime(
+    config: &mut Config,
+    nero_auto_runtime: NeroAutoRuntimeConfig,
+    session_source: &SessionSource,
+) -> std::io::Result<()> {
+    let Some(mut combined_extra_toml) = load_codexn_extra_config_from_env()? else {
         return Ok(());
     };
-    let base_instructions = codexn_fork_root_developer_instructions(&combined_extra_toml)
-        .or_else(|| {
+    let effective_runtime =
+        effective_codexn_fork_nero_auto_runtime(nero_auto_runtime, session_source);
+    apply_codexn_fork_nero_auto_runtime_to_toml(&mut combined_extra_toml, effective_runtime);
+    let base_instructions =
+        codexn_fork_root_developer_instructions(&combined_extra_toml).or_else(|| {
             strip_codexn_fork_auto_developer_instructions(
                 config.developer_instructions.as_deref(),
                 &combined_extra_toml,
@@ -3241,6 +3358,79 @@ consolidation_model = "gpt-5"
         assert_eq!(
             strip_codexn_fork_auto_developer_instructions(Some(&composed), &extra_toml),
             Some("base instructions".to_string())
+        );
+    }
+
+    #[test]
+    fn effective_codexn_fork_nero_auto_runtime_forces_subagent_sessions_off() {
+        let runtime = effective_codexn_fork_nero_auto_runtime(
+            NeroAutoRuntimeConfig {
+                enabled: true,
+                autonomy_level: 8,
+                max_auto_rounds: 3,
+            },
+            &SessionSource::SubAgent(codex_protocol::protocol::SubAgentSource::Other(
+                "reviewer".to_string(),
+            )),
+        );
+
+        assert_eq!(
+            runtime,
+            NeroAutoRuntimeConfig {
+                enabled: false,
+                autonomy_level: 8,
+                max_auto_rounds: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn codexn_fork_auto_developer_instructions_disappear_when_runtime_overlay_disables_auto() {
+        let mut extra_toml: TomlValue = toml::from_str(
+            r####"
+                [nero.hook.runtime.auto]
+                enabled = true
+                protocol_prefix = "NERO_AUTO_V1 "
+
+                [nero.hook.runtime.auto.scoring_system]
+                enabled = true
+
+                [nero.hook.runtime.auto.scoring_system.show]
+                agent = true
+                tui = false
+
+                [nero.hook.runtime.auto.system_text]
+                header = "## NERO-SYSTEM v1"
+                scoring_on_header = "### scoring_system: on"
+                rules_label = "SCORE_RULES:"
+                json_intro = "Emit the strict JSON block below."
+                legacy_notice = "Legacy prefix `{protocol_prefix}` is still supported."
+            "####,
+        )
+        .expect("parse extra toml");
+
+        assert!(
+            codexn_fork_auto_developer_instructions(&extra_toml).is_some(),
+            "fixture should emit auto instructions before session-local override"
+        );
+
+        apply_codexn_fork_nero_auto_runtime_to_toml(
+            &mut extra_toml,
+            effective_codexn_fork_nero_auto_runtime(
+                NeroAutoRuntimeConfig {
+                    enabled: true,
+                    autonomy_level: 9,
+                    max_auto_rounds: 2,
+                },
+                &SessionSource::SubAgent(codex_protocol::protocol::SubAgentSource::Other(
+                    "worker".to_string(),
+                )),
+            ),
+        );
+
+        assert!(
+            codexn_fork_auto_developer_instructions(&extra_toml).is_none(),
+            "subagent runtime overlay must remove auto developer instructions"
         );
     }
 

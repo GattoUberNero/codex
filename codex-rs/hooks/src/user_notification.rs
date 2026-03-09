@@ -83,6 +83,26 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                         };
                     }
                 };
+                if let Some(session_source) = payload.session_source.as_deref() {
+                    command.env("NERO_HOOK_SESSION_SOURCE", session_source);
+                }
+                if let Some(session_agent_role) = payload.session_agent_role.as_deref() {
+                    command.env("NERO_HOOK_SESSION_AGENT_ROLE", session_agent_role);
+                }
+                if let Some(nero_auto_runtime) = payload.nero_auto_runtime {
+                    command.env(
+                        "NERO_HOOK_AUTO_ENABLED",
+                        if nero_auto_runtime.enabled { "1" } else { "0" },
+                    );
+                    command.env(
+                        "NERO_HOOK_AUTO_AUTONOMY_LEVEL",
+                        nero_auto_runtime.autonomy_level.to_string(),
+                    );
+                    command.env(
+                        "NERO_HOOK_AUTO_MAX_ROUNDS",
+                        nero_auto_runtime.max_auto_rounds.to_string(),
+                    );
+                }
                 debug!(
                     hook_name = "legacy_notify",
                     argv0 = argv.first().map(String::as_str).unwrap_or(""),
@@ -332,6 +352,9 @@ mod tests {
             session_id: ThreadId::new(),
             cwd: std::path::Path::new("/Users/example/project").to_path_buf(),
             client: Some("codex-tui".to_string()),
+            session_source: None,
+            session_agent_role: None,
+            nero_auto_runtime: None,
             triggered_at: chrono::Utc::now(),
             hook_event: HookEvent::AfterAgent {
                 event: crate::HookEventAfterAgent {
@@ -370,6 +393,9 @@ mod tests {
             session_id: ThreadId::new(),
             cwd: tempdir()?.path().to_path_buf(),
             client: None,
+            session_source: None,
+            session_agent_role: None,
+            nero_auto_runtime: None,
             triggered_at: chrono::Utc::now(),
             hook_event: HookEvent::AfterAgent {
                 event: crate::HookEventAfterAgent {
@@ -406,6 +432,9 @@ mod tests {
             session_id: ThreadId::new(),
             cwd: tempdir()?.path().to_path_buf(),
             client: None,
+            session_source: None,
+            session_agent_role: None,
+            nero_auto_runtime: None,
             triggered_at: chrono::Utc::now(),
             hook_event: HookEvent::AfterAgent {
                 event: crate::HookEventAfterAgent {
@@ -442,6 +471,9 @@ mod tests {
             session_id: ThreadId::new(),
             cwd: tempdir()?.path().to_path_buf(),
             client: None,
+            session_source: None,
+            session_agent_role: None,
+            nero_auto_runtime: None,
             triggered_at: chrono::Utc::now(),
             hook_event: HookEvent::AfterAgent {
                 event: crate::HookEventAfterAgent {
@@ -479,6 +511,9 @@ mod tests {
             session_id: ThreadId::new(),
             cwd: tempdir()?.path().to_path_buf(),
             client: None,
+            session_source: None,
+            session_agent_role: None,
+            nero_auto_runtime: None,
             triggered_at: chrono::Utc::now(),
             hook_event: HookEvent::AfterAgent {
                 event: crate::HookEventAfterAgent {
@@ -515,6 +550,9 @@ mod tests {
             session_id: ThreadId::new(),
             cwd: tempdir()?.path().to_path_buf(),
             client: None,
+            session_source: None,
+            session_agent_role: None,
+            nero_auto_runtime: None,
             triggered_at: chrono::Utc::now(),
             hook_event: HookEvent::AfterAgent {
                 event: crate::HookEventAfterAgent {
@@ -550,6 +588,9 @@ mod tests {
             session_id: ThreadId::new(),
             cwd: tempdir()?.path().to_path_buf(),
             client: None,
+            session_source: None,
+            session_agent_role: None,
+            nero_auto_runtime: None,
             triggered_at: chrono::Utc::now(),
             hook_event: HookEvent::AfterAgent {
                 event: crate::HookEventAfterAgent {
@@ -582,6 +623,9 @@ mod tests {
             session_id: ThreadId::new(),
             cwd: tempdir()?.path().to_path_buf(),
             client: None,
+            session_source: None,
+            session_agent_role: None,
+            nero_auto_runtime: None,
             triggered_at: chrono::Utc::now(),
             hook_event: HookEvent::AfterAgent {
                 event: crate::HookEventAfterAgent {

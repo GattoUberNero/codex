@@ -137,6 +137,9 @@ mod tests {
             session_id: ThreadId::new(),
             cwd: PathBuf::from(CWD),
             client: None,
+            session_source: None,
+            session_agent_role: None,
+            nero_auto_runtime: None,
             triggered_at: Utc
                 .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
                 .single()
@@ -232,6 +235,9 @@ mod tests {
             session_id: ThreadId::new(),
             cwd: PathBuf::from(CWD),
             client: None,
+            session_source: None,
+            session_agent_role: None,
+            nero_auto_runtime: None,
             triggered_at: Utc
                 .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
                 .single()
