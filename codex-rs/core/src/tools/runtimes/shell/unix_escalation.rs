@@ -400,16 +400,19 @@ impl CoreShellActionProvider {
             .services
             .skills_manager
             .skills_for_cwd(&self.turn.cwd, force_reload)
-            .await;
+            .await
+            .filter_for_session_source(&self.turn.session_source);
 
         let program_path = program.as_path();
-        for skill in skills_outcome.skills {
-            // We intentionally ignore "enabled" status here for now.
+        for skill in &skills_outcome.skills {
+            if !skills_outcome.is_skill_enabled(skill) {
+                continue;
+            }
             let Some(skill_root) = skill.path_to_skills_md.parent() else {
                 continue;
             };
             if program_path.starts_with(skill_root.join("scripts")) {
-                return Some(skill);
+                return Some(skill.clone());
             }
         }
 

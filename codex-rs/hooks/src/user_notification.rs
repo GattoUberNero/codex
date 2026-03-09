@@ -67,7 +67,14 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
         func: Arc::new(move |payload: &HookPayload| {
             let argv = Arc::clone(&argv);
             Box::pin(async move {
-                let mut command = match command_from_argv(&argv) {
+                let notify_payload = legacy_notify_json(payload).ok();
+                let mut command_argv = argv.as_ref().clone();
+                if let Some(notify_payload) = notify_payload.as_ref() {
+                    // Preserve the historical argv + JSON contract for legacy hooks
+                    // while also streaming the payload over stdin for larger/newer hooks.
+                    command_argv.push(notify_payload.clone());
+                }
+                let mut command = match command_from_argv(&command_argv) {
                     Some(command) => command,
                     None => {
                         return HookExecution {
@@ -76,11 +83,10 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                         };
                     }
                 };
-                let notify_payload = legacy_notify_json(payload).ok();
                 debug!(
                     hook_name = "legacy_notify",
                     argv0 = argv.first().map(String::as_str).unwrap_or(""),
-                    argv_len = argv.len(),
+                    argv_len = command_argv.len(),
                     "spawning legacy notify hook process"
                 );
 
@@ -418,6 +424,42 @@ mod tests {
             outcome.actions,
             vec![crate::HookAction::VisibleNote {
                 message: "example-A-".to_string()
+            }]
+        );
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn notify_hook_preserves_legacy_payload_as_cli_arg() -> Result<()> {
+        let hook = notify_hook(vec![
+            "python3".to_string(),
+            "-c".to_string(),
+            "import json,sys; payload=json.loads(sys.argv[-1]); print(json.dumps({'actions':[{'type':'visible_note','message': payload.get('thread-name') or 'missing'}]}), end='')".to_string(),
+        ]);
+
+        let payload = HookPayload {
+            session_id: ThreadId::new(),
+            cwd: tempdir()?.path().to_path_buf(),
+            client: None,
+            triggered_at: chrono::Utc::now(),
+            hook_event: HookEvent::AfterAgent {
+                event: crate::HookEventAfterAgent {
+                    thread_id: ThreadId::new(),
+                    thread_name: Some("legacy-argv".to_string()),
+                    turn_id: "turn-argv".to_string(),
+                    input_messages: vec!["hi".to_string()],
+                    last_assistant_message: Some("done".to_string()),
+                },
+            },
+        };
+
+        let outcome = hook.execute(&payload).await;
+        assert!(matches!(outcome.result, HookResult::Success));
+        assert_eq!(
+            outcome.actions,
+            vec![crate::HookAction::VisibleNote {
+                message: "legacy-argv".to_string()
             }]
         );
         Ok(())

@@ -784,6 +784,38 @@ fn compose_codexn_fork_developer_instructions(
     }
 }
 
+fn strip_codexn_fork_auto_developer_instructions(
+    current_instructions: Option<&str>,
+    extra_toml: &TomlValue,
+) -> Option<String> {
+    let mut current = current_instructions
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let auto_instructions = codexn_fork_auto_developer_instructions(extra_toml)?;
+    let auto_instructions = auto_instructions.trim();
+    if auto_instructions.is_empty() {
+        return Some(current);
+    }
+
+    loop {
+        if current == auto_instructions {
+            return None;
+        }
+        let suffix = format!("\n\n{auto_instructions}");
+        let Some(stripped) = current.strip_suffix(&suffix) else {
+            break;
+        };
+        let stripped = stripped.trim_end();
+        if stripped.is_empty() {
+            return None;
+        }
+        current = stripped.to_string();
+    }
+
+    Some(current)
+}
+
 fn apply_codexn_fork_developer_instructions(target_toml: &mut TomlValue, extra_toml: &TomlValue) {
     let base_instructions = codexn_fork_root_developer_instructions(target_toml);
     let Some(instructions) =
@@ -974,8 +1006,15 @@ pub(crate) fn refresh_codexn_fork_developer_instructions(
     let Some(combined_extra_toml) = load_codexn_extra_config_from_env()? else {
         return Ok(());
     };
+    let base_instructions = codexn_fork_root_developer_instructions(&combined_extra_toml)
+        .or_else(|| {
+            strip_codexn_fork_auto_developer_instructions(
+                config.developer_instructions.as_deref(),
+                &combined_extra_toml,
+            )
+        });
     config.developer_instructions = compose_codexn_fork_developer_instructions(
-        config.developer_instructions.as_deref(),
+        base_instructions.as_deref(),
         &combined_extra_toml,
     );
     Ok(())
@@ -3168,6 +3207,41 @@ consolidation_model = "gpt-5"
         assert!(!instructions.contains("base instructions"));
         assert!(instructions.contains("fork main instructions"));
         assert!(instructions.contains("## NERO-SYSTEM v1"));
+    }
+
+    #[test]
+    fn strip_codexn_fork_auto_developer_instructions_removes_composed_auto_suffix() {
+        let extra_toml: TomlValue = toml::from_str(
+            r####"
+                [nero.hook.runtime.auto]
+                enabled = true
+                protocol_prefix = "NERO_AUTO_V1 "
+
+                [nero.hook.runtime.auto.scoring_system]
+                enabled = true
+
+                [nero.hook.runtime.auto.scoring_system.show]
+                agent = true
+                tui = false
+
+                [nero.hook.runtime.auto.system_text]
+                header = "## NERO-SYSTEM v1"
+                scoring_on_header = "### scoring_system: on"
+                rules_label = "SCORE_RULES:"
+                json_intro = "Emit the strict JSON block below."
+                legacy_notice = "Legacy prefix `{protocol_prefix}` is still supported."
+            "####,
+        )
+        .expect("parse extra toml");
+
+        let auto = codexn_fork_auto_developer_instructions(&extra_toml)
+            .expect("auto instructions should be generated");
+        let composed = format!("base instructions\n\n{auto}");
+
+        assert_eq!(
+            strip_codexn_fork_auto_developer_instructions(Some(&composed), &extra_toml),
+            Some("base instructions".to_string())
+        );
     }
 
     #[test]

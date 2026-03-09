@@ -7033,8 +7033,11 @@ async fn try_run_sampling_request(
     );
     let plan_mode = turn_context.collaboration_mode.mode == ModeKind::Plan;
     let receiving_span = trace_span!("receiving_stream");
+    // This budget must span the whole request-retry loop for the turn.
+    // Resetting it on every retry would allow unbounded rotate/retry cycles
+    // when the provider keeps returning pre-output usage-limit failures.
+    client_session.reset_usage_limit_recovery_budget();
     'request: loop {
-        client_session.reset_usage_limit_recovery_budget();
         let mut stream = client_session
             .stream(
                 prompt,
