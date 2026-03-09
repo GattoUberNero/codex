@@ -60,6 +60,7 @@ impl SkillsManager {
             configured_extra_user_roots_from_stack(&config.config_layer_stack);
         let mut roots =
             skill_roots_from_layer_stack_with_agents(&config.config_layer_stack, &config.cwd);
+        let non_explicit_roots: Vec<PathBuf> = roots.iter().map(|root| root.path.clone()).collect();
         roots.extend(
             configured_extra_user_roots
                 .iter()
@@ -73,8 +74,11 @@ impl SkillsManager {
         outcome.disabled_paths = disabled_paths_from_stack(&config.config_layer_stack);
         outcome.agent_filter_defaults =
             skill_agent_filter_defaults_from_stack(&config.config_layer_stack);
-        outcome.explicit_skill_paths =
-            collect_explicit_skill_paths(&outcome.skills, &configured_extra_user_roots);
+        outcome.explicit_skill_paths = collect_explicit_skill_paths(
+            &outcome.skills,
+            &configured_extra_user_roots,
+            &non_explicit_roots,
+        );
         let (by_scripts_dir, by_doc_path) =
             build_implicit_skill_path_indexes(outcome.allowed_skills_for_implicit_invocation());
         outcome.implicit_skills_by_scripts_dir = Arc::new(by_scripts_dir);
@@ -149,6 +153,7 @@ impl SkillsManager {
         let merged_extra_user_roots = normalize_extra_user_roots(&merged_extra_user_roots);
 
         let mut roots = skill_roots_from_layer_stack_with_agents(&config_layer_stack, cwd);
+        let non_explicit_roots: Vec<PathBuf> = roots.iter().map(|root| root.path.clone()).collect();
         roots.extend(
             merged_extra_user_roots
                 .iter()
@@ -167,8 +172,11 @@ impl SkillsManager {
         }
         outcome.disabled_paths = disabled_paths_from_stack(&config_layer_stack);
         outcome.agent_filter_defaults = skill_agent_filter_defaults_from_stack(&config_layer_stack);
-        outcome.explicit_skill_paths =
-            collect_explicit_skill_paths(&outcome.skills, &merged_extra_user_roots);
+        outcome.explicit_skill_paths = collect_explicit_skill_paths(
+            &outcome.skills,
+            &merged_extra_user_roots,
+            &non_explicit_roots,
+        );
         let (by_scripts_dir, by_doc_path) =
             build_implicit_skill_path_indexes(outcome.allowed_skills_for_implicit_invocation());
         outcome.implicit_skills_by_scripts_dir = Arc::new(by_scripts_dir);
@@ -356,10 +364,16 @@ fn configured_extra_user_roots_from_stack(
     }
     let mut roots = configured_extra_user_roots_from_toml(&effective_config);
     if let Some(raw_paths) = env::var_os(CODEXN_EXPLICIT_SKILL_ROOTS_ENV) {
-        roots.extend(env::split_paths(&raw_paths));
+        roots.extend(filter_absolute_roots(
+            env::split_paths(&raw_paths).collect(),
+            CODEXN_EXPLICIT_SKILL_ROOTS_ENV,
+        ));
     }
     if let Some(raw_paths) = env::var_os(CODEXN_SKILL_ROOTS_ENV) {
-        roots.extend(env::split_paths(&raw_paths));
+        roots.extend(filter_absolute_roots(
+            env::split_paths(&raw_paths).collect(),
+            CODEXN_SKILL_ROOTS_ENV,
+        ));
     }
     normalize_extra_user_roots(&roots)
 }
@@ -426,12 +440,13 @@ fn read_path_list_from_table(
             }
         }
     }
-    paths
+    filter_absolute_roots(paths, field_name)
 }
 
 fn collect_explicit_skill_paths(
     skills: &[SkillMetadata],
     explicit_roots: &[PathBuf],
+    non_explicit_roots: &[PathBuf],
 ) -> HashSet<PathBuf> {
     if explicit_roots.is_empty() {
         return HashSet::new();
@@ -439,11 +454,35 @@ fn collect_explicit_skill_paths(
     skills
         .iter()
         .filter(|skill| {
+            if non_explicit_roots
+                .iter()
+                .any(|root| skill.path_to_skills_md.starts_with(root))
+            {
+                return false;
+            }
             explicit_roots
                 .iter()
                 .any(|root| skill.path_to_skills_md.starts_with(root))
         })
         .map(|skill| skill.path_to_skills_md.clone())
+        .collect()
+}
+
+fn filter_absolute_roots(paths: Vec<PathBuf>, source_label: &str) -> Vec<PathBuf> {
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            if path.is_absolute() {
+                Some(path)
+            } else {
+                warn!(
+                    source = source_label,
+                    path = %path.display(),
+                    "ignored non-absolute explicit skill root"
+                );
+                None
+            }
+        })
         .collect()
 }
 
@@ -756,5 +795,55 @@ mod tests {
                 PathBuf::from("/tmp/skills-b")
             ]
         );
+    }
+
+    #[test]
+    fn configured_extra_user_roots_ignores_relative_paths() {
+        let config_toml: TomlValue = toml::from_str(
+            r#"
+            [nero.skills]
+            explicit_roots = ["relative/path", "/tmp/skills-abs"]
+            "#,
+        )
+        .expect("valid toml");
+        let roots = configured_extra_user_roots_from_toml(&config_toml);
+        assert_eq!(roots, vec![PathBuf::from("/tmp/skills-abs")]);
+    }
+
+    #[test]
+    fn collect_explicit_skill_paths_does_not_override_non_explicit_roots() {
+        let repo_skill = SkillMetadata {
+            name: "repo".to_string(),
+            description: "repo".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            permission_profile: None,
+            permissions: None,
+            path_to_skills_md: PathBuf::from("/tmp/repo/skills/repo/SKILL.md"),
+            scope: SkillScope::Repo,
+        };
+        let explicit_skill = SkillMetadata {
+            name: "explicit".to_string(),
+            description: "explicit".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            permission_profile: None,
+            permissions: None,
+            path_to_skills_md: PathBuf::from("/tmp/explicit/skills/x/SKILL.md"),
+            scope: SkillScope::User,
+        };
+
+        let explicit_paths = collect_explicit_skill_paths(
+            &[repo_skill.clone(), explicit_skill.clone()],
+            &[PathBuf::from("/tmp/repo"), PathBuf::from("/tmp/explicit")],
+            &[PathBuf::from("/tmp/repo")],
+        );
+
+        assert!(!explicit_paths.contains(&repo_skill.path_to_skills_md));
+        assert!(explicit_paths.contains(&explicit_skill.path_to_skills_md));
     }
 }

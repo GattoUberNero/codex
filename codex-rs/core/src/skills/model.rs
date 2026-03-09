@@ -246,11 +246,11 @@ impl SkillLoadOutcome {
     }
 
     fn source_for_skill(&self, skill: &SkillMetadata) -> SkillAgentFilterSource {
-        if self.explicit_skill_paths.contains(&skill.path_to_skills_md) {
-            return SkillAgentFilterSource::Explicit;
-        }
         if skill.scope == SkillScope::Repo {
             return SkillAgentFilterSource::Local;
+        }
+        if self.explicit_skill_paths.contains(&skill.path_to_skills_md) {
+            return SkillAgentFilterSource::Explicit;
         }
         SkillAgentFilterSource::Global
     }
@@ -556,5 +556,37 @@ mod tests {
         assert!(paths.contains(&local_skill.path_to_skills_md));
         assert!(paths.contains(&explicit_skill.path_to_skills_md));
         assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn filter_for_agent_identity_prefers_local_scope_over_explicit_marker() {
+        let local_skill = SkillMetadata {
+            name: "local".to_string(),
+            description: "local".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            permission_profile: None,
+            permissions: None,
+            path_to_skills_md: PathBuf::from("/tmp/local/SKILL.md"),
+            scope: SkillScope::Repo,
+        };
+        let outcome = SkillLoadOutcome {
+            skills: vec![local_skill.clone()],
+            errors: Vec::new(),
+            disabled_paths: HashSet::new(),
+            agent_filter_defaults: SkillAgentFilterDefaults {
+                global_mode: SkillAgentFilterMode::AllowAll,
+                local_mode: SkillAgentFilterMode::AllowAll,
+                explicit_mode: SkillAgentFilterMode::DenyAll,
+            },
+            explicit_skill_paths: HashSet::from([local_skill.path_to_skills_md.clone()]),
+            implicit_skills_by_scripts_dir: Arc::new(HashMap::new()),
+            implicit_skills_by_doc_path: Arc::new(HashMap::new()),
+        };
+
+        let filtered = outcome.filter_for_agent_identity("architect");
+        assert_eq!(filtered.skills.len(), 1);
     }
 }

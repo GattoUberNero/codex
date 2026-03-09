@@ -693,6 +693,14 @@ fn resolve_frontmatter_policy(
         Some(types) => !types.is_empty(),
         None => false,
     };
+    if metadata.agent_filter_mode == Some(SkillAgentFilterMode::Whitelist)
+        && !has_non_empty_allowed_types
+    {
+        return Err(SkillParseError::InvalidField {
+            field: "metadata.allowed-agent-types",
+            reason: "must be non-empty when metadata.agent-filter-mode=whitelist".to_string(),
+        });
+    }
     if metadata.allow_agent_whitelist == Some(true)
         && metadata.agent_filter_mode.is_none()
         && !has_non_empty_allowed_types
@@ -1511,6 +1519,35 @@ policy: {}
         fs::write(
             &skill_path,
             "---\nname: policy-frontmatter-invalid\ndescription: |-\n  from frontmatter\nmetadata:\n  allow-agent-whitelist: true\n---\n\n# Body\n",
+        )
+        .expect("rewrite invalid skill frontmatter");
+
+        let cfg = make_config(&codex_home).await;
+        let outcome = load_skills_for_test(&cfg);
+
+        assert!(outcome.skills.is_empty());
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(
+            outcome.errors[0]
+                .message
+                .contains("metadata.allowed-agent-types"),
+            "unexpected error: {}",
+            outcome.errors[0].message
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_frontmatter_mode_whitelist_when_allowed_agent_types_missing() {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        let skill_path = write_skill(
+            &codex_home,
+            "demo",
+            "policy-frontmatter-mode-invalid",
+            "from frontmatter",
+        );
+        fs::write(
+            &skill_path,
+            "---\nname: policy-frontmatter-mode-invalid\ndescription: |-\n  from frontmatter\nmetadata:\n  agent-filter-mode: whitelist\n---\n\n# Body\n",
         )
         .expect("rewrite invalid skill frontmatter");
 
