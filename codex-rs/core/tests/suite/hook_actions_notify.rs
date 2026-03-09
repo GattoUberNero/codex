@@ -69,6 +69,7 @@ async fn submit_user_turn_no_wait(test: &TestCodexHarness, text: &str) -> Result
             model: session_model,
             effort: None,
             summary: Some(ReasoningSummary::Auto),
+            service_tier: None,
             collaboration_mode: None,
             personality: None,
         })
