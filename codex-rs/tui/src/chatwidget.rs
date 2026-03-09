@@ -181,6 +181,7 @@ const PLAN_MODE_REASONING_SCOPE_PLAN_ONLY: &str = "Apply to Plan mode override";
 const PLAN_MODE_REASONING_SCOPE_ALL_MODES: &str = "Apply to global default and Plan mode override";
 const CONNECTORS_SELECTION_VIEW_ID: &str = "connectors-selection";
 const NERO_AUTO_HOTKEY_CONFIG_ENV: &str = "CODEXN_CONFIG_NERO_AUTO_PATH";
+const NERO_AUTO_HOTKEY_F_KEY_FALLBACK_ENV: &str = "CODEXN_NERO_AUTO_FKEY_FALLBACK";
 const NERO_AUTO_HOTKEY_DEBOUNCE: Duration = Duration::from_millis(180);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -237,7 +238,10 @@ fn queued_message_edit_binding_for_terminal(terminal_name: TerminalName) -> KeyB
     }
 }
 
-fn detect_nero_auto_hotkey_action(key_event: KeyEvent) -> Option<NeroAutoHotkeyAction> {
+fn detect_nero_auto_hotkey_action(
+    key_event: KeyEvent,
+    f_key_fallback_enabled: bool,
+) -> Option<NeroAutoHotkeyAction> {
     let has_ctrl = key_event.modifiers.contains(KeyModifiers::CONTROL);
     let has_alt = key_event.modifiers.contains(KeyModifiers::ALT);
     let has_shift = key_event.modifiers.contains(KeyModifiers::SHIFT);
@@ -252,7 +256,7 @@ fn detect_nero_auto_hotkey_action(key_event: KeyEvent) -> Option<NeroAutoHotkeyA
     let has_unsupported_modifiers = key_event.modifiers.contains(KeyModifiers::SUPER)
         || key_event.modifiers.contains(KeyModifiers::HYPER)
         || key_event.modifiers.contains(KeyModifiers::META);
-    let allow_f_key_fallback = !has_unsupported_modifiers;
+    let allow_f_key_fallback = f_key_fallback_enabled && !has_unsupported_modifiers;
     if allow_f_key_fallback {
         match key_event.code {
             KeyCode::F(1) => return Some(NeroAutoHotkeyAction::ToggleEnabled),
@@ -299,6 +303,12 @@ fn detect_nero_auto_hotkey_action(key_event: KeyEvent) -> Option<NeroAutoHotkeyA
         (false, true) => Some(NeroAutoHotkeyAction::CycleMaxRounds),
         (true, true) => None,
     }
+}
+
+fn nero_auto_f_key_fallback_enabled() -> bool {
+    std::env::var_os(NERO_AUTO_HOTKEY_F_KEY_FALLBACK_ENV)
+        .map(|raw| raw.to_string_lossy().trim().to_ascii_lowercase())
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
 }
 
 use crate::app_event::AppEvent;
@@ -3732,7 +3742,8 @@ impl ChatWidget {
         }
 
         if self.can_handle_nero_auto_hotkey()
-            && let Some(action) = detect_nero_auto_hotkey_action(key_event)
+            && let Some(action) =
+                detect_nero_auto_hotkey_action(key_event, nero_auto_f_key_fallback_enabled())
         {
             // Consume hotkey repeats so a held key does not toggle twice or leak
             // literal `~` into the composer.
@@ -8088,8 +8099,10 @@ impl ChatWidget {
                         next.max_auto_rounds
                     ),
                     Some(format!(
-                        "Shortcuts: F1 toggle, F2 diff+, Shift+F2 diff-, F3 max-rounds+, Shift+F3 max-rounds-, F4 max-rounds-. Legacy: Shift+` toggle, Ctrl+Shift+` diff+, Alt+Shift+` max-rounds+. Config: {}",
-                        config_path.display()
+                        "Shortcuts: Legacy Shift+` toggle, Ctrl+Shift+` diff+, Alt+Shift+` max-rounds. F-key fallback (F1/F2/F3/F4): {} (env {}), config: {}",
+                        if nero_auto_f_key_fallback_enabled() { "on" } else { "off" },
+                        NERO_AUTO_HOTKEY_F_KEY_FALLBACK_ENV,
+                        config_path.display(),
                     )),
                 );
             }

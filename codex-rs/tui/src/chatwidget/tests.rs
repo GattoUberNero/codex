@@ -110,7 +110,6 @@ use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
 use insta::assert_snapshot;
 use pretty_assertions::assert_eq;
-#[cfg(target_os = "windows")]
 use serial_test::serial;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
@@ -118,6 +117,34 @@ use std::path::PathBuf;
 use tempfile::NamedTempFile;
 use tempfile::tempdir;
 use tokio::sync::mpsc::error::TryRecvError;
+
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let original = std::env::var(key).ok();
+        unsafe { std::env::set_var(key, value) };
+        Self { key, original }
+    }
+
+    fn remove(key: &'static str) -> Self {
+        let original = std::env::var(key).ok();
+        unsafe { std::env::remove_var(key) };
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(value) => unsafe { std::env::set_var(self.key, value) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
+    }
+}
 use tokio::sync::mpsc::unbounded_channel;
 use toml::Value as TomlValue;
 
@@ -5230,7 +5257,9 @@ async fn nero_auto_hotkeys_adjust_policy_and_respect_composer_focus() {
 }
 
 #[tokio::test]
+#[serial]
 async fn nero_auto_hotkeys_function_key_fallbacks_work() {
+    let _guard = EnvVarGuard::set(NERO_AUTO_HOTKEY_F_KEY_FALLBACK_ENV, "1");
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
     let tmp = tempdir().expect("tempdir");
     chat.config.codex_home = tmp.path().to_path_buf();
@@ -5264,7 +5293,28 @@ async fn nero_auto_hotkeys_function_key_fallbacks_work() {
 }
 
 #[tokio::test]
-async fn nero_auto_hotkeys_function_key_fallbacks_work_without_modifiers() {
+#[serial]
+async fn nero_auto_hotkeys_function_key_fallbacks_are_off_by_default() {
+    let _guard = EnvVarGuard::remove(NERO_AUTO_HOTKEY_F_KEY_FALLBACK_ENV);
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    let tmp = tempdir().expect("tempdir");
+    chat.config.codex_home = tmp.path().to_path_buf();
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+
+    let cfg_path = nero_auto_config_path(&chat.config.codex_home);
+    assert!(
+        !cfg_path.exists(),
+        "F-key fallback should be disabled by default and must not write config"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn nero_auto_hotkeys_function_key_fallbacks_work_without_modifiers_when_enabled() {
+    let _guard = EnvVarGuard::set(NERO_AUTO_HOTKEY_F_KEY_FALLBACK_ENV, "1");
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
     let tmp = tempdir().expect("tempdir");
     chat.config.codex_home = tmp.path().to_path_buf();
@@ -5298,7 +5348,9 @@ async fn nero_auto_hotkeys_function_key_fallbacks_work_without_modifiers() {
 }
 
 #[tokio::test]
+#[serial]
 async fn nero_auto_hotkeys_function_key_shift_supports_decrement() {
+    let _guard = EnvVarGuard::set(NERO_AUTO_HOTKEY_F_KEY_FALLBACK_ENV, "1");
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
     let tmp = tempdir().expect("tempdir");
     chat.config.codex_home = tmp.path().to_path_buf();
@@ -5334,7 +5386,9 @@ async fn nero_auto_hotkeys_function_key_shift_supports_decrement() {
 }
 
 #[tokio::test]
+#[serial]
 async fn nero_auto_hotkeys_function_key_f4_fallback_decrements_max_rounds() {
+    let _guard = EnvVarGuard::set(NERO_AUTO_HOTKEY_F_KEY_FALLBACK_ENV, "1");
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
     let tmp = tempdir().expect("tempdir");
     chat.config.codex_home = tmp.path().to_path_buf();
