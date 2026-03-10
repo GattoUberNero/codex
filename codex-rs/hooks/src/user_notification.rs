@@ -124,19 +124,30 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                         command.spawn()
                     };
 
+                let mut using_stdin_only_payload = false;
                 let mut child = match spawn_with_argv(&command_argv) {
                     Ok(child) => child,
-                    Err(err) if payload_in_argv && err.kind() == ErrorKind::ArgumentListTooLong => {
+                    Err(spawn_with_payload_err)
+                        if payload_in_argv
+                            && should_retry_without_argv_payload(&spawn_with_payload_err) =>
+                    {
                         warn!(
                             hook_name = "legacy_notify",
                             payload_bytes = notify_payload.as_ref().map_or(0, |v| v.len()),
-                            "legacy notify argv payload exceeded OS argument limit; retrying with stdin-only payload"
+                            error = %spawn_with_payload_err,
+                            "legacy notify spawn with argv payload failed; retrying with stdin-only payload"
                         );
                         match spawn_with_argv(&base_command_argv) {
-                            Ok(child) => child,
+                            Ok(child) => {
+                                using_stdin_only_payload = true;
+                                child
+                            }
                             Err(retry_err) => {
+                                let combined = io::Error::other(format!(
+                                    "legacy notify spawn failed with argv payload: {spawn_with_payload_err}; stdin-only retry failed: {retry_err}"
+                                ));
                                 return HookExecution {
-                                    result: HookResult::FailedContinue(retry_err.into()),
+                                    result: HookResult::FailedContinue(combined.into()),
                                     actions: Vec::new(),
                                 };
                             }
@@ -153,7 +164,12 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                 debug!(
                     hook_name = "legacy_notify",
                     argv0 = argv.first().map(String::as_str).unwrap_or(""),
-                    argv_len = command_argv.len(),
+                    argv_len = if using_stdin_only_payload {
+                        base_command_argv.len()
+                    } else {
+                        command_argv.len()
+                    },
+                    using_stdin_only_payload,
                     "spawning legacy notify hook process"
                 );
 
@@ -334,6 +350,13 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
             })
         }),
     }
+}
+
+fn should_retry_without_argv_payload(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        ErrorKind::ArgumentListTooLong | ErrorKind::InvalidInput
+    )
 }
 
 #[cfg(test)]

@@ -870,6 +870,10 @@ impl App {
             // Clear any in-flight rollback guard when switching threads.
             self.backtrack.pending_rollback = None;
             self.suppress_shutdown_complete = true;
+            tracing::info!(
+                %thread_id,
+                "submitting shutdown for current thread during thread switch"
+            );
             self.chat_widget.submit_op(Op::Shutdown);
             self.server.remove_thread(&thread_id).await;
             self.abort_thread_event_listener(thread_id);
@@ -3274,6 +3278,10 @@ impl App {
                 // its shutdown completion does not trigger agent failover.
                 self.pending_shutdown_exit_thread_id =
                     self.active_thread_id.or(self.chat_widget.thread_id());
+                tracing::info!(
+                    pending_shutdown_exit_thread_id = ?self.pending_shutdown_exit_thread_id,
+                    "submitting shutdown due to user-requested app exit"
+                );
                 if self.chat_widget.submit_op(Op::Shutdown) {
                     AppRunControl::Continue
                 } else {
