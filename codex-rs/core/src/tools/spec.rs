@@ -763,8 +763,11 @@ fn create_spawn_agent_tool(config: &ToolsConfig) -> ToolSpec {
 
 ### After you delegate
 - Call wait deliberately: use it whenever subagent output is required to produce a correct user-facing result.
+- Be patient with long-running delegated operations, especially audits; critical audit work can legitimately take time.
+- If waiting on critical delegated results (especially audits), stop waiting only when there is clear evidence that waiting longer is not useful (for example: explicit failure, shutdown, or repeated timeout with no progress signal).
 - Before sending a final user answer, reconcile active subagents explicitly (wait/send_input/close_agent) or state clearly which agents are still running.
 - Do not redo delegated subagent tasks yourself; focus on integrating results or tackling non-overlapping work.
+- Never reproduce a delegated audit yourself; re-issue the audit task to a subagent (or redirect it) and report that handoff/status instead of redoing it locally.
 - While the subagent is running in the background, do meaningful non-overlapping work immediately.
 - Do not repeatedly wait by reflex.
 - When a delegated coding task returns, quickly review the uploaded changes, then integrate or refine them.

@@ -2965,7 +2965,12 @@ impl Session {
                 vec![
                     "Sub-agent coordination guardrail: active sub-agents are present in this session. \
                      Do not finalize as done without explicit reconciliation via `wait`, `send_input`, \
-                     and/or `close_agent`. A wait timeout means pending, not completed."
+                     and/or `close_agent`. A wait timeout means pending, not completed. \
+                     Be patient with long-running delegated operations, especially audits. \
+                     Stop waiting only when there is clear evidence waiting longer is not useful \
+                     (explicit failure/shutdown or repeated timeout with no progress signal). \
+                     Never reproduce a delegated audit yourself; re-issue or redirect the audit task \
+                     to a subagent and report that handoff/status."
                         .to_string(),
                 ],
             ) {
@@ -3737,7 +3742,12 @@ impl Session {
                  Before ending this turn, explicitly reconcile their state via `wait`, `send_input`, \
                  and/or `close_agent`.\n\
                  A timed-out wait is not completion; treat it as pending work and either wait longer \
-                 or report unresolved agents explicitly."
+                 or report unresolved agents explicitly.\n\
+                 Be patient with long-running delegated operations, especially audits.\n\
+                 Stop waiting only when there is clear evidence waiting longer is not useful \
+                 (explicit failure/shutdown or repeated timeout with no progress signal).\n\
+                 Never reproduce a delegated audit yourself; re-issue or redirect the audit task \
+                 to a subagent and report that handoff/status."
             ));
         }
         contextual_user_sections.push(
