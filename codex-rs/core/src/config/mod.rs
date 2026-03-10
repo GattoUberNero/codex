@@ -786,6 +786,46 @@ fn compose_codexn_fork_developer_instructions(
     }
 }
 
+fn codexn_fork_is_legacy_auto_suffix_block(block: &str) -> bool {
+    let trimmed = block.trim();
+    if !trimmed.starts_with("## NERO-SYSTEM v1") {
+        return false;
+    }
+
+    let Some(scoring_idx) = trimmed.find("\n### scoring_system: on\n") else {
+        return false;
+    };
+    let Some(rules_idx) = trimmed.find("\nSCORE_RULES:\n") else {
+        return false;
+    };
+    let Some(json_idx) = trimmed.find("\n```json\n") else {
+        return false;
+    };
+    if !(scoring_idx < rules_idx && rules_idx < json_idx) {
+        return false;
+    }
+    if !trimmed.ends_with("\n```") {
+        return false;
+    }
+
+    let json_start = json_idx + "\n```json\n".len();
+    let json_end = trimmed.len().saturating_sub("\n```".len());
+    if json_start >= json_end {
+        return false;
+    }
+    let json_block = &trimmed[json_start..json_end];
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_block) else {
+        return false;
+    };
+    let Some(auto_obj) = value
+        .get("nero_auto_v1")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return false;
+    };
+    auto_obj.contains_key("score_value")
+}
+
 fn strip_codexn_fork_auto_developer_instructions(
     current_instructions: Option<&str>,
     extra_toml: &TomlValue,
@@ -813,6 +853,21 @@ fn strip_codexn_fork_auto_developer_instructions(
             return None;
         }
         current = stripped.to_string();
+    }
+
+    // Compatibility fallback: strip only a strict trailing legacy auto block.
+    // This must not remove arbitrary user-authored instructions that merely mention
+    // similar markers.
+    if let Some(marker_idx) = current.rfind("## NERO-SYSTEM v1") {
+        let (_, tail) = current.split_at(marker_idx);
+        if codexn_fork_is_legacy_auto_suffix_block(tail) {
+            let base = current[..marker_idx].trim_end();
+            return if base.is_empty() {
+                None
+            } else {
+                Some(base.to_string())
+            };
+        }
     }
 
     Some(current)
@@ -964,26 +1019,35 @@ fn codexn_fork_auto_developer_instructions(extra_toml: &TomlValue) -> Option<Str
         return None;
     }
 
-    let system_text = auto.get("system_text")?.as_table()?;
-    let header = system_text.get("header")?.as_str()?.trim();
-    let scoring_on_header = system_text.get("scoring_on_header")?.as_str()?.trim();
-    let rules_label = system_text.get("rules_label")?.as_str()?.trim();
-    let json_intro = system_text.get("json_intro")?.as_str()?.trim();
-    let legacy_notice = system_text.get("legacy_notice")?.as_str()?.trim();
-    if header.is_empty()
-        || scoring_on_header.is_empty()
-        || rules_label.is_empty()
-        || json_intro.is_empty()
-        || legacy_notice.is_empty()
-    {
-        return None;
-    }
+    let system_text = auto.get("system_text").and_then(TomlValue::as_table);
+    let text_with_fallback = |key: &str, default: &'static str| -> String {
+        system_text
+            .and_then(|tbl| tbl.get(key))
+            .and_then(TomlValue::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(default)
+            .to_string()
+    };
+
+    let header = text_with_fallback("header", "## NERO-SYSTEM v1");
+    let scoring_on_header = text_with_fallback("scoring_on_header", "### scoring_system: on");
+    let rules_label = text_with_fallback("rules_label", "SCORE_RULES:");
+    let json_intro = text_with_fallback(
+        "json_intro",
+        "W tej odpowiedzi (obok normalnej treści) dołącz ścisły JSON block:",
+    );
+    let legacy_notice = text_with_fallback(
+        "legacy_notice",
+        "Uwaga: starszy format liniowy z prefixem `{protocol_prefix}...` (w tym `STOP`) jest jeszcze wspierany kompatybilnie, ale preferowany jest JSON block powyżej.",
+    );
 
     let protocol_prefix = auto
         .get("protocol_prefix")
         .and_then(TomlValue::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())?;
+        .filter(|value| !value.is_empty())
+        .unwrap_or("NERO_AUTO_V1 ");
 
     let mut sections = vec![
         header.to_string(),
@@ -1011,6 +1075,7 @@ fn codexn_fork_auto_developer_instructions(extra_toml: &TomlValue) -> Option<Str
         "    \"score_value\": 7,".to_string(),
         "    \"score_explanation\": \"planned low-risk next step\",".to_string(),
         "    \"gates_done_observed\": false,".to_string(),
+        "    \"user_collaboration_required\": false,".to_string(),
         "    \"emergency_flag\": false".to_string(),
         "  }".to_string(),
         "}".to_string(),
@@ -3199,6 +3264,37 @@ consolidation_model = "gpt-5"
     }
 
     #[test]
+    fn codexn_fork_auto_prompt_uses_safe_defaults_when_system_text_is_missing() {
+        let mut extra_toml: TomlValue = toml::from_str(
+            r####"
+                [nero.hook.runtime.auto]
+                enabled = true
+
+                [nero.hook.runtime.auto.scoring_system]
+                enabled = true
+
+                [nero.hook.runtime.auto.scoring_system.show]
+                agent = true
+                tui = false
+            "####,
+        )
+        .expect("parse extra toml");
+
+        let extra_snapshot = extra_toml.clone();
+        apply_codexn_fork_developer_instructions(&mut extra_toml, &extra_snapshot);
+
+        let instructions = extra_toml
+            .as_table()
+            .and_then(|t| t.get("developer_instructions"))
+            .and_then(TomlValue::as_str)
+            .expect("developer instructions");
+        assert!(instructions.contains("## NERO-SYSTEM v1"));
+        assert!(instructions.contains("\"nero_auto_v1\""));
+        assert!(instructions.contains("\"user_collaboration_required\""));
+        assert!(instructions.contains("NERO_AUTO_V1"));
+    }
+
+    #[test]
     fn codexn_fork_main_agent_and_auto_prompt_are_combined() {
         let mut extra_toml: TomlValue = toml::from_str(
             r####"
@@ -3358,6 +3454,86 @@ consolidation_model = "gpt-5"
         assert_eq!(
             strip_codexn_fork_auto_developer_instructions(Some(&composed), &extra_toml),
             Some("base instructions".to_string())
+        );
+    }
+
+    #[test]
+    fn strip_codexn_fork_auto_developer_instructions_removes_legacy_variant_suffix() {
+        let extra_toml: TomlValue = toml::from_str(
+            r####"
+                [nero.hook.runtime.auto]
+                enabled = true
+
+                [nero.hook.runtime.auto.scoring_system]
+                enabled = true
+
+                [nero.hook.runtime.auto.scoring_system.show]
+                agent = true
+                tui = false
+            "####,
+        )
+        .expect("parse extra toml");
+
+        let legacy_suffix = r####"## NERO-SYSTEM v1
+
+### scoring_system: on
+SCORE_RULES:
+dummy
+
+```json
+{
+  "nero_auto_v1": {
+    "score_value": 7
+  }
+}
+```
+"####;
+        let composed = format!("base instructions\n\n{legacy_suffix}");
+
+        assert_eq!(
+            strip_codexn_fork_auto_developer_instructions(Some(&composed), &extra_toml),
+            Some("base instructions".to_string())
+        );
+    }
+
+    #[test]
+    fn strip_codexn_fork_auto_developer_instructions_does_not_trim_non_suffix_tail() {
+        let extra_toml: TomlValue = toml::from_str(
+            r####"
+                [nero.hook.runtime.auto]
+                enabled = true
+
+                [nero.hook.runtime.auto.scoring_system]
+                enabled = true
+
+                [nero.hook.runtime.auto.scoring_system.show]
+                agent = true
+                tui = false
+            "####,
+        )
+        .expect("parse extra toml");
+
+        let tail = r####"## NERO-SYSTEM v1
+
+### scoring_system: on
+SCORE_RULES:
+dummy
+
+```json
+{
+  "nero_auto_v1": {
+    "score_value": 7
+  }
+}
+```
+
+Protocol appendix: this section is user-authored and must be preserved.
+"####;
+        let composed = format!("base instructions\n\n{tail}");
+
+        assert_eq!(
+            strip_codexn_fork_auto_developer_instructions(Some(&composed), &extra_toml),
+            Some(composed)
         );
     }
 

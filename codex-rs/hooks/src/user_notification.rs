@@ -1,6 +1,7 @@
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{io, io::ErrorKind};
 
 use serde::Serialize;
 use tokio::io::AsyncReadExt;
@@ -68,55 +69,79 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
             let argv = Arc::clone(&argv);
             Box::pin(async move {
                 let notify_payload = legacy_notify_json(payload).ok();
-                let mut command_argv = argv.as_ref().clone();
-                if let Some(notify_payload) = notify_payload.as_ref() {
+                let base_command_argv = argv.as_ref().clone();
+                if command_from_argv(&base_command_argv).is_none() {
+                    return HookExecution {
+                        result: HookResult::Success,
+                        actions: Vec::new(),
+                    };
+                }
+                let mut command_argv = base_command_argv.clone();
+                let payload_in_argv = if let Some(notify_payload) = notify_payload.as_ref() {
                     // Preserve the historical argv + JSON contract for legacy hooks
                     // while also streaming the payload over stdin for larger/newer hooks.
                     command_argv.push(notify_payload.clone());
-                }
-                let mut command = match command_from_argv(&command_argv) {
-                    Some(command) => command,
-                    None => {
-                        return HookExecution {
-                            result: HookResult::Success,
-                            actions: Vec::new(),
-                        };
-                    }
+                    true
+                } else {
+                    false
                 };
-                if let Some(session_source) = payload.session_source.as_deref() {
-                    command.env("NERO_HOOK_SESSION_SOURCE", session_source);
-                }
-                if let Some(session_agent_role) = payload.session_agent_role.as_deref() {
-                    command.env("NERO_HOOK_SESSION_AGENT_ROLE", session_agent_role);
-                }
-                if let Some(nero_auto_runtime) = payload.nero_auto_runtime {
-                    command.env(
-                        "NERO_HOOK_AUTO_ENABLED",
-                        if nero_auto_runtime.enabled { "1" } else { "0" },
-                    );
-                    command.env(
-                        "NERO_HOOK_AUTO_AUTONOMY_LEVEL",
-                        nero_auto_runtime.autonomy_level.to_string(),
-                    );
-                    command.env(
-                        "NERO_HOOK_AUTO_MAX_ROUNDS",
-                        nero_auto_runtime.max_auto_rounds.to_string(),
-                    );
-                }
-                debug!(
-                    hook_name = "legacy_notify",
-                    argv0 = argv.first().map(String::as_str).unwrap_or(""),
-                    argv_len = command_argv.len(),
-                    "spawning legacy notify hook process"
-                );
 
-                // We await completion so hooks can optionally emit JSON actions on stdout.
-                command.stdin(Stdio::piped()).stderr(Stdio::null());
+                let build_command = |argv_values: &[String]| -> Option<tokio::process::Command> {
+                    let mut command = command_from_argv(argv_values)?;
+                    if let Some(session_source) = payload.session_source.as_deref() {
+                        command.env("NERO_HOOK_SESSION_SOURCE", session_source);
+                    }
+                    if let Some(session_agent_role) = payload.session_agent_role.as_deref() {
+                        command.env("NERO_HOOK_SESSION_AGENT_ROLE", session_agent_role);
+                    }
+                    if let Some(nero_auto_runtime) = payload.nero_auto_runtime {
+                        command.env(
+                            "NERO_HOOK_AUTO_ENABLED",
+                            if nero_auto_runtime.enabled { "1" } else { "0" },
+                        );
+                        command.env(
+                            "NERO_HOOK_AUTO_AUTONOMY_LEVEL",
+                            nero_auto_runtime.autonomy_level.to_string(),
+                        );
+                        command.env(
+                            "NERO_HOOK_AUTO_MAX_ROUNDS",
+                            nero_auto_runtime.max_auto_rounds.to_string(),
+                        );
+                    }
+                    command.stdin(Stdio::piped()).stderr(Stdio::null());
+                    command.stdout(Stdio::piped());
+                    Some(command)
+                };
 
-                command.stdout(Stdio::piped());
+                let spawn_with_argv =
+                    |argv_values: &[String]| -> io::Result<tokio::process::Child> {
+                        let mut command = build_command(argv_values).ok_or_else(|| {
+                            io::Error::new(
+                                ErrorKind::InvalidInput,
+                                "missing legacy notify command argv",
+                            )
+                        })?;
+                        command.spawn()
+                    };
 
-                let mut child = match command.spawn() {
+                let mut child = match spawn_with_argv(&command_argv) {
                     Ok(child) => child,
+                    Err(err) if payload_in_argv && err.kind() == ErrorKind::ArgumentListTooLong => {
+                        warn!(
+                            hook_name = "legacy_notify",
+                            payload_bytes = notify_payload.as_ref().map_or(0, |v| v.len()),
+                            "legacy notify argv payload exceeded OS argument limit; retrying with stdin-only payload"
+                        );
+                        match spawn_with_argv(&base_command_argv) {
+                            Ok(child) => child,
+                            Err(retry_err) => {
+                                return HookExecution {
+                                    result: HookResult::FailedContinue(retry_err.into()),
+                                    actions: Vec::new(),
+                                };
+                            }
+                        }
+                    }
                     Err(err) => {
                         return HookExecution {
                             result: HookResult::FailedContinue(err.into()),
@@ -124,6 +149,13 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                         };
                     }
                 };
+
+                debug!(
+                    hook_name = "legacy_notify",
+                    argv0 = argv.first().map(String::as_str).unwrap_or(""),
+                    argv_len = command_argv.len(),
+                    "spawning legacy notify hook process"
+                );
 
                 if let Some(mut stdin) = child.stdin.take() {
                     if let Some(notify_payload) = notify_payload {
@@ -532,6 +564,47 @@ mod tests {
             outcome.actions,
             vec![crate::HookAction::VisibleNote {
                 message: large_message.len().to_string()
+            }]
+        );
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn notify_hook_falls_back_to_stdin_when_argv_payload_exceeds_os_limit() -> Result<()> {
+        let hook = notify_hook(vec![
+            "python3".to_string(),
+            "-c".to_string(),
+            "import json,sys; payload=json.load(sys.stdin); msg=payload.get('last-assistant-message') or ''; print(json.dumps({'actions':[{'type':'visible_note','message': str(len(msg))}]}), end='')".to_string(),
+        ]);
+
+        // Deliberately larger than typical ARG_MAX to exercise the argv->stdin retry path.
+        let huge_message = "x".repeat(3_000_000);
+        let payload = HookPayload {
+            session_id: ThreadId::new(),
+            cwd: tempdir()?.path().to_path_buf(),
+            client: None,
+            session_source: None,
+            session_agent_role: None,
+            nero_auto_runtime: None,
+            triggered_at: chrono::Utc::now(),
+            hook_event: HookEvent::AfterAgent {
+                event: crate::HookEventAfterAgent {
+                    thread_id: ThreadId::new(),
+                    thread_name: Some("example-A-".to_string()),
+                    turn_id: "turn-huge".to_string(),
+                    input_messages: vec!["hi".to_string()],
+                    last_assistant_message: Some(huge_message.clone()),
+                },
+            },
+        };
+
+        let outcome = hook.execute(&payload).await;
+        assert!(matches!(outcome.result, HookResult::Success));
+        assert_eq!(
+            outcome.actions,
+            vec![crate::HookAction::VisibleNote {
+                message: huge_message.len().to_string()
             }]
         );
         Ok(())
