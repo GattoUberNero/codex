@@ -453,7 +453,9 @@ fn nero_hook_format_label(format: &NeroHookMsgFormat) -> &'static str {
     }
 }
 
-fn normalized_nero_hook_status_kind(status: Option<&codex_hooks::NeroHookMsgStatus>) -> Option<String> {
+fn normalized_nero_hook_status_kind(
+    status: Option<&codex_hooks::NeroHookMsgStatus>,
+) -> Option<String> {
     status.map(|item| item.kind.trim().to_ascii_lowercase())
 }
 
@@ -5912,6 +5914,7 @@ pub(crate) async fn run_turn(
                         .await
                         .join("log")
                         .join(NERO_HOOK_DELIVERY_LOG_FILENAME);
+                    let configured_after_agent_hooks = sess.hooks().after_agent_hook_count();
                     let hook_thread_name = {
                         let state = sess.state.lock().await;
                         state.session_configuration.thread_name.clone()
@@ -5948,6 +5951,60 @@ pub(crate) async fn run_turn(
                         hook_outcomes = hook_outcomes.len(),
                         "after_agent hooks dispatched"
                     );
+                    let failed_hook_outcomes = hook_outcomes
+                        .iter()
+                        .filter(|outcome| !matches!(&outcome.result, HookResult::Success))
+                        .count();
+                    let all_after_agent_hooks_failed_without_actions = configured_after_agent_hooks
+                        > 0
+                        && !hook_outcomes.is_empty()
+                        && hook_outcomes.iter().all(|outcome| {
+                            !matches!(&outcome.result, HookResult::Success)
+                                && outcome.actions.is_empty()
+                        });
+                    let all_after_agent_hooks_failed = configured_after_agent_hooks > 0
+                        && failed_hook_outcomes == hook_outcomes.len();
+                    let hook_dispatch_status = if configured_after_agent_hooks == 0 {
+                        "no_hooks_configured"
+                    } else if hook_outcomes.is_empty() {
+                        "no_outcomes"
+                    } else if all_after_agent_hooks_failed_without_actions {
+                        "all_failed_no_actions"
+                    } else if all_after_agent_hooks_failed {
+                        "all_failed"
+                    } else {
+                        "executed"
+                    };
+                    append_nero_hook_delivery_audit(
+                        &hook_delivery_log_path,
+                        &sess.conversation_id,
+                        turn_context.as_ref(),
+                        "legacy_notify_registry",
+                        "hook_dispatch",
+                        hook_dispatch_status,
+                        false,
+                        false,
+                        json!({
+                            "configured_after_agent_hooks": configured_after_agent_hooks,
+                            "hook_outcomes": hook_outcomes.len(),
+                            "failed_hook_outcomes": failed_hook_outcomes,
+                            "session_source": turn_context.session_source.to_string(),
+                        }),
+                    )
+                    .await;
+
+                    if all_after_agent_hooks_failed_without_actions
+                        && configured_after_agent_hooks > 0
+                        && !matches!(turn_context.session_source, SessionSource::SubAgent(_))
+                    {
+                        let message = nero_hook_tui_warning_message(
+                            "All configured after_agent hooks failed and returned no actions for this turn.",
+                            NeroHookMsgFormat::Block,
+                            Some(("error", "dispatch-all-failed")),
+                        );
+                        sess.send_event(&turn_context, EventMsg::Warning(WarningEvent { message }))
+                            .await;
+                    }
 
                     let mut abort_message = None;
                     let mut deferred_auto_user_replies: Vec<(String, String)> = Vec::new();
@@ -5987,9 +6044,10 @@ pub(crate) async fn run_turn(
                                             status.as_ref().map(|item| item.text.clone());
                                         let status_kind_normalized =
                                             normalized_nero_hook_status_kind(status.as_ref());
-                                        let runtime_delivery_candidate = is_runtime_delivery_status_kind(
-                                            status_kind_normalized.as_deref(),
-                                        );
+                                        let runtime_delivery_candidate =
+                                            is_runtime_delivery_status_kind(
+                                                status_kind_normalized.as_deref(),
+                                            );
                                         if runtime_delivery_candidate {
                                             hook_runtime_msg_expected = true;
                                         }
@@ -6102,7 +6160,9 @@ pub(crate) async fn run_turn(
                                             .await;
                                             delivered_agent = true;
                                         }
-                                        if runtime_delivery_candidate && (delivered_tui || delivered_agent) {
+                                        if runtime_delivery_candidate
+                                            && (delivered_tui || delivered_agent)
+                                        {
                                             hook_runtime_msg_delivered = true;
                                         }
                                         debug!(

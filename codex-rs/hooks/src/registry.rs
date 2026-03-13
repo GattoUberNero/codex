@@ -55,6 +55,10 @@ impl Hooks {
         }
     }
 
+    pub fn after_agent_hook_count(&self) -> usize {
+        self.after_agent.len()
+    }
+
     pub async fn dispatch(&self, hook_payload: HookPayload) -> Vec<HookResponse> {
         let hooks = self.hooks_for_event(&hook_payload.hook_event);
         debug!(

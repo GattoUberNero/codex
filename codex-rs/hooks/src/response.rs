@@ -133,15 +133,8 @@ struct HookActionEnvelope {
     actions: Vec<serde_json::Value>,
 }
 
-pub fn parse_hook_actions_from_stdout(
-    stdout: &str,
-) -> Result<ParsedHookActions, serde_json::Error> {
-    let trimmed = stdout.trim();
-    if trimmed.is_empty() {
-        return Ok(ParsedHookActions::default());
-    }
-
-    let envelope: HookActionEnvelope = serde_json::from_str(trimmed)?;
+fn parse_hook_action_envelope(json_payload: &str) -> Result<ParsedHookActions, serde_json::Error> {
+    let envelope: HookActionEnvelope = serde_json::from_str(json_payload)?;
     let mut parsed = ParsedHookActions::default();
 
     for raw_action in envelope.actions {
@@ -156,6 +149,49 @@ pub fn parse_hook_actions_from_stdout(
     }
 
     Ok(parsed)
+}
+
+pub fn parse_hook_actions_from_stdout(
+    stdout: &str,
+) -> Result<ParsedHookActions, serde_json::Error> {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return Ok(ParsedHookActions::default());
+    }
+
+    let strict_err = match parse_hook_action_envelope(trimmed) {
+        Ok(parsed) => return Ok(parsed),
+        Err(err) => err,
+    };
+
+    // Compatibility recovery for hooks that accidentally emit plaintext log lines
+    // before a canonical JSON envelope in the final line.
+    let lines: Vec<&str> = trimmed
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.len() >= 2 {
+        let candidate = *lines.last().expect("non-empty lines");
+        let prefix_contains_jsonish_tokens = lines[..lines.len() - 1]
+            .iter()
+            .any(|line| line.contains('{') || line.contains('}'));
+        if !prefix_contains_jsonish_tokens
+            && candidate.starts_with('{')
+            && candidate.ends_with('}')
+            && (candidate.starts_with("{\"actions\"") || candidate.starts_with("{ \"actions\""))
+            && let Ok(parsed) = parse_hook_action_envelope(candidate)
+        {
+            warn!(
+                stdout_len = trimmed.len(),
+                recovered_json_len = candidate.len(),
+                "recovered hook actions from trailing json line"
+            );
+            return Ok(parsed);
+        }
+    }
+
+    Err(strict_err)
 }
 
 fn is_unknown_action_type(value: &serde_json::Value) -> bool {
@@ -247,6 +283,32 @@ mod tests {
         let err = parse_hook_actions_from_stdout("{not-json").expect_err("invalid json");
         let msg = err.to_string();
         assert!(msg.contains("expected") || msg.contains("key"));
+    }
+
+    #[test]
+    fn parse_recovers_json_after_plaintext_prefix_line() {
+        let parsed = parse_hook_actions_from_stdout(
+            r#"legacy warning line
+{"actions":[{"type":"visible_note","message":"ok"}]}"#,
+        )
+        .expect("parse");
+
+        assert_eq!(
+            parsed.actions,
+            vec![HookAction::VisibleNote {
+                message: "ok".to_string()
+            }]
+        );
+        assert_eq!(parsed.ignored_unknown_actions, 0);
+    }
+
+    #[test]
+    fn parse_wrapped_json_in_noise_still_errors() {
+        let err = parse_hook_actions_from_stdout(
+            r#"prefix >>> {"actions":[{"type":"context_note","message":"ctx"}]} <<< suffix"#,
+        )
+        .expect_err("wrapped json should not be recovered");
+        assert!(!err.to_string().is_empty());
     }
 
     #[test]
