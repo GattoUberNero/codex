@@ -180,11 +180,12 @@ const PLAN_MODE_REASONING_SCOPE_PLAN_ONLY: &str = "Apply to Plan mode override";
 const PLAN_MODE_REASONING_SCOPE_ALL_MODES: &str = "Apply to global default and Plan mode override";
 const CONNECTORS_SELECTION_VIEW_ID: &str = "connectors-selection";
 const NERO_AUTO_HOTKEY_CONFIG_ENV: &str = "CODEXN_CONFIG_NERO_AUTO_PATH";
-const NERO_AUTO_HOTKEY_F_KEY_FALLBACK_ENV: &str = "CODEXN_NERO_AUTO_FKEY_FALLBACK";
 const NERO_AUTO_HOTKEY_DEBOUNCE: Duration = Duration::from_millis(180);
+const NERO_AUTO_TOGGLE_HOTKEY_DEBOUNCE: Duration = Duration::from_millis(450);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NeroAutoHotkeyAction {
+    ShowStatus,
     ToggleEnabled,
     IncreaseDifficulty,
     DecreaseDifficulty,
@@ -220,77 +221,37 @@ fn queued_message_edit_binding_for_terminal(terminal_name: TerminalName) -> KeyB
     }
 }
 
-fn detect_nero_auto_hotkey_action(
-    key_event: KeyEvent,
-    f_key_fallback_enabled: bool,
-) -> Option<NeroAutoHotkeyAction> {
-    let has_ctrl = key_event.modifiers.contains(KeyModifiers::CONTROL);
-    let has_alt = key_event.modifiers.contains(KeyModifiers::ALT);
+fn detect_nero_auto_hotkey_action(key_event: KeyEvent) -> Option<NeroAutoHotkeyAction> {
     let has_shift = key_event.modifiers.contains(KeyModifiers::SHIFT);
 
-    // Fallback shortcuts for terminals where Ctrl+Shift+` is hard to emit.
-    // Some terminal/OS combos swallow Ctrl+Fn, so we accept Fn with:
-    // - no modifiers
-    // - Shift
-    // - Ctrl
-    // - Alt
-    // (and combinations of Shift/Ctrl/Alt)
-    let has_unsupported_modifiers = key_event.modifiers.contains(KeyModifiers::SUPER)
+    // Use only F-keys as the canonical control surface for nero-auto.
+    // Disallow Ctrl/Alt/Super layers to avoid accidental terminal or WM collisions.
+    let has_disallowed_modifiers = key_event.modifiers.contains(KeyModifiers::CONTROL)
+        || key_event.modifiers.contains(KeyModifiers::ALT)
+        || key_event.modifiers.contains(KeyModifiers::SUPER)
         || key_event.modifiers.contains(KeyModifiers::HYPER)
         || key_event.modifiers.contains(KeyModifiers::META);
-    let allow_f_key_fallback = f_key_fallback_enabled && !has_unsupported_modifiers;
-    if allow_f_key_fallback {
-        match key_event.code {
-            KeyCode::F(1) => return Some(NeroAutoHotkeyAction::ToggleEnabled),
-            KeyCode::F(2) => {
-                return Some(if has_shift {
-                    NeroAutoHotkeyAction::DecreaseDifficulty
-                } else {
-                    NeroAutoHotkeyAction::IncreaseDifficulty
-                });
-            }
-            KeyCode::F(3) => {
-                return Some(if has_shift {
-                    NeroAutoHotkeyAction::DecreaseMaxRounds
-                } else {
-                    NeroAutoHotkeyAction::CycleMaxRounds
-                });
-            }
-            // Terminal fallback for environments that swallow Shift+F3.
-            // F4 always means "max-rounds -".
-            KeyCode::F(4) => return Some(NeroAutoHotkeyAction::DecreaseMaxRounds),
-            // Some terminals encode Shift+F3 as F15.
-            KeyCode::F(15) => return Some(NeroAutoHotkeyAction::DecreaseMaxRounds),
-            _ => {}
-        }
-    }
-
-    let key_char = match key_event.code {
-        KeyCode::Char(c) => c,
-        _ => return None,
-    };
-    if key_char != '`' && key_char != '~' {
+    if has_disallowed_modifiers {
         return None;
     }
 
-    // Most terminals map Shift+` to '~'. Some only keep the base key plus SHIFT.
-    let has_shift_intent = key_event.modifiers.contains(KeyModifiers::SHIFT) || key_char == '~';
-    if !has_shift_intent {
-        return None;
+    match key_event.code {
+        KeyCode::F(5) => Some(NeroAutoHotkeyAction::ShowStatus),
+        KeyCode::F(1) => Some(NeroAutoHotkeyAction::ToggleEnabled),
+        KeyCode::F(2) => Some(if has_shift {
+            NeroAutoHotkeyAction::DecreaseDifficulty
+        } else {
+            NeroAutoHotkeyAction::IncreaseDifficulty
+        }),
+        KeyCode::F(3) => Some(if has_shift {
+            NeroAutoHotkeyAction::DecreaseMaxRounds
+        } else {
+            NeroAutoHotkeyAction::CycleMaxRounds
+        }),
+        // Some terminals encode Shift+F3 as F15.
+        KeyCode::F(4) | KeyCode::F(15) => Some(NeroAutoHotkeyAction::DecreaseMaxRounds),
+        _ => None,
     }
-
-    match (has_ctrl, has_alt) {
-        (false, false) => Some(NeroAutoHotkeyAction::ToggleEnabled),
-        (true, false) => Some(NeroAutoHotkeyAction::IncreaseDifficulty),
-        (false, true) => Some(NeroAutoHotkeyAction::CycleMaxRounds),
-        (true, true) => None,
-    }
-}
-
-fn nero_auto_f_key_fallback_enabled() -> bool {
-    std::env::var_os(NERO_AUTO_HOTKEY_F_KEY_FALLBACK_ENV)
-        .map(|raw| raw.to_string_lossy().trim().to_ascii_lowercase())
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
 }
 
 use crate::app_event::AppEvent;
@@ -3738,8 +3699,7 @@ impl ChatWidget {
         }
 
         if self.can_handle_nero_auto_hotkey()
-            && let Some(action) =
-                detect_nero_auto_hotkey_action(key_event, nero_auto_f_key_fallback_enabled())
+            && let Some(action) = detect_nero_auto_hotkey_action(key_event)
         {
             // Consume hotkey repeats so a held key does not toggle twice or leak
             // literal `~` into the composer.
@@ -8049,12 +8009,16 @@ impl ChatWidget {
     }
 
     fn should_apply_nero_auto_hotkey_action(&mut self, action: NeroAutoHotkeyAction) -> bool {
+        let debounce = match action {
+            NeroAutoHotkeyAction::ToggleEnabled => NERO_AUTO_TOGGLE_HOTKEY_DEBOUNCE,
+            _ => NERO_AUTO_HOTKEY_DEBOUNCE,
+        };
         let now = Instant::now();
         if let (Some(last_action), Some(last_at)) = (
             self.last_nero_auto_hotkey_action,
             self.last_nero_auto_hotkey_at,
         ) {
-            if last_action == action && now.duration_since(last_at) < NERO_AUTO_HOTKEY_DEBOUNCE {
+            if last_action == action && now.duration_since(last_at) < debounce {
                 return false;
             }
         }
@@ -8065,6 +8029,37 @@ impl ChatWidget {
     }
 
     fn apply_nero_auto_hotkey_action(&mut self, action: NeroAutoHotkeyAction) {
+        if matches!(action, NeroAutoHotkeyAction::ShowStatus) {
+            let max_rounds = if self.nero_auto_runtime.max_auto_rounds == 0 {
+                "∞".to_string()
+            } else {
+                self.nero_auto_runtime.max_auto_rounds.to_string()
+            };
+            self.add_info_message(
+                format!(
+                    "Nero-auto status · scope=current-session · state: enabled={}, diff-check={}, max-rounds={} ({})",
+                    if self.nero_auto_runtime.enabled { "on" } else { "off" },
+                    self.nero_auto_runtime.autonomy_level,
+                    max_rounds,
+                    self.nero_auto_runtime.max_auto_rounds
+                ),
+                Some(
+                    "Shortcuts: F5 status, F1 toggle, F2 diff+, Shift+F2 diff-, F3 max-rounds+, Shift+F3 max-rounds-, F4 max-rounds-."
+                        .to_string(),
+                ),
+            );
+            return;
+        }
+        if !self.is_session_configured() {
+            self.add_info_message(
+                "Nero-auto hotkeys are available after session startup.".to_string(),
+                Some(
+                    "Wait for the Codex header and first turn context, then use F1/F2/F3/F4/F5."
+                        .to_string(),
+                ),
+            );
+            return;
+        }
         if self.is_subagent_session {
             self.add_info_message(
                 "Nero-auto stays OFF for subagent sessions.".to_string(),
@@ -8072,6 +8067,7 @@ impl ChatWidget {
             );
             return;
         }
+        let previous_enabled = self.nero_auto_runtime.enabled;
         let next = next_nero_auto_runtime_config(self.nero_auto_runtime, action);
         if !self.submit_op(Op::OverrideTurnContext {
             cwd: None,
@@ -8096,9 +8092,12 @@ impl ChatWidget {
             next.max_auto_rounds.to_string()
         };
         let action_label = match action {
-            NeroAutoHotkeyAction::ToggleEnabled => {
-                format!("Nero-auto {}", if next.enabled { "ON" } else { "OFF" })
-            }
+            NeroAutoHotkeyAction::ShowStatus => "Nero-auto status".to_string(),
+            NeroAutoHotkeyAction::ToggleEnabled => format!(
+                "Nero-auto {} -> {}",
+                if previous_enabled { "ON" } else { "OFF" },
+                if next.enabled { "ON" } else { "OFF" }
+            ),
             NeroAutoHotkeyAction::IncreaseDifficulty => {
                 format!("Nero-auto diff-check -> {}", next.autonomy_level)
             }
@@ -8120,11 +8119,10 @@ impl ChatWidget {
                 max_rounds,
                 next.max_auto_rounds
             ),
-            Some(format!(
-                "Shortcuts: Legacy Shift+` toggle, Ctrl+Shift+` diff+, Alt+Shift+` max-rounds. F-key fallback (F1/F2/F3/F4): {} (env {}).",
-                if nero_auto_f_key_fallback_enabled() { "on" } else { "off" },
-                NERO_AUTO_HOTKEY_F_KEY_FALLBACK_ENV,
-            )),
+            Some(
+                "Shortcuts: F5 status, F1 toggle, F2 diff+, Shift+F2 diff-, F3 max-rounds+, Shift+F3 max-rounds-, F4 max-rounds-."
+                    .to_string(),
+            ),
         );
     }
 
@@ -8886,6 +8884,7 @@ fn next_nero_auto_runtime_config(
     action: NeroAutoHotkeyAction,
 ) -> NeroAutoRuntimeConfig {
     match action {
+        NeroAutoHotkeyAction::ShowStatus => current,
         NeroAutoHotkeyAction::ToggleEnabled => NeroAutoRuntimeConfig {
             enabled: !current.enabled,
             ..current
