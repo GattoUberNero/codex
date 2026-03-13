@@ -1088,6 +1088,18 @@ fn session_source_disables_nero_auto(session_source: &SessionSource) -> bool {
     matches!(session_source, SessionSource::SubAgent(_))
 }
 
+fn session_source_allows_after_agent_hooks(session_source: &SessionSource) -> bool {
+    if !matches!(session_source, SessionSource::SubAgent(_)) {
+        return true;
+    }
+    matches!(
+        std::env::var("CODEXN_NERO_HOOK_ALLOW_SUBAGENT")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase()),
+        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on")
+    )
+}
+
 fn effective_nero_auto_runtime(
     runtime: NeroAutoRuntimeConfig,
     session_source: &SessionSource,
@@ -5915,37 +5927,47 @@ pub(crate) async fn run_turn(
                         .join("log")
                         .join(NERO_HOOK_DELIVERY_LOG_FILENAME);
                     let configured_after_agent_hooks = sess.hooks().after_agent_hook_count();
+                    let after_agent_hooks_skipped_for_subagent =
+                        !session_source_allows_after_agent_hooks(&turn_context.session_source);
                     let hook_thread_name = {
                         let state = sess.state.lock().await;
                         state.session_configuration.thread_name.clone()
                     };
-                    let hook_outcomes = sess
-                        .hooks()
-                        .dispatch(HookPayload {
-                            session_id: sess.conversation_id,
-                            cwd: turn_context.cwd.clone(),
-                            client: turn_context.app_server_client_name.clone(),
-                            session_source: Some(turn_context.session_source.to_string()),
-                            session_agent_role: turn_context.session_source.get_agent_role(),
-                            nero_auto_runtime: Some({
-                                let state = sess.state.lock().await;
-                                effective_nero_auto_runtime(
-                                    state.session_configuration.nero_auto_runtime,
-                                    &turn_context.session_source,
-                                )
-                            }),
-                            triggered_at: chrono::Utc::now(),
-                            hook_event: HookEvent::AfterAgent {
-                                event: HookEventAfterAgent {
-                                    thread_id: sess.conversation_id,
-                                    thread_name: hook_thread_name,
-                                    turn_id: turn_context.sub_id.clone(),
-                                    input_messages: sampling_request_input_messages,
-                                    last_assistant_message: last_agent_message.clone(),
+                    let hook_outcomes = if after_agent_hooks_skipped_for_subagent {
+                        debug!(
+                            turn_id = %turn_context.sub_id,
+                            session_source = %turn_context.session_source,
+                            "skipping after_agent hooks for subagent session source"
+                        );
+                        Vec::new()
+                    } else {
+                        sess.hooks()
+                            .dispatch(HookPayload {
+                                session_id: sess.conversation_id,
+                                cwd: turn_context.cwd.clone(),
+                                client: turn_context.app_server_client_name.clone(),
+                                session_source: Some(turn_context.session_source.to_string()),
+                                session_agent_role: turn_context.session_source.get_agent_role(),
+                                nero_auto_runtime: Some({
+                                    let state = sess.state.lock().await;
+                                    effective_nero_auto_runtime(
+                                        state.session_configuration.nero_auto_runtime,
+                                        &turn_context.session_source,
+                                    )
+                                }),
+                                triggered_at: chrono::Utc::now(),
+                                hook_event: HookEvent::AfterAgent {
+                                    event: HookEventAfterAgent {
+                                        thread_id: sess.conversation_id,
+                                        thread_name: hook_thread_name,
+                                        turn_id: turn_context.sub_id.clone(),
+                                        input_messages: sampling_request_input_messages,
+                                        last_assistant_message: last_agent_message.clone(),
+                                    },
                                 },
-                            },
-                        })
-                        .await;
+                            })
+                            .await
+                    };
                     debug!(
                         turn_id = %turn_context.sub_id,
                         hook_outcomes = hook_outcomes.len(),
@@ -5964,7 +5986,9 @@ pub(crate) async fn run_turn(
                         });
                     let all_after_agent_hooks_failed = configured_after_agent_hooks > 0
                         && failed_hook_outcomes == hook_outcomes.len();
-                    let hook_dispatch_status = if configured_after_agent_hooks == 0 {
+                    let hook_dispatch_status = if after_agent_hooks_skipped_for_subagent {
+                        "skipped_subagent_session"
+                    } else if configured_after_agent_hooks == 0 {
                         "no_hooks_configured"
                     } else if hook_outcomes.is_empty() {
                         "no_outcomes"
@@ -5988,6 +6012,7 @@ pub(crate) async fn run_turn(
                             "configured_after_agent_hooks": configured_after_agent_hooks,
                             "hook_outcomes": hook_outcomes.len(),
                             "failed_hook_outcomes": failed_hook_outcomes,
+                            "after_agent_hooks_skipped_for_subagent": after_agent_hooks_skipped_for_subagent,
                             "session_source": turn_context.session_source.to_string(),
                         }),
                     )
