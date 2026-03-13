@@ -453,7 +453,15 @@ fn nero_hook_format_label(format: &NeroHookMsgFormat) -> &'static str {
     }
 }
 
-fn append_nero_hook_delivery_audit(
+fn normalized_nero_hook_status_kind(status: Option<&codex_hooks::NeroHookMsgStatus>) -> Option<String> {
+    status.map(|item| item.kind.trim().to_ascii_lowercase())
+}
+
+fn is_runtime_delivery_status_kind(status_kind: Option<&str>) -> bool {
+    !matches!(status_kind, Some("state") | Some("auto"))
+}
+
+async fn append_nero_hook_delivery_audit(
     log_path: &Path,
     conversation_id: &ThreadId,
     turn_context: &TurnContext,
@@ -497,43 +505,41 @@ fn append_nero_hook_delivery_audit(
             return;
         }
     };
-    tokio::spawn(async move {
-        if let Some(parent) = log_path.parent()
-            && let Err(err) = tokio::fs::create_dir_all(parent).await
-        {
+    if let Some(parent) = log_path.parent()
+        && let Err(err) = tokio::fs::create_dir_all(parent).await
+    {
+        debug!(
+            error = %err,
+            path = %log_path.display(),
+            "failed to create nero hook delivery audit directory"
+        );
+        return;
+    }
+    let mut file = match TokioOpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .await
+    {
+        Ok(file) => file,
+        Err(err) => {
             debug!(
                 error = %err,
                 path = %log_path.display(),
-                "failed to create nero hook delivery audit directory"
+                "failed to open nero hook delivery audit file"
             );
             return;
         }
-        let mut file = match TokioOpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .await
-        {
-            Ok(file) => file,
-            Err(err) => {
-                debug!(
-                    error = %err,
-                    path = %log_path.display(),
-                    "failed to open nero hook delivery audit file"
-                );
-                return;
-            }
-        };
-        let mut line = serialized;
-        line.push('\n');
-        if let Err(err) = file.write_all(line.as_bytes()).await {
-            debug!(
-                error = %err,
-                path = %log_path.display(),
-                "failed to append nero hook delivery audit entry"
-            );
-        }
-    });
+    };
+    let mut line = serialized;
+    line.push('\n');
+    if let Err(err) = file.write_all(line.as_bytes()).await {
+        debug!(
+            error = %err,
+            path = %log_path.display(),
+            "failed to append nero hook delivery audit entry"
+        );
+    }
 }
 
 impl Codex {
@@ -5956,6 +5962,12 @@ pub(crate) async fn run_turn(
                                 actions = actions.len(),
                                 "processing after_agent hook actions"
                             );
+                            let mut hook_runtime_msg_expected = false;
+                            let mut hook_runtime_msg_delivered = false;
+                            let mut hook_nero_msg_total = 0usize;
+                            let mut hook_nero_msg_throttled = 0usize;
+                            let mut hook_auto_user_replies_pending: Vec<String> = Vec::new();
+                            let mut hook_auto_user_replies_blocked = 0usize;
                             for action in actions {
                                 match action {
                                     HookAction::NeroHookMsg {
@@ -5966,12 +5978,21 @@ pub(crate) async fn run_turn(
                                         status,
                                         msg,
                                     } => {
+                                        hook_nero_msg_total = hook_nero_msg_total.saturating_add(1);
                                         let msg_full_len = msg.full.len();
                                         let msg_short_len = msg.short.len();
                                         let status_kind =
                                             status.as_ref().map(|item| item.kind.clone());
                                         let status_text =
                                             status.as_ref().map(|item| item.text.clone());
+                                        let status_kind_normalized =
+                                            normalized_nero_hook_status_kind(status.as_ref());
+                                        let runtime_delivery_candidate = is_runtime_delivery_status_kind(
+                                            status_kind_normalized.as_deref(),
+                                        );
+                                        if runtime_delivery_candidate {
+                                            hook_runtime_msg_expected = true;
+                                        }
                                         if let Some(remaining) = sess
                                             .nero_hook_msg_throttle_remaining(
                                                 &hook_name,
@@ -6012,6 +6033,8 @@ pub(crate) async fn run_turn(
                                                 remaining_ms = remaining.as_millis(),
                                                 "skipped nero_hook_msg due to freq throttle"
                                             );
+                                            hook_nero_msg_throttled =
+                                                hook_nero_msg_throttled.saturating_add(1);
                                             append_nero_hook_delivery_audit(
                                                 &hook_delivery_log_path,
                                                 &sess.conversation_id,
@@ -6038,8 +6061,13 @@ pub(crate) async fn run_turn(
                                                         "kind": status_kind,
                                                         "text": status_text,
                                                     },
+                                                    "delivery_contract": {
+                                                        "runtime_candidate": runtime_delivery_candidate,
+                                                        "status_kind_normalized": status_kind_normalized,
+                                                    },
                                                 }),
-                                            );
+                                            )
+                                            .await;
                                             continue;
                                         }
                                         let mut delivered_tui = false;
@@ -6073,6 +6101,9 @@ pub(crate) async fn run_turn(
                                             )
                                             .await;
                                             delivered_agent = true;
+                                        }
+                                        if runtime_delivery_candidate && (delivered_tui || delivered_agent) {
+                                            hook_runtime_msg_delivered = true;
                                         }
                                         debug!(
                                             turn_id = %turn_context.sub_id,
@@ -6108,8 +6139,14 @@ pub(crate) async fn run_turn(
                                                     "kind": status_kind,
                                                     "text": status_text,
                                                 },
+                                                "delivery_contract": {
+                                                    "runtime_candidate": runtime_delivery_candidate,
+                                                    "status_kind_normalized": status_kind_normalized,
+                                                    "runtime_delivered_so_far": hook_runtime_msg_delivered,
+                                                },
                                             }),
-                                        );
+                                        )
+                                        .await;
                                     }
                                     HookAction::VisibleNote { message } => {
                                         let message_len = message.len();
@@ -6140,7 +6177,8 @@ pub(crate) async fn run_turn(
                                             json!({
                                                 "message_len": message_len,
                                             }),
-                                        );
+                                        )
+                                        .await;
                                     }
                                     HookAction::ContextNote { message } => {
                                         let message_len = message.len();
@@ -6173,7 +6211,8 @@ pub(crate) async fn run_turn(
                                             json!({
                                                 "message_len": message_len,
                                             }),
-                                        );
+                                        )
+                                        .await;
                                     }
                                     HookAction::DualNote {
                                         tui_message,
@@ -6227,7 +6266,8 @@ pub(crate) async fn run_turn(
                                                     "agent": agent_message_len,
                                                 },
                                             }),
-                                        );
+                                        )
+                                        .await;
                                     }
                                     HookAction::AutoUserReply { message } => {
                                         if session_source_disables_nero_auto(
@@ -6251,14 +6291,38 @@ pub(crate) async fn run_turn(
                                                 json!({
                                                     "message_len": message.len(),
                                                 }),
-                                            );
+                                            )
+                                            .await;
                                             continue;
                                         }
                                         debug!(
                                             turn_id = %turn_context.sub_id,
                                             hook_name = %hook_name,
-                                            "queued deferred auto_user_reply from hook"
+                                            "queued pending auto_user_reply from hook (awaiting delivery contract)"
                                         );
+                                        append_nero_hook_delivery_audit(
+                                            &hook_delivery_log_path,
+                                            &sess.conversation_id,
+                                            turn_context.as_ref(),
+                                            &hook_name,
+                                            "auto_user_reply",
+                                            "pending-delivery-contract",
+                                            false,
+                                            false,
+                                            json!({
+                                                "message_len": message.len(),
+                                            }),
+                                        )
+                                        .await;
+                                        hook_auto_user_replies_pending.push(message);
+                                    }
+                                }
+                            }
+                            if !hook_auto_user_replies_pending.is_empty() {
+                                let delivery_contract_satisfied =
+                                    !hook_runtime_msg_expected || hook_runtime_msg_delivered;
+                                if delivery_contract_satisfied {
+                                    for message in hook_auto_user_replies_pending {
                                         append_nero_hook_delivery_audit(
                                             &hook_delivery_log_path,
                                             &sess.conversation_id,
@@ -6270,13 +6334,87 @@ pub(crate) async fn run_turn(
                                             false,
                                             json!({
                                                 "message_len": message.len(),
+                                                "delivery_contract": {
+                                                    "runtime_msg_expected": hook_runtime_msg_expected,
+                                                    "runtime_msg_delivered": hook_runtime_msg_delivered,
+                                                    "contract_satisfied": delivery_contract_satisfied,
+                                                },
                                             }),
-                                        );
+                                        )
+                                        .await;
                                         deferred_auto_user_replies
                                             .push((hook_name.clone(), message));
                                     }
+                                } else {
+                                    hook_auto_user_replies_blocked =
+                                        hook_auto_user_replies_pending.len();
+                                    warn!(
+                                        turn_id = %turn_context.sub_id,
+                                        hook_name = %hook_name,
+                                        pending_auto_user_replies = hook_auto_user_replies_pending.len(),
+                                        runtime_msg_expected = hook_runtime_msg_expected,
+                                        runtime_msg_delivered = hook_runtime_msg_delivered,
+                                        "blocked auto_user_reply actions because runtime hook message delivery was not confirmed for current turn"
+                                    );
+                                    let contract_warning = nero_hook_tui_warning_message(
+                                        "Auto delivery blocked: runtime hook message was not delivered in this turn.",
+                                        NeroHookMsgFormat::Block,
+                                        Some(("error", "delivery-contract")),
+                                    );
+                                    sess.send_event(
+                                        &turn_context,
+                                        EventMsg::Warning(WarningEvent {
+                                            message: contract_warning,
+                                        }),
+                                    )
+                                    .await;
+                                    for message in hook_auto_user_replies_pending {
+                                        append_nero_hook_delivery_audit(
+                                            &hook_delivery_log_path,
+                                            &sess.conversation_id,
+                                            turn_context.as_ref(),
+                                            &hook_name,
+                                            "auto_user_reply",
+                                            "blocked-delivery-contract",
+                                            false,
+                                            false,
+                                            json!({
+                                                "message_len": message.len(),
+                                                "delivery_contract": {
+                                                    "runtime_msg_expected": hook_runtime_msg_expected,
+                                                    "runtime_msg_delivered": hook_runtime_msg_delivered,
+                                                    "contract_satisfied": delivery_contract_satisfied,
+                                                },
+                                            }),
+                                        )
+                                        .await;
+                                    }
                                 }
                             }
+                            let contract_status = if hook_auto_user_replies_blocked > 0 {
+                                "fail-closed-blocked"
+                            } else {
+                                "ok"
+                            };
+                            append_nero_hook_delivery_audit(
+                                &hook_delivery_log_path,
+                                &sess.conversation_id,
+                                turn_context.as_ref(),
+                                &hook_name,
+                                "delivery_contract",
+                                contract_status,
+                                hook_runtime_msg_delivered,
+                                false,
+                                json!({
+                                    "runtime_msg_expected": hook_runtime_msg_expected,
+                                    "runtime_msg_delivered": hook_runtime_msg_delivered,
+                                    "contract_satisfied": !hook_runtime_msg_expected || hook_runtime_msg_delivered,
+                                    "nero_hook_msg_total": hook_nero_msg_total,
+                                    "nero_hook_msg_throttled": hook_nero_msg_throttled,
+                                    "auto_user_replies_blocked": hook_auto_user_replies_blocked,
+                                }),
+                            )
+                            .await;
                         }
                         match result {
                             HookResult::Success => {}
@@ -6299,7 +6437,8 @@ pub(crate) async fn run_turn(
                                     json!({
                                         "error": error.to_string(),
                                     }),
-                                );
+                                )
+                                .await;
                             }
                             HookResult::FailedAbort(error) => {
                                 let message = format!(
@@ -6323,7 +6462,8 @@ pub(crate) async fn run_turn(
                                     json!({
                                         "error": error.to_string(),
                                     }),
-                                );
+                                )
+                                .await;
                                 if abort_message.is_none() {
                                     abort_message = Some(message);
                                 }
