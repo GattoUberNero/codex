@@ -3698,17 +3698,21 @@ impl ChatWidget {
             return;
         }
 
-        if self.can_handle_nero_auto_hotkey()
-            && let Some(action) = detect_nero_auto_hotkey_action(key_event)
-        {
-            // Consume hotkey repeats so a held key does not toggle twice or leak
-            // literal `~` into the composer.
-            if key_event.kind == KeyEventKind::Press
-                && self.should_apply_nero_auto_hotkey_action(action)
-            {
-                self.apply_nero_auto_hotkey_action(action);
+        if let Some(action) = detect_nero_auto_hotkey_action(key_event) {
+            // Status must stay available even with pending composer text, because it is read-only.
+            // Mutating actions still require the safe idle surface.
+            let can_handle_hotkey = matches!(action, NeroAutoHotkeyAction::ShowStatus)
+                || self.can_handle_nero_auto_hotkey();
+            if can_handle_hotkey {
+                // Consume hotkey repeats so a held key does not toggle twice or leak
+                // literal `~` into the composer.
+                if key_event.kind == KeyEventKind::Press
+                    && self.should_apply_nero_auto_hotkey_action(action)
+                {
+                    self.apply_nero_auto_hotkey_action(action);
+                }
+                return;
             }
-            return;
         }
 
         match key_event {

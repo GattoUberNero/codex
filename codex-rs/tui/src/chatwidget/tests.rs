@@ -5294,6 +5294,42 @@ async fn nero_auto_hotkey_status_reports_without_mutation() {
 }
 
 #[tokio::test]
+async fn nero_auto_hotkey_status_works_with_pending_composer_text() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.set_nero_auto_runtime_context(
+        NeroAutoRuntimeConfig {
+            enabled: true,
+            autonomy_level: 7,
+            max_auto_rounds: 4,
+        },
+        SessionSource::Cli,
+    );
+    chat.bottom_pane
+        .set_composer_text("draft".to_string(), Vec::new(), Vec::new());
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE));
+    let messages = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines.as_slice()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        messages.contains("Nero-auto status"),
+        "F5 status should still work with pending composer text",
+    );
+    assert_eq!(chat.bottom_pane.composer_text(), "draft");
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+    assert_eq!(
+        chat.nero_auto_runtime,
+        NeroAutoRuntimeConfig {
+            enabled: true,
+            autonomy_level: 7,
+            max_auto_rounds: 4,
+        }
+    );
+}
+
+#[tokio::test]
 async fn nero_auto_hotkeys_function_keys_ignore_ctrl_and_alt_modifiers() {
     let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
     chat.thread_id = Some(ThreadId::new());
