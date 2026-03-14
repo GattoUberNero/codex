@@ -5929,9 +5929,15 @@ pub(crate) async fn run_turn(
                     let configured_after_agent_hooks = sess.hooks().after_agent_hook_count();
                     let after_agent_hooks_skipped_for_subagent =
                         !session_source_allows_after_agent_hooks(&turn_context.session_source);
-                    let hook_thread_name = {
+                    let (hook_thread_name, hook_nero_auto_runtime) = {
                         let state = sess.state.lock().await;
-                        state.session_configuration.thread_name.clone()
+                        (
+                            state.session_configuration.thread_name.clone(),
+                            effective_nero_auto_runtime(
+                                state.session_configuration.nero_auto_runtime,
+                                &turn_context.session_source,
+                            ),
+                        )
                     };
                     let hook_outcomes = if after_agent_hooks_skipped_for_subagent {
                         debug!(
@@ -5948,13 +5954,7 @@ pub(crate) async fn run_turn(
                                 client: turn_context.app_server_client_name.clone(),
                                 session_source: Some(turn_context.session_source.to_string()),
                                 session_agent_role: turn_context.session_source.get_agent_role(),
-                                nero_auto_runtime: Some({
-                                    let state = sess.state.lock().await;
-                                    effective_nero_auto_runtime(
-                                        state.session_configuration.nero_auto_runtime,
-                                        &turn_context.session_source,
-                                    )
-                                }),
+                                nero_auto_runtime: Some(hook_nero_auto_runtime),
                                 triggered_at: chrono::Utc::now(),
                                 hook_event: HookEvent::AfterAgent {
                                     event: HookEventAfterAgent {
@@ -6014,6 +6014,9 @@ pub(crate) async fn run_turn(
                             "failed_hook_outcomes": failed_hook_outcomes,
                             "after_agent_hooks_skipped_for_subagent": after_agent_hooks_skipped_for_subagent,
                             "session_source": turn_context.session_source.to_string(),
+                            "hook_runtime_auto_enabled": hook_nero_auto_runtime.enabled,
+                            "hook_runtime_auto_autonomy_level": hook_nero_auto_runtime.autonomy_level,
+                            "hook_runtime_auto_max_rounds": hook_nero_auto_runtime.max_auto_rounds,
                         }),
                     )
                     .await;

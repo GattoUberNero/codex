@@ -8048,7 +8048,7 @@ impl ChatWidget {
                     self.nero_auto_runtime.max_auto_rounds
                 ),
                 Some(
-                    "Shortcuts: F5 status, F1 toggle, F2 diff+, Shift+F2 diff-, F3 max-rounds+, Shift+F3 max-rounds-, F4 max-rounds-."
+                    "Shortcuts: F5 status, F1 toggle, F2 diff+, Shift+F2 diff-, F3 max-rounds+, Shift+F3 max-rounds-, F4 max-rounds-. This is live current-session state; NERO HOOK SYSTEM block reflects the last completed turn."
                         .to_string(),
                 ),
             );
@@ -8124,7 +8124,7 @@ impl ChatWidget {
                 next.max_auto_rounds
             ),
             Some(
-                "Shortcuts: F5 status, F1 toggle, F2 diff+, Shift+F2 diff-, F3 max-rounds+, Shift+F3 max-rounds-, F4 max-rounds-."
+                "Shortcuts: F5 status, F1 toggle, F2 diff+, Shift+F2 diff-, F3 max-rounds+, Shift+F3 max-rounds-, F4 max-rounds-. NERO HOOK SYSTEM updates on the next completed turn."
                     .to_string(),
             ),
         );
