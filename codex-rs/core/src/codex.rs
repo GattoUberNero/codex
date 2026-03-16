@@ -463,6 +463,26 @@ fn is_runtime_delivery_status_kind(status_kind: Option<&str>) -> bool {
     !matches!(status_kind, Some("state") | Some("auto"))
 }
 
+fn runtime_delivery_contract_satisfied(
+    runtime_msg_expected: bool,
+    runtime_msg_delivered: bool,
+) -> bool {
+    !runtime_msg_expected || runtime_msg_delivered
+}
+
+fn runtime_delivery_contract_status(
+    contract_satisfied: bool,
+    auto_user_replies_blocked: usize,
+) -> &'static str {
+    if contract_satisfied {
+        "ok"
+    } else if auto_user_replies_blocked > 0 {
+        "fail-closed-blocked"
+    } else {
+        "failed-runtime-message-missing"
+    }
+}
+
 const NERO_HOOK_STATUS_META_MAX_STRING_CHARS: usize = 512;
 
 fn truncate_audit_meta_string(input: &str) -> String {
@@ -6200,9 +6220,6 @@ pub(crate) async fn run_turn(
                                             is_runtime_delivery_status_kind(
                                                 status_kind_normalized.as_deref(),
                                             );
-                                        if runtime_delivery_candidate {
-                                            hook_runtime_msg_expected = true;
-                                        }
                                         if let Some(remaining) = sess
                                             .nero_hook_msg_throttle_remaining(
                                                 &hook_name,
@@ -6280,6 +6297,9 @@ pub(crate) async fn run_turn(
                                             )
                                             .await;
                                             continue;
+                                        }
+                                        if runtime_delivery_candidate {
+                                            hook_runtime_msg_expected = true;
                                         }
                                         let mut delivered_tui = false;
                                         let mut delivered_agent = false;
@@ -6532,10 +6552,13 @@ pub(crate) async fn run_turn(
                                     }
                                 }
                             }
+                            let hook_delivery_contract_satisfied =
+                                runtime_delivery_contract_satisfied(
+                                    hook_runtime_msg_expected,
+                                    hook_runtime_msg_delivered,
+                                );
                             if !hook_auto_user_replies_pending.is_empty() {
-                                let delivery_contract_satisfied =
-                                    !hook_runtime_msg_expected || hook_runtime_msg_delivered;
-                                if delivery_contract_satisfied {
+                                if hook_delivery_contract_satisfied {
                                     for message in hook_auto_user_replies_pending {
                                         append_nero_hook_delivery_audit(
                                             &hook_delivery_log_path,
@@ -6551,7 +6574,7 @@ pub(crate) async fn run_turn(
                                                 "delivery_contract": {
                                                     "runtime_msg_expected": hook_runtime_msg_expected,
                                                     "runtime_msg_delivered": hook_runtime_msg_delivered,
-                                                    "contract_satisfied": delivery_contract_satisfied,
+                                                    "contract_satisfied": hook_delivery_contract_satisfied,
                                                 },
                                             }),
                                         )
@@ -6597,7 +6620,7 @@ pub(crate) async fn run_turn(
                                                 "delivery_contract": {
                                                     "runtime_msg_expected": hook_runtime_msg_expected,
                                                     "runtime_msg_delivered": hook_runtime_msg_delivered,
-                                                    "contract_satisfied": delivery_contract_satisfied,
+                                                    "contract_satisfied": hook_delivery_contract_satisfied,
                                                 },
                                             }),
                                         )
@@ -6605,11 +6628,10 @@ pub(crate) async fn run_turn(
                                     }
                                 }
                             }
-                            let contract_status = if hook_auto_user_replies_blocked > 0 {
-                                "fail-closed-blocked"
-                            } else {
-                                "ok"
-                            };
+                            let contract_status = runtime_delivery_contract_status(
+                                hook_delivery_contract_satisfied,
+                                hook_auto_user_replies_blocked,
+                            );
                             append_nero_hook_delivery_audit(
                                 &hook_delivery_log_path,
                                 &sess.conversation_id,
@@ -6622,7 +6644,7 @@ pub(crate) async fn run_turn(
                                 json!({
                                     "runtime_msg_expected": hook_runtime_msg_expected,
                                     "runtime_msg_delivered": hook_runtime_msg_delivered,
-                                    "contract_satisfied": !hook_runtime_msg_expected || hook_runtime_msg_delivered,
+                                    "contract_satisfied": hook_delivery_contract_satisfied,
                                     "nero_hook_msg_total": hook_nero_msg_total,
                                     "nero_hook_msg_throttled": hook_nero_msg_throttled,
                                     "auto_user_replies_blocked": hook_auto_user_replies_blocked,
@@ -11655,6 +11677,27 @@ mod tests {
         assert!(
             remaining.is_none(),
             "emit after reset should not be throttled (compaction reset semantics)"
+        );
+    }
+
+    #[test]
+    fn runtime_delivery_contract_satisfied_matches_expected_delivery_matrix() {
+        assert!(runtime_delivery_contract_satisfied(false, false));
+        assert!(runtime_delivery_contract_satisfied(false, true));
+        assert!(runtime_delivery_contract_satisfied(true, true));
+        assert!(!runtime_delivery_contract_satisfied(true, false));
+    }
+
+    #[test]
+    fn runtime_delivery_contract_status_marks_unsatisfied_contract_as_failed() {
+        assert_eq!(runtime_delivery_contract_status(true, 0), "ok");
+        assert_eq!(
+            runtime_delivery_contract_status(false, 2),
+            "fail-closed-blocked"
+        );
+        assert_eq!(
+            runtime_delivery_contract_status(false, 0),
+            "failed-runtime-message-missing"
         );
     }
 
