@@ -109,9 +109,10 @@ pub const X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER: &str =
     "x-responsesapi-include-timing-metrics";
 const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
 const CODEXN_AUTH_ROTATE_CMD_ENV: &str = "CODEXN_AUTH_ROTATE_CMD";
+const CODEXN_AUTH_ROTATE_CMD_TIMEOUT_MS_ENV: &str = "CODEXN_AUTH_ROTATE_CMD_TIMEOUT_MS";
 const CODEXN_ROTATION_REASON_USAGE_LIMIT: &str = "usage_limit_reached";
 const CODEXN_ROTATION_REASON_QUOTA_EXCEEDED: &str = "quota_exceeded";
-const AUTH_ROTATE_CMD_TIMEOUT: Duration = Duration::from_secs(20);
+const AUTH_ROTATE_CMD_TIMEOUT_DEFAULT_MS: u64 = 20_000;
 
 pub fn ws_version_from_features(config: &Config) -> bool {
     config
@@ -1317,7 +1318,9 @@ async fn handle_unauthorized(
 fn is_usage_limit_or_quota_error(err: &ApiError) -> bool {
     match err {
         ApiError::QuotaExceeded => true,
-        ApiError::Transport(transport) => is_usage_limit_reached_transport(transport),
+        ApiError::Transport(transport) => {
+            is_usage_limit_reached_transport(transport) || is_quota_exceeded_transport(transport)
+        }
         _ => false,
     }
 }
@@ -1325,6 +1328,9 @@ fn is_usage_limit_or_quota_error(err: &ApiError) -> bool {
 fn rotation_reason_for_error(err: &ApiError) -> &'static str {
     match err {
         ApiError::QuotaExceeded => CODEXN_ROTATION_REASON_QUOTA_EXCEEDED,
+        ApiError::Transport(transport) if is_quota_exceeded_transport(transport) => {
+            CODEXN_ROTATION_REASON_QUOTA_EXCEEDED
+        }
         ApiError::Transport(transport) if is_usage_limit_reached_transport(transport) => {
             CODEXN_ROTATION_REASON_USAGE_LIMIT
         }
@@ -1341,6 +1347,15 @@ fn is_usage_limit_reached_transport(transport: &TransportError) -> bool {
     }
 }
 
+fn is_quota_exceeded_transport(transport: &TransportError) -> bool {
+    match transport {
+        TransportError::Http { status, body, .. } if *status == StatusCode::TOO_MANY_REQUESTS => {
+            body.as_deref().is_some_and(is_quota_exceeded_body)
+        }
+        _ => false,
+    }
+}
+
 fn is_usage_limit_reached_body(body: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
@@ -1351,6 +1366,26 @@ fn is_usage_limit_reached_body(body: &str) -> bool {
                 .map(|error_type| error_type == "usage_limit_reached")
         })
         .unwrap_or_else(|| body.contains("usage_limit_reached"))
+}
+
+fn is_quota_exceeded_body(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|json| {
+            json.get("error").and_then(|error| {
+                let code = error.get("code").and_then(serde_json::Value::as_str);
+                let error_type = error.get("type").and_then(serde_json::Value::as_str);
+                if code == Some("insufficient_quota")
+                    || error_type == Some("insufficient_quota")
+                    || error_type == Some("quota_exceeded")
+                {
+                    Some(true)
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_else(|| body.contains("insufficient_quota") || body.contains("quota_exceeded"))
 }
 
 /// Handles usage/quota failures by asking the external auth owner for a fresh
@@ -1436,14 +1471,15 @@ async fn try_recover_with_auth_rotate_command(
     command.stderr(std::process::Stdio::piped());
     command.stdout(std::process::Stdio::null());
 
-    let output = timeout(AUTH_ROTATE_CMD_TIMEOUT, command.output())
+    let command_timeout = auth_rotate_command_timeout();
+    let output = timeout(command_timeout, command.output())
         .await
         .map_err(|_| {
             CodexErr::Io(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 format!(
-                    "auth rotation command timed out after {}s",
-                    AUTH_ROTATE_CMD_TIMEOUT.as_secs()
+                    "auth rotation command timed out after {}ms",
+                    command_timeout.as_millis()
                 ),
             ))
         })?
@@ -1466,6 +1502,17 @@ async fn try_recover_with_auth_rotate_command(
         auth_manager.reload();
     }
     Ok(true)
+}
+
+fn auth_rotate_command_timeout() -> Duration {
+    let timeout_ms = std::env::var(CODEXN_AUTH_ROTATE_CMD_TIMEOUT_MS_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(AUTH_ROTATE_CMD_TIMEOUT_DEFAULT_MS);
+    Duration::from_millis(timeout_ms)
 }
 
 fn parse_auth_rotate_command(raw: &str) -> Result<(OsString, Vec<OsString>)> {
@@ -1547,6 +1594,7 @@ impl WebsocketTelemetry for ApiTelemetry {
 #[cfg(test)]
 mod tests {
     use super::CODEXN_AUTH_ROTATE_CMD_ENV;
+    use super::CODEXN_AUTH_ROTATE_CMD_TIMEOUT_MS_ENV;
     use super::CODEXN_ROTATION_REASON_QUOTA_EXCEEDED;
     use super::CODEXN_ROTATION_REASON_USAGE_LIMIT;
     use super::ModelClient;
@@ -1676,6 +1724,25 @@ mod tests {
     }
 
     #[test]
+    fn usage_limit_or_quota_error_matches_transport_quota_error() {
+        let err = ApiError::Transport(TransportError::Http {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            url: Some("https://example.com/v1/responses".to_string()),
+            headers: None,
+            body: Some(
+                serde_json::json!({
+                    "error": {
+                        "code": "insufficient_quota",
+                        "message": "quota exceeded"
+                    }
+                })
+                .to_string(),
+            ),
+        });
+        assert!(is_usage_limit_or_quota_error(&err));
+    }
+
+    #[test]
     fn rotation_reason_tracks_quota_and_usage_limit_errors() {
         let quota_error = ApiError::QuotaExceeded;
         assert_eq!(
@@ -1697,6 +1764,25 @@ mod tests {
         assert_eq!(
             rotation_reason_for_error(&usage_error),
             CODEXN_ROTATION_REASON_USAGE_LIMIT
+        );
+
+        let transport_quota_error = ApiError::Transport(TransportError::Http {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            url: Some("https://example.com/v1/responses".to_string()),
+            headers: None,
+            body: Some(
+                serde_json::json!({
+                    "error": {
+                        "code": "insufficient_quota",
+                        "message": "quota exceeded"
+                    }
+                })
+                .to_string(),
+            ),
+        });
+        assert_eq!(
+            rotation_reason_for_error(&transport_quota_error),
+            CODEXN_ROTATION_REASON_QUOTA_EXCEEDED
         );
     }
 
@@ -1791,6 +1877,27 @@ mod tests {
         assert!(attempted);
         let rendered = err.to_string();
         assert!(rendered.contains("auth rotation command failed"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    #[serial]
+    async fn auth_rotate_command_recovery_surfaces_timeout() {
+        let _command_guard = EnvVarGuard::set(CODEXN_AUTH_ROTATE_CMD_ENV, "sh -c 'sleep 1'");
+        let _timeout_guard = EnvVarGuard::set(CODEXN_AUTH_ROTATE_CMD_TIMEOUT_MS_ENV, "5");
+        let mut attempted = false;
+        let err = try_recover_with_auth_rotate_command(
+            None,
+            &mut attempted,
+            CODEXN_ROTATION_REASON_USAGE_LIMIT,
+        )
+        .await
+        .expect_err("long-running command should time out");
+
+        assert!(attempted);
+        let rendered = err.to_string();
+        assert!(rendered.contains("timed out"));
+        assert!(rendered.contains("5ms"));
     }
 
     #[tokio::test]

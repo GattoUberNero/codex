@@ -838,6 +838,204 @@ async fn remote_pre_turn_compaction_usage_limit_recovers_via_auth_rotate_command
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(auth_rotate_cmd_env)]
+async fn remote_pre_turn_compaction_quota_recovers_via_auth_rotate_command() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    const AUTH_ROTATE_CMD_ENV: &str = "CODEXN_AUTH_ROTATE_CMD";
+
+    let _guard = EnvVarGuard::set(AUTH_ROTATE_CMD_ENV, "true");
+    let harness = TestCodexHarness::with_builder(
+        test_codex()
+            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+            .with_config(|config| {
+                config.model_auto_compact_token_limit = Some(120);
+                config.model_provider.request_max_retries = Some(0);
+                config.model_provider.stream_max_retries = Some(0);
+            }),
+    )
+    .await?;
+    let codex = harness.test().codex.clone();
+
+    let responses_mock = responses::mount_sse_sequence(
+        harness.server(),
+        vec![
+            sse(vec![
+                responses::ev_assistant_message("initial-assistant", "initial turn complete"),
+                responses::ev_completed_with_tokens("initial-response", 500_000),
+            ]),
+            sse(vec![
+                responses::ev_assistant_message(
+                    "post-compact-assistant",
+                    "turn continued after quota rotation",
+                ),
+                responses::ev_completed("post-compact-response"),
+            ]),
+        ],
+    )
+    .await;
+
+    let first_compact_mock = responses::mount_compact_response_once(
+        harness.server(),
+        ResponseTemplate::new(429)
+            .insert_header("content-type", "application/json")
+            .set_body_json(serde_json::json!({
+                "error": {
+                    "code": "insufficient_quota",
+                    "message": "quota exceeded during remote compact"
+                }
+            })),
+    )
+    .await;
+    let second_compact_mock = responses::mount_compact_json_once(
+        harness.server(),
+        serde_json::json!({
+            "output": compacted_summary_only_output("REMOTE_RECOVERED_QUOTA_SUMMARY")
+        }),
+    )
+    .await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "turn that exceeds token threshold".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+        })
+        .await?;
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "turn that triggers auto compact under quota".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+        })
+        .await?;
+
+    let mut saw_turn_complete = false;
+    while !saw_turn_complete {
+        match wait_for_event(&codex, |_| true).await {
+            EventMsg::Error(err) => {
+                panic!("unexpected error after remote compact quota recovery: {err:?}")
+            }
+            EventMsg::TurnComplete(_) => saw_turn_complete = true,
+            _ => {}
+        }
+    }
+
+    assert_eq!(
+        first_compact_mock.requests().len(),
+        1,
+        "expected one failed remote compact attempt before quota recovery"
+    );
+    assert_eq!(
+        second_compact_mock.requests().len(),
+        1,
+        "expected one retried remote compact attempt after quota recovery"
+    );
+    assert_eq!(
+        responses_mock.requests().len(),
+        2,
+        "expected the post-compaction turn request to continue after quota recovery"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(auth_rotate_cmd_env)]
+async fn remote_pre_turn_compaction_rotation_command_failure_stops_turn() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    const AUTH_ROTATE_CMD_ENV: &str = "CODEXN_AUTH_ROTATE_CMD";
+
+    let _guard = EnvVarGuard::set(AUTH_ROTATE_CMD_ENV, "false");
+    let harness = TestCodexHarness::with_builder(
+        test_codex()
+            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+            .with_config(|config| {
+                config.model_auto_compact_token_limit = Some(120);
+                config.model_provider.request_max_retries = Some(0);
+                config.model_provider.stream_max_retries = Some(0);
+            }),
+    )
+    .await?;
+    let codex = harness.test().codex.clone();
+
+    let responses_mock = responses::mount_sse_sequence(
+        harness.server(),
+        vec![sse(vec![
+            responses::ev_assistant_message("initial-assistant", "initial turn complete"),
+            responses::ev_completed_with_tokens("initial-response", 500_000),
+        ])],
+    )
+    .await;
+
+    let compact_mock = responses::mount_compact_response_once(
+        harness.server(),
+        ResponseTemplate::new(429)
+            .insert_header("content-type", "application/json")
+            .set_body_json(serde_json::json!({
+                "error": {
+                    "type": "usage_limit_reached",
+                    "message": "limit reached during remote compact",
+                    "plan_type": "pro"
+                }
+            })),
+    )
+    .await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "turn that exceeds token threshold".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+        })
+        .await?;
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "turn that triggers failed rotation command".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+        })
+        .await?;
+
+    let error_message = wait_for_event_match(&codex, |event| match event {
+        EventMsg::Error(err) => Some(err.message.clone()),
+        _ => None,
+    })
+    .await;
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    assert!(
+        error_message.contains("Error running remote compact task"),
+        "expected compact failure prefix, got {error_message}"
+    );
+    assert_eq!(
+        compact_mock.requests().len(),
+        1,
+        "expected one failed compact attempt before abort"
+    );
+    assert_eq!(
+        responses_mock.requests().len(),
+        1,
+        "expected second turn request not to run after rotation command failure"
+    );
+
+    Ok(())
+}
+
 #[cfg_attr(target_os = "windows", ignore)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_compact_trim_estimate_uses_session_base_instructions() -> Result<()> {
