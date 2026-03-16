@@ -463,6 +463,127 @@ fn is_runtime_delivery_status_kind(status_kind: Option<&str>) -> bool {
     !matches!(status_kind, Some("state") | Some("auto"))
 }
 
+const NERO_HOOK_STATUS_META_MAX_STRING_CHARS: usize = 512;
+
+fn truncate_audit_meta_string(input: &str) -> String {
+    let mut chars = input.chars();
+    let truncated: String = chars
+        .by_ref()
+        .take(NERO_HOOK_STATUS_META_MAX_STRING_CHARS)
+        .collect();
+    if chars.next().is_some() {
+        return format!("{truncated}...[truncated]");
+    }
+    truncated
+}
+
+fn sanitize_auto_decision_meta_for_audit(value: &Value) -> Option<Value> {
+    let Value::Object(obj) = value else {
+        return None;
+    };
+
+    let mut out = serde_json::Map::new();
+
+    for key in [
+        "decision",
+        "reason_code",
+        "score_explanation",
+        "assistant_stop_mode",
+        "backend_error_code",
+        "turn_id",
+        "stop_cause",
+        "stop_flag",
+    ] {
+        if let Some(raw) = obj.get(key).and_then(|v| v.as_str()) {
+            out.insert(
+                key.to_string(),
+                Value::String(truncate_audit_meta_string(raw)),
+            );
+        }
+    }
+
+    for key in [
+        "score",
+        "effective_threshold",
+        "margin",
+        "auto_rounds_before",
+        "auto_rounds_after",
+        "max_auto_rounds",
+        "autonomy_level",
+        "autonomy_step_per_round",
+    ] {
+        if let Some(raw) = obj.get(key)
+            && raw.is_number()
+        {
+            out.insert(key.to_string(), raw.clone());
+        }
+    }
+
+    if let Some(flags) = obj.get("flags").and_then(|v| v.as_object()) {
+        let mut out_flags = serde_json::Map::new();
+        for key in [
+            "emergency_flag",
+            "gates_done_observed",
+            "gates_done_backend",
+            "user_collaboration_required",
+            "assistant_stop",
+            "backend_unavailable",
+        ] {
+            if let Some(raw) = flags.get(key).and_then(|v| v.as_bool()) {
+                out_flags.insert(key.to_string(), Value::Bool(raw));
+            }
+        }
+        if !out_flags.is_empty() {
+            out.insert("flags".to_string(), Value::Object(out_flags));
+        }
+    }
+
+    if let Some(policy) = obj
+        .get("session_auto_policy_override")
+        .and_then(|v| v.as_object())
+    {
+        let mut out_policy = serde_json::Map::new();
+        for key in [
+            "autonomy_level",
+            "autonomy_step_per_round",
+            "max_auto_rounds",
+        ] {
+            if let Some(raw) = policy.get(key)
+                && raw.is_number()
+            {
+                out_policy.insert(key.to_string(), raw.clone());
+            }
+        }
+        if !out_policy.is_empty() {
+            out.insert(
+                "session_auto_policy_override".to_string(),
+                Value::Object(out_policy),
+            );
+        }
+    }
+
+    if out.is_empty() {
+        return None;
+    }
+    Some(Value::Object(out))
+}
+
+fn sanitize_nero_hook_status_meta_for_audit(meta: Option<Value>) -> Option<Value> {
+    let Value::Object(meta_obj) = meta? else {
+        return None;
+    };
+    let mut out = serde_json::Map::new();
+    if let Some(auto_decision) = meta_obj.get("auto_decision")
+        && let Some(sanitized) = sanitize_auto_decision_meta_for_audit(auto_decision)
+    {
+        out.insert("auto_decision".to_string(), sanitized);
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(Value::Object(out))
+}
+
 async fn append_nero_hook_delivery_audit(
     log_path: &Path,
     conversation_id: &ThreadId,
@@ -6070,8 +6191,9 @@ pub(crate) async fn run_turn(
                                             status.as_ref().map(|item| item.kind.clone());
                                         let status_text =
                                             status.as_ref().map(|item| item.text.clone());
-                                        let status_meta =
-                                            status.as_ref().and_then(|item| item.meta.clone());
+                                        let status_meta = sanitize_nero_hook_status_meta_for_audit(
+                                            status.as_ref().and_then(|item| item.meta.clone()),
+                                        );
                                         let status_kind_normalized =
                                             normalized_nero_hook_status_kind(status.as_ref());
                                         let runtime_delivery_candidate =
@@ -11533,6 +11655,76 @@ mod tests {
         assert!(
             remaining.is_none(),
             "emit after reset should not be throttled (compaction reset semantics)"
+        );
+    }
+
+    #[test]
+    fn sanitize_nero_hook_status_meta_for_audit_keeps_allowlisted_fields() {
+        let long_explanation = "x".repeat(NERO_HOOK_STATUS_META_MAX_STRING_CHARS + 32);
+        let input = Some(json!({
+            "auto_decision": {
+                "decision": "continue",
+                "reason_code": "continue",
+                "score": 9,
+                "effective_threshold": 5,
+                "score_explanation": long_explanation,
+                "flags": {
+                    "emergency_flag": false,
+                    "gates_done_observed": true,
+                    "user_collaboration_required": false,
+                    "unknown_flag": true
+                },
+                "session_auto_policy_override": {
+                    "autonomy_level": 5,
+                    "autonomy_step_per_round": 1,
+                    "max_auto_rounds": 4,
+                    "unknown": 99
+                },
+                "private_blob": {
+                    "secret": "dont-log-me"
+                }
+            },
+            "extra_top_level": {
+                "secret": "drop-me"
+            }
+        }));
+
+        let sanitized = sanitize_nero_hook_status_meta_for_audit(input).expect("sanitized meta");
+        let auto = sanitized
+            .get("auto_decision")
+            .and_then(|value| value.as_object())
+            .expect("auto_decision object");
+
+        assert_eq!(
+            auto.get("decision"),
+            Some(&Value::String("continue".to_string()))
+        );
+        assert!(auto.get("private_blob").is_none());
+        assert!(sanitized.get("extra_top_level").is_none());
+
+        let score_explanation = auto
+            .get("score_explanation")
+            .and_then(|value| value.as_str())
+            .expect("score_explanation string");
+        assert!(
+            score_explanation.ends_with("...[truncated]"),
+            "long strings should be truncated in audit metadata"
+        );
+
+        let flags = auto
+            .get("flags")
+            .and_then(|value| value.as_object())
+            .expect("flags object");
+        assert!(flags.get("unknown_flag").is_none());
+        assert_eq!(flags.get("emergency_flag"), Some(&Value::Bool(false)));
+    }
+
+    #[test]
+    fn sanitize_nero_hook_status_meta_for_audit_drops_non_object_shapes() {
+        assert!(sanitize_nero_hook_status_meta_for_audit(Some(json!(["array"]))).is_none());
+        assert!(sanitize_nero_hook_status_meta_for_audit(Some(json!({"noop": true}))).is_none());
+        assert!(
+            sanitize_nero_hook_status_meta_for_audit(Some(json!({"auto_decision": "x"}))).is_none()
         );
     }
 
