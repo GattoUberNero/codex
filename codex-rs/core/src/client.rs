@@ -109,6 +109,8 @@ pub const X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER: &str =
     "x-responsesapi-include-timing-metrics";
 const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
 const CODEXN_AUTH_ROTATE_CMD_ENV: &str = "CODEXN_AUTH_ROTATE_CMD";
+const CODEXN_ROTATION_REASON_USAGE_LIMIT: &str = "usage_limit_reached";
+const CODEXN_ROTATION_REASON_QUOTA_EXCEEDED: &str = "quota_exceeded";
 const AUTH_ROTATE_CMD_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub fn ws_version_from_features(config: &Config) -> bool {
@@ -782,18 +784,18 @@ impl ModelClientSession {
         &mut self,
         err: &CodexErr,
     ) -> Result<bool> {
-        if !matches!(
-            err,
-            CodexErr::UsageLimitReached(_) | CodexErr::QuotaExceeded
-        ) {
-            return Ok(false);
-        }
+        let rotation_reason = match err {
+            CodexErr::UsageLimitReached(_) => CODEXN_ROTATION_REASON_USAGE_LIMIT,
+            CodexErr::QuotaExceeded => CODEXN_ROTATION_REASON_QUOTA_EXCEEDED,
+            _ => return Ok(false),
+        };
 
         self.reset_websocket_session();
         try_recover_usage_limit_or_quota(
             &mut self.usage_limit_recovery,
             self.client.state.auth_manager.as_ref(),
             &mut self.command_recovery_attempted,
+            rotation_reason,
         )
         .await
     }
@@ -1320,6 +1322,16 @@ fn is_usage_limit_or_quota_error(err: &ApiError) -> bool {
     }
 }
 
+fn rotation_reason_for_error(err: &ApiError) -> &'static str {
+    match err {
+        ApiError::QuotaExceeded => CODEXN_ROTATION_REASON_QUOTA_EXCEEDED,
+        ApiError::Transport(transport) if is_usage_limit_reached_transport(transport) => {
+            CODEXN_ROTATION_REASON_USAGE_LIMIT
+        }
+        _ => CODEXN_ROTATION_REASON_USAGE_LIMIT,
+    }
+}
+
 fn is_usage_limit_reached_transport(transport: &TransportError) -> bool {
     match transport {
         TransportError::Http { status, body, .. } if *status == StatusCode::TOO_MANY_REQUESTS => {
@@ -1349,10 +1361,12 @@ async fn recover_from_usage_limit_or_quota(
     auth_manager: Option<&Arc<AuthManager>>,
     command_recovery_attempted: &mut bool,
 ) -> Result<()> {
+    let rotation_reason = rotation_reason_for_error(&err);
     if try_recover_usage_limit_or_quota(
         usage_limit_recovery,
         auth_manager,
         command_recovery_attempted,
+        rotation_reason,
     )
     .await?
     {
@@ -1366,6 +1380,7 @@ async fn try_recover_usage_limit_or_quota(
     usage_limit_recovery: &mut Option<ExternalAuthRecovery>,
     auth_manager: Option<&Arc<AuthManager>>,
     command_recovery_attempted: &mut bool,
+    rotation_reason: &str,
 ) -> Result<bool> {
     if let Some(recovery) = usage_limit_recovery
         && recovery.has_next()
@@ -1375,8 +1390,12 @@ async fn try_recover_usage_limit_or_quota(
             Ok(_) => Ok(true),
             Err(RefreshTokenError::Permanent(failed)) => Err(CodexErr::RefreshTokenFailed(failed)),
             Err(RefreshTokenError::Transient(other)) => {
-                if try_recover_with_auth_rotate_command(auth_manager, command_recovery_attempted)
-                    .await?
+                if try_recover_with_auth_rotate_command(
+                    auth_manager,
+                    command_recovery_attempted,
+                    rotation_reason,
+                )
+                .await?
                 {
                     Ok(true)
                 } else {
@@ -1386,12 +1405,14 @@ async fn try_recover_usage_limit_or_quota(
         };
     }
 
-    try_recover_with_auth_rotate_command(auth_manager, command_recovery_attempted).await
+    try_recover_with_auth_rotate_command(auth_manager, command_recovery_attempted, rotation_reason)
+        .await
 }
 
 async fn try_recover_with_auth_rotate_command(
     auth_manager: Option<&Arc<AuthManager>>,
     command_recovery_attempted: &mut bool,
+    rotation_reason: &str,
 ) -> Result<bool> {
     if *command_recovery_attempted {
         return Ok(false);
@@ -1411,7 +1432,7 @@ async fn try_recover_with_auth_rotate_command(
     let (program, args) = parse_auth_rotate_command(&rotate_cmd)?;
     let mut command = tokio::process::Command::new(program);
     command.args(args);
-    command.env("CODEXN_ROTATION_REASON", "usage_limit_reached");
+    command.env("CODEXN_ROTATION_REASON", rotation_reason);
     command.stderr(std::process::Stdio::piped());
     command.stdout(std::process::Stdio::null());
 
@@ -1526,9 +1547,12 @@ impl WebsocketTelemetry for ApiTelemetry {
 #[cfg(test)]
 mod tests {
     use super::CODEXN_AUTH_ROTATE_CMD_ENV;
+    use super::CODEXN_ROTATION_REASON_QUOTA_EXCEEDED;
+    use super::CODEXN_ROTATION_REASON_USAGE_LIMIT;
     use super::ModelClient;
     use super::is_usage_limit_or_quota_error;
     use super::parse_auth_rotate_command;
+    use super::rotation_reason_for_error;
     use super::try_recover_with_auth_rotate_command;
     use codex_api::TransportError;
     use codex_api::error::ApiError;
@@ -1652,6 +1676,31 @@ mod tests {
     }
 
     #[test]
+    fn rotation_reason_tracks_quota_and_usage_limit_errors() {
+        let quota_error = ApiError::QuotaExceeded;
+        assert_eq!(
+            rotation_reason_for_error(&quota_error),
+            CODEXN_ROTATION_REASON_QUOTA_EXCEEDED
+        );
+
+        let usage_error = ApiError::Transport(TransportError::Http {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            url: Some("https://example.com/v1/responses".to_string()),
+            headers: None,
+            body: Some(
+                serde_json::json!({
+                    "error": { "type": "usage_limit_reached" }
+                })
+                .to_string(),
+            ),
+        });
+        assert_eq!(
+            rotation_reason_for_error(&usage_error),
+            CODEXN_ROTATION_REASON_USAGE_LIMIT
+        );
+    }
+
+    #[test]
     fn usage_limit_or_quota_error_ignores_non_usage_429_transport_error() {
         let err = ApiError::Transport(TransportError::Http {
             status: StatusCode::TOO_MANY_REQUESTS,
@@ -1700,9 +1749,13 @@ mod tests {
     async fn auth_rotate_command_recovery_returns_false_when_unconfigured() {
         let _guard = EnvVarGuard::remove(CODEXN_AUTH_ROTATE_CMD_ENV);
         let mut attempted = false;
-        let recovered = try_recover_with_auth_rotate_command(None, &mut attempted)
-            .await
-            .expect("missing command should not error");
+        let recovered = try_recover_with_auth_rotate_command(
+            None,
+            &mut attempted,
+            CODEXN_ROTATION_REASON_USAGE_LIMIT,
+        )
+        .await
+        .expect("missing command should not error");
         assert!(!recovered);
         assert!(!attempted);
     }
@@ -1712,9 +1765,13 @@ mod tests {
     async fn auth_rotate_command_recovery_succeeds_without_auth_manager() {
         let _guard = EnvVarGuard::set(CODEXN_AUTH_ROTATE_CMD_ENV, "true");
         let mut attempted = false;
-        let recovered = try_recover_with_auth_rotate_command(None, &mut attempted)
-            .await
-            .expect("configured command should succeed");
+        let recovered = try_recover_with_auth_rotate_command(
+            None,
+            &mut attempted,
+            CODEXN_ROTATION_REASON_USAGE_LIMIT,
+        )
+        .await
+        .expect("configured command should succeed");
         assert!(recovered);
         assert!(attempted);
     }
@@ -1724,12 +1781,35 @@ mod tests {
     async fn auth_rotate_command_recovery_surfaces_command_failure() {
         let _guard = EnvVarGuard::set(CODEXN_AUTH_ROTATE_CMD_ENV, "false");
         let mut attempted = false;
-        let err = try_recover_with_auth_rotate_command(None, &mut attempted)
-            .await
-            .expect_err("failing command should return error");
+        let err = try_recover_with_auth_rotate_command(
+            None,
+            &mut attempted,
+            CODEXN_ROTATION_REASON_USAGE_LIMIT,
+        )
+        .await
+        .expect_err("failing command should return error");
         assert!(attempted);
         let rendered = err.to_string();
         assert!(rendered.contains("auth rotation command failed"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn auth_rotate_command_recovery_sets_rotation_reason_env() {
+        let _guard = EnvVarGuard::set(
+            CODEXN_AUTH_ROTATE_CMD_ENV,
+            r#"sh -c 'test "$CODEXN_ROTATION_REASON" = quota_exceeded'"#,
+        );
+        let mut attempted = false;
+        let recovered = try_recover_with_auth_rotate_command(
+            None,
+            &mut attempted,
+            CODEXN_ROTATION_REASON_QUOTA_EXCEEDED,
+        )
+        .await
+        .expect("rotation reason should be exported to command env");
+        assert!(recovered);
+        assert!(attempted);
     }
 
     #[test]
