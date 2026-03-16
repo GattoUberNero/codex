@@ -35,6 +35,8 @@ pub enum NeroHookMsgFormat {
 pub struct NeroHookMsgStatus {
     pub kind: String,
     pub text: String,
+    #[serde(default)]
+    pub meta: Option<serde_json::Value>,
 }
 
 fn deserialize_nero_hook_msg_format_or_default<'de, D>(
@@ -73,9 +75,13 @@ where
     let Some(text) = obj.get("text").and_then(|v| v.as_str()) else {
         return Ok(None);
     };
+    let meta = obj
+        .get("meta")
+        .and_then(|value| value.as_object().map(|_| value.clone()));
     Ok(Some(NeroHookMsgStatus {
         kind: kind.to_string(),
         text: text.to_string(),
+        meta,
     }))
 }
 
@@ -484,6 +490,7 @@ mod tests {
                 status: Some(NeroHookMsgStatus {
                     kind: "countdown".to_string(),
                     text: "next update in 7s".to_string(),
+                    meta: None,
                 }),
                 msg: NeroHookMsgContent {
                     full: "f".to_string(),
@@ -491,6 +498,45 @@ mod tests {
                 }
             }]
         );
+    }
+
+    #[test]
+    fn nero_hook_msg_parses_status_meta_when_present() {
+        let parsed = parse_hook_actions_from_stdout(
+            r#"{
+              "actions": [
+                {
+                  "type": "nero_hook_msg",
+                  "mode": "synced",
+                  "show": {"agent": true, "tui": false},
+                  "status": {
+                    "kind": "auto",
+                    "text": "continue: score=9 threshold=5 round=0",
+                    "meta": {
+                      "auto_decision": {
+                        "decision": "continue",
+                        "reason_code": "continue"
+                      }
+                    }
+                  },
+                  "msg": {"full": "f", "short": "s"}
+                }
+              ]
+            }"#,
+        )
+        .expect("parse");
+
+        let HookAction::NeroHookMsg { status, .. } = &parsed.actions[0] else {
+            panic!("expected nero_hook_msg action");
+        };
+        let status = status.as_ref().expect("status");
+        let meta = status.meta.as_ref().expect("status meta");
+        let decision = meta
+            .get("auto_decision")
+            .and_then(|value| value.as_object())
+            .and_then(|value| value.get("decision"))
+            .and_then(|value| value.as_str());
+        assert_eq!(decision, Some("continue"));
     }
 
     #[test]

@@ -6070,6 +6070,8 @@ pub(crate) async fn run_turn(
                                             status.as_ref().map(|item| item.kind.clone());
                                         let status_text =
                                             status.as_ref().map(|item| item.text.clone());
+                                        let status_meta =
+                                            status.as_ref().and_then(|item| item.meta.clone());
                                         let status_kind_normalized =
                                             normalized_nero_hook_status_kind(status.as_ref());
                                         let runtime_delivery_candidate =
@@ -6146,6 +6148,7 @@ pub(crate) async fn run_turn(
                                                     "status": {
                                                         "kind": status_kind,
                                                         "text": status_text,
+                                                        "meta": status_meta,
                                                     },
                                                     "delivery_contract": {
                                                         "runtime_candidate": runtime_delivery_candidate,
@@ -6226,6 +6229,7 @@ pub(crate) async fn run_turn(
                                                 "status": {
                                                     "kind": status_kind,
                                                     "text": status_text,
+                                                    "meta": status_meta,
                                                 },
                                                 "delivery_contract": {
                                                     "runtime_candidate": runtime_delivery_candidate,

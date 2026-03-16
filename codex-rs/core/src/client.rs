@@ -298,28 +298,56 @@ impl ModelClient {
         if prompt.input.is_empty() {
             return Ok(Vec::new());
         }
-        let client_setup = self.current_client_setup().await?;
-        let transport = ReqwestTransport::new(build_reqwest_client());
-        let request_telemetry = Self::build_request_telemetry(otel_manager);
-        let client =
-            ApiCompactClient::new(transport, client_setup.api_provider, client_setup.api_auth)
-                .with_telemetry(Some(request_telemetry));
+        let auth_manager = self.state.auth_manager.clone();
+        let mut auth_recovery = auth_manager
+            .as_ref()
+            .map(super::auth::AuthManager::unauthorized_recovery);
+        let mut usage_limit_recovery = auth_manager.as_ref().map(|manager| {
+            manager.external_auth_recovery(ExternalAuthRefreshReason::UsageLimitReached)
+        });
+        let mut command_recovery_attempted = false;
 
-        let instructions = prompt.base_instructions.text.clone();
-        let payload = ApiCompactionInput {
-            model: &model_info.slug,
-            input: &prompt.input,
-            instructions: &instructions,
-        };
+        loop {
+            let client_setup = self.current_client_setup().await?;
+            let transport = ReqwestTransport::new(build_reqwest_client());
+            let request_telemetry = Self::build_request_telemetry(otel_manager);
+            let client =
+                ApiCompactClient::new(transport, client_setup.api_provider, client_setup.api_auth)
+                    .with_telemetry(Some(request_telemetry));
 
-        let mut extra_headers = self.build_subagent_headers();
-        extra_headers.extend(build_conversation_headers(Some(
-            self.state.conversation_id.to_string(),
-        )));
-        client
-            .compact_input(&payload, extra_headers)
-            .await
-            .map_err(map_api_error)
+            let instructions = prompt.base_instructions.text.clone();
+            let payload = ApiCompactionInput {
+                model: &model_info.slug,
+                input: &prompt.input,
+                instructions: &instructions,
+            };
+
+            let mut extra_headers = self.build_subagent_headers();
+            extra_headers.extend(build_conversation_headers(Some(
+                self.state.conversation_id.to_string(),
+            )));
+
+            match client.compact_input(&payload, extra_headers).await {
+                Ok(output) => return Ok(output),
+                Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                )) if status == StatusCode::UNAUTHORIZED => {
+                    handle_unauthorized(unauthorized_transport, &mut auth_recovery).await?;
+                    continue;
+                }
+                Err(err) if is_usage_limit_or_quota_error(&err) => {
+                    recover_from_usage_limit_or_quota(
+                        err,
+                        &mut usage_limit_recovery,
+                        auth_manager.as_ref(),
+                        &mut command_recovery_attempted,
+                    )
+                    .await?;
+                    continue;
+                }
+                Err(err) => return Err(map_api_error(err)),
+            }
+        }
     }
 
     /// Builds memory summaries for each provided normalized raw memory.
