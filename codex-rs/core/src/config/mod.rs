@@ -873,6 +873,53 @@ fn strip_codexn_fork_auto_developer_instructions(
     Some(current)
 }
 
+fn strip_codexn_fork_main_agent_developer_instructions(
+    current_instructions: Option<&str>,
+    extra_toml: &TomlValue,
+) -> Option<String> {
+    let current = current_instructions
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let main_agent = codexn_fork_main_agent_developer_instructions(extra_toml)?;
+    let main_agent = main_agent.trim();
+    if main_agent.is_empty() {
+        return Some(current.to_string());
+    }
+
+    if current == main_agent {
+        None
+    } else {
+        Some(current.to_string())
+    }
+}
+
+pub(crate) fn strip_codexn_fork_subagent_developer_instructions(
+    config: &mut Config,
+) -> std::io::Result<()> {
+    let Some(combined_extra_toml) = load_codexn_extra_config_from_env()? else {
+        return Ok(());
+    };
+
+    let base_instructions = codexn_fork_root_developer_instructions(&combined_extra_toml)
+        .or_else(|| {
+            let stripped_auto = strip_codexn_fork_auto_developer_instructions(
+                config.developer_instructions.as_deref(),
+                &combined_extra_toml,
+            );
+            strip_codexn_fork_main_agent_developer_instructions(
+                stripped_auto.as_deref(),
+                &combined_extra_toml,
+            )
+        })
+        .and_then(|instructions| {
+            let trimmed = instructions.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        });
+
+    config.developer_instructions = base_instructions;
+    Ok(())
+}
+
 fn apply_codexn_fork_developer_instructions(target_toml: &mut TomlValue, extra_toml: &TomlValue) {
     let base_instructions = codexn_fork_root_developer_instructions(target_toml);
     let Some(instructions) =
