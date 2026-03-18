@@ -19,9 +19,9 @@ use crate::parse_hook_actions_from_stdout;
 
 const LEGACY_NOTIFY_TIMEOUT: Duration = Duration::from_millis(1500);
 const LEGACY_NOTIFY_KILL_REAP_TIMEOUT: Duration = Duration::from_millis(250);
-const LEGACY_NOTIFY_STDIN_WRITE_BASE_TIMEOUT_MS: u64 = 1500;
+const LEGACY_NOTIFY_STDIN_WRITE_BASE_TIMEOUT_MS: u64 = 4_000;
 const LEGACY_NOTIFY_STDIN_WRITE_PER_64KB_TIMEOUT_MS: u64 = 250;
-const LEGACY_NOTIFY_STDIN_WRITE_MAX_TIMEOUT_MS: u64 = 5_000;
+const LEGACY_NOTIFY_STDIN_WRITE_MAX_TIMEOUT_MS: u64 = 10_000;
 
 fn legacy_notify_timeout_error(stage: &str, timeout: Duration) -> io::Error {
     io::Error::new(
@@ -871,7 +871,7 @@ mod tests {
         let hook = notify_hook(vec![
             "python3".to_string(),
             "-c".to_string(),
-            "import time; time.sleep(5)".to_string(),
+            "import time; time.sleep(6)".to_string(),
         ]);
 
         let payload = HookPayload {
@@ -901,7 +901,7 @@ mod tests {
 
         assert!(matches!(outcome.result, HookResult::FailedContinue(_)));
         assert!(outcome.actions.is_empty());
-        assert!(elapsed < Duration::from_secs(5));
+        assert!(elapsed < Duration::from_secs(6));
         Ok(())
     }
 
