@@ -290,12 +290,14 @@ impl NeroAutoRuntimeBridgeSettings {
 }
 
 fn nero_auto_bridge_config_path(codex_home: &Path) -> PathBuf {
+    // Keep the same precedence as NeroBar backend runtime controls:
+    // explicit env override first, then CODEX_HOME fallback.
+    if let Some(path) = std::env::var_os(NERO_AUTO_HOTKEY_CONFIG_ENV) {
+        return PathBuf::from(path);
+    }
     let codex_home_config = codex_home.join("config-nero-hook-auto.toml");
     if codex_home_config.is_file() {
         return codex_home_config;
-    }
-    if let Some(path) = std::env::var_os(NERO_AUTO_HOTKEY_CONFIG_ENV) {
-        return PathBuf::from(path);
     }
     codex_home_config
 }
@@ -1858,8 +1860,8 @@ impl App {
                 .map(str::to_string)
                 .unwrap_or_else(|| session_source.to_string());
             let context_hint = format!(
-                "Bridge context: thread-id={}, session-source={}, state-path={}",
-                current.thread_id, source_label, current.path
+                "Bridge context: thread-id={}, session-source={}, config-path={}, state-path={}",
+                current.thread_id, source_label, current.config_path, current.path
             );
             let merged_hint = Some(match hint {
                 Some(base) => format!("{base}\n{context_hint}"),
@@ -1968,8 +1970,11 @@ impl App {
             .map(str::to_string)
             .unwrap_or_else(|| session_source.to_string());
         let context_hint = format!(
-            "Bridge context: thread-id={}, session-source={}, state-path={}",
-            confirmed_state.thread_id, source_label, confirmed_state.path
+            "Bridge context: thread-id={}, session-source={}, config-path={}, state-path={}",
+            confirmed_state.thread_id,
+            source_label,
+            confirmed_state.config_path,
+            confirmed_state.path
         );
         let merged_hint = Some(match hint {
             Some(base) => format!("{base}\n{context_hint}"),
