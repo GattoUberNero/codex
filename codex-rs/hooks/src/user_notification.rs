@@ -19,6 +19,9 @@ use crate::parse_hook_actions_from_stdout;
 
 const LEGACY_NOTIFY_TIMEOUT: Duration = Duration::from_millis(1500);
 const LEGACY_NOTIFY_KILL_REAP_TIMEOUT: Duration = Duration::from_millis(250);
+const LEGACY_NOTIFY_STDIN_WRITE_BASE_TIMEOUT_MS: u64 = 1500;
+const LEGACY_NOTIFY_STDIN_WRITE_PER_64KB_TIMEOUT_MS: u64 = 500;
+const LEGACY_NOTIFY_STDIN_WRITE_MAX_TIMEOUT_MS: u64 = 10_000;
 
 fn legacy_notify_timeout_error(stage: &str, timeout: Duration) -> io::Error {
     io::Error::new(
@@ -28,6 +31,20 @@ fn legacy_notify_timeout_error(stage: &str, timeout: Duration) -> io::Error {
             timeout.as_millis()
         ),
     )
+}
+
+fn legacy_notify_stdin_write_timeout(payload_bytes: usize) -> Duration {
+    // Writing large payloads to stdin can block when the child consumes input
+    // slower than pipe buffering; scale timeout with payload size.
+    const PIPE_CHUNK_BYTES: usize = 64 * 1024;
+    let chunks = payload_bytes.saturating_add(PIPE_CHUNK_BYTES.saturating_sub(1)) / PIPE_CHUNK_BYTES;
+    let extra_ms = chunks
+        .saturating_sub(1)
+        .saturating_mul(LEGACY_NOTIFY_STDIN_WRITE_PER_64KB_TIMEOUT_MS as usize);
+    let timeout_ms = LEGACY_NOTIFY_STDIN_WRITE_BASE_TIMEOUT_MS
+        .saturating_add(extra_ms as u64)
+        .min(LEGACY_NOTIFY_STDIN_WRITE_MAX_TIMEOUT_MS);
+    Duration::from_millis(timeout_ms)
 }
 
 async fn collect_stdout_bytes(
@@ -242,8 +259,11 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
 
                 if let Some(mut stdin) = child.stdin.take() {
                     if let Some(notify_payload) = notify_payload {
+                        let payload_bytes = notify_payload.len();
+                        let stdin_write_timeout =
+                            legacy_notify_stdin_write_timeout(payload_bytes);
                         match tokio::time::timeout(
-                            LEGACY_NOTIFY_TIMEOUT,
+                            stdin_write_timeout,
                             stdin.write_all(notify_payload.as_bytes()),
                         )
                         .await
@@ -278,7 +298,8 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                                 )
                                 .await;
                                 warn!(
-                                    timeout_ms = LEGACY_NOTIFY_TIMEOUT.as_millis() as u64,
+                                    timeout_ms = stdin_write_timeout.as_millis() as u64,
+                                    payload_bytes,
                                     kill_reap_timeout_ms =
                                         LEGACY_NOTIFY_KILL_REAP_TIMEOUT.as_millis() as u64,
                                     "legacy_notify stdin writer timed out; attempted to kill/reap direct child and marking hook as failed_continue"
@@ -287,7 +308,7 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                                     result: HookResult::FailedContinue(
                                         legacy_notify_timeout_error(
                                             "stdin writer",
-                                            LEGACY_NOTIFY_TIMEOUT,
+                                            stdin_write_timeout,
                                         )
                                         .into(),
                                     ),
@@ -750,7 +771,7 @@ mod tests {
         let hook = notify_hook(vec![
             "python3".to_string(),
             "-c".to_string(),
-            "import time; time.sleep(3)".to_string(),
+            "import time; time.sleep(5)".to_string(),
         ]);
 
         let payload = HookPayload {
@@ -767,7 +788,9 @@ mod tests {
                     thread_name: Some("example-A-".to_string()),
                     turn_id: "turn-stalled-stdin".to_string(),
                     input_messages: vec!["hi".to_string()],
-                    last_assistant_message: Some("x".repeat(2_000_000)),
+                    // Keep payload large enough to fill pipe buffering, but bounded so
+                    // the scaled stdin timeout stays below the child sleep.
+                    last_assistant_message: Some("x".repeat(300_000)),
                 },
             },
         };
@@ -778,7 +801,7 @@ mod tests {
 
         assert!(matches!(outcome.result, HookResult::FailedContinue(_)));
         assert!(outcome.actions.is_empty());
-        assert!(elapsed < Duration::from_secs(3));
+        assert!(elapsed < Duration::from_secs(5));
         Ok(())
     }
 
