@@ -82,6 +82,13 @@ impl CodexThread {
             .await
     }
 
+    pub async fn set_nero_auto_runtime(
+        &self,
+        nero_auto_runtime: NeroAutoRuntimeConfig,
+    ) -> ConstraintResult<ThreadConfigSnapshot> {
+        self.codex.set_nero_auto_runtime(nero_auto_runtime).await
+    }
+
     /// Use sparingly: this is intended to be removed soon.
     pub async fn submit_with_id(&self, sub: Submission) -> CodexResult<()> {
         self.codex.submit_with_id(sub).await

@@ -65,6 +65,30 @@ fn build_collaboration_mode_update_item(
     }
 }
 
+fn build_runtime_developer_instructions_update_item(
+    previous: Option<&TurnContextItem>,
+    next: &TurnContext,
+) -> Option<DeveloperInstructions> {
+    let prev = previous?;
+    if prev.developer_instructions.as_deref() == next.developer_instructions.as_deref() {
+        return None;
+    }
+
+    let text = match next.developer_instructions.as_deref() {
+        Some(text) if !text.trim().is_empty() => format!(
+            "Runtime developer instructions update for this session. \
+             This supersedes prior runtime developer instruction updates.\n\n{text}"
+        ),
+        _ => "Runtime developer instructions update for this session. \
+              No session-local runtime developer instructions are active now; \
+              ignore prior runtime developer instruction updates that came from \
+              runtime auto/session toggles and continue with the remaining baseline \
+              instructions already in context."
+            .to_string(),
+    };
+    Some(DeveloperInstructions::new(text))
+}
+
 pub(crate) fn build_realtime_update_item(
     previous: Option<&TurnContextItem>,
     previous_turn_settings: Option<&PreviousTurnSettings>,
@@ -187,6 +211,7 @@ pub(crate) fn build_settings_update_items(
         // any other context diffs on this turn.
         build_model_instructions_update_item(previous_turn_settings, next),
         build_permissions_update_item(previous, next, exec_policy),
+        build_runtime_developer_instructions_update_item(previous, next),
         build_collaboration_mode_update_item(previous, next),
         build_realtime_update_item(previous, previous_turn_settings, next),
         build_personality_update_item(previous, next, personality_feature_enabled),

@@ -20,6 +20,7 @@ use codex_utils_approval_presets::ApprovalPreset;
 
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::StatusLineItem;
+use crate::chatwidget::NeroAutoHotkeyAction;
 use crate::history_cell::HistoryCell;
 
 use codex_core::features::Feature;
@@ -113,6 +114,12 @@ pub(crate) enum AppEvent {
     /// Forward an `Op` to the Agent. Using an `AppEvent` for this avoids
     /// bubbling channels through layers of widgets.
     CodexOp(codex_protocol::protocol::Op),
+
+    /// Read or update the confirmed nero-auto runtime state through the live thread.
+    ApplyNeroAutoHotkey {
+        thread_id: Option<ThreadId>,
+        action: NeroAutoHotkeyAction,
+    },
 
     /// Kick off an asynchronous file search for the given query (text after
     /// the `@`). Previous searches may be cancelled by the app layer so there

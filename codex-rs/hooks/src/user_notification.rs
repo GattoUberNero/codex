@@ -20,6 +20,73 @@ use crate::parse_hook_actions_from_stdout;
 const LEGACY_NOTIFY_TIMEOUT: Duration = Duration::from_millis(1500);
 const LEGACY_NOTIFY_KILL_REAP_TIMEOUT: Duration = Duration::from_millis(250);
 
+fn legacy_notify_timeout_error(stage: &str, timeout: Duration) -> io::Error {
+    io::Error::new(
+        ErrorKind::TimedOut,
+        format!(
+            "legacy notify {stage} timed out after {}ms",
+            timeout.as_millis()
+        ),
+    )
+}
+
+async fn collect_stdout_bytes(
+    stdout_task: Option<tokio::task::JoinHandle<Vec<u8>>>,
+    timeout: Duration,
+) -> Result<Vec<u8>, io::Error> {
+    match stdout_task {
+        Some(task) => {
+            let mut task = task;
+            match tokio::time::timeout(timeout, &mut task).await {
+                Ok(Ok(buf)) => Ok(buf),
+                Ok(Err(join_err)) => Err(io::Error::other(format!(
+                    "legacy notify stdout reader task failed: {join_err}"
+                ))),
+                Err(_) => {
+                    task.abort();
+                    Err(legacy_notify_timeout_error("stdout reader", timeout))
+                }
+            }
+        }
+        None => Ok(Vec::new()),
+    }
+}
+
+fn parse_legacy_notify_stdout(stdout_bytes: Vec<u8>) -> Result<Vec<crate::HookAction>, io::Error> {
+    match String::from_utf8(stdout_bytes) {
+        Ok(stdout) => match parse_hook_actions_from_stdout(&stdout) {
+            Ok(parsed) => {
+                debug!(
+                    hook_name = "legacy_notify",
+                    parsed_actions = parsed.actions.len(),
+                    ignored_unknown_actions = parsed.ignored_unknown_actions,
+                    stdout_len = stdout.len(),
+                    "parsed hook actions from legacy notify stdout"
+                );
+                Ok(parsed.actions)
+            }
+            Err(err) if stdout.trim_start().starts_with('{') => {
+                debug!(
+                    hook_name = "legacy_notify",
+                    stdout_len = stdout.len(),
+                    error = %err,
+                    "legacy notify stdout looked like JSON but actions parsing failed"
+                );
+                Err(io::Error::other(err.to_string()))
+            }
+            Err(_) => {
+                debug!(
+                    hook_name = "legacy_notify",
+                    stdout_len = stdout.len(),
+                    "legacy notify stdout ignored (compat plain text)"
+                );
+                Ok(Vec::new())
+            }
+        },
+        Err(err) => Err(io::Error::new(ErrorKind::InvalidData, err)),
+    }
+}
+
 /// Notify payload sent to the external hook process over stdin.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -214,10 +281,16 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                                     timeout_ms = LEGACY_NOTIFY_TIMEOUT.as_millis() as u64,
                                     kill_reap_timeout_ms =
                                         LEGACY_NOTIFY_KILL_REAP_TIMEOUT.as_millis() as u64,
-                                    "legacy_notify stdin writer timed out; attempted to kill/reap direct child and continuing without actions"
+                                    "legacy_notify stdin writer timed out; attempted to kill/reap direct child and marking hook as failed_continue"
                                 );
                                 return HookExecution {
-                                    result: HookResult::Success,
+                                    result: HookResult::FailedContinue(
+                                        legacy_notify_timeout_error(
+                                            "stdin writer",
+                                            LEGACY_NOTIFY_TIMEOUT,
+                                        )
+                                        .into(),
+                                    ),
                                     actions: Vec::new(),
                                 };
                             }
@@ -248,74 +321,112 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                         let _ = child.start_kill();
                         let _ = tokio::time::timeout(LEGACY_NOTIFY_KILL_REAP_TIMEOUT, child.wait())
                             .await;
-                        if let Some(task) = stdout_task {
-                            task.abort();
+                        let stdout_bytes = match collect_stdout_bytes(
+                            stdout_task,
+                            LEGACY_NOTIFY_KILL_REAP_TIMEOUT,
+                        )
+                        .await
+                        {
+                            Ok(buf) => buf,
+                            Err(err) => {
+                                warn!(
+                                    timeout_ms = LEGACY_NOTIFY_TIMEOUT.as_millis() as u64,
+                                    kill_reap_timeout_ms =
+                                        LEGACY_NOTIFY_KILL_REAP_TIMEOUT.as_millis() as u64,
+                                    error = %err,
+                                    "legacy_notify hook timed out and stdout recovery failed"
+                                );
+                                return HookExecution {
+                                    result: HookResult::FailedContinue(
+                                        legacy_notify_timeout_error(
+                                            "hook process",
+                                            LEGACY_NOTIFY_TIMEOUT,
+                                        )
+                                        .into(),
+                                    ),
+                                    actions: Vec::new(),
+                                };
+                            }
+                        };
+                        if !stdout_bytes.is_empty() {
+                            match parse_legacy_notify_stdout(stdout_bytes) {
+                                Ok(actions) => {
+                                    warn!(
+                                        timeout_ms = LEGACY_NOTIFY_TIMEOUT.as_millis() as u64,
+                                        kill_reap_timeout_ms =
+                                            LEGACY_NOTIFY_KILL_REAP_TIMEOUT.as_millis() as u64,
+                                        recovered_actions = actions.len(),
+                                        "legacy_notify hook timed out after stdout activity; recovered actions after killing direct child"
+                                    );
+                                    return HookExecution {
+                                        result: HookResult::Success,
+                                        actions,
+                                    };
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        timeout_ms = LEGACY_NOTIFY_TIMEOUT.as_millis() as u64,
+                                        kill_reap_timeout_ms =
+                                            LEGACY_NOTIFY_KILL_REAP_TIMEOUT.as_millis() as u64,
+                                        error = %err,
+                                        "legacy_notify hook timed out after stdout activity, but recovered stdout could not be parsed"
+                                    );
+                                    return HookExecution {
+                                        result: HookResult::FailedContinue(
+                                            io::Error::other(format!(
+                                                "{}; recovered stdout parse failed: {err}",
+                                                legacy_notify_timeout_error(
+                                                    "hook process",
+                                                    LEGACY_NOTIFY_TIMEOUT,
+                                                )
+                                            ))
+                                            .into(),
+                                        ),
+                                        actions: Vec::new(),
+                                    };
+                                }
+                            }
                         }
                         warn!(
                             timeout_ms = LEGACY_NOTIFY_TIMEOUT.as_millis() as u64,
                             kill_reap_timeout_ms =
                                 LEGACY_NOTIFY_KILL_REAP_TIMEOUT.as_millis() as u64,
-                            "legacy_notify hook timed out; attempted to kill/reap direct child and continuing without actions"
+                            "legacy_notify hook timed out before any stdout actions were recoverable; marking hook as failed_continue"
                         );
                         return HookExecution {
-                            result: HookResult::Success,
+                            result: HookResult::FailedContinue(
+                                legacy_notify_timeout_error("hook process", LEGACY_NOTIFY_TIMEOUT)
+                                    .into(),
+                            ),
                             actions: Vec::new(),
                         };
                     }
                 };
 
-                let stdout_bytes = match stdout_task {
-                    Some(task) => {
-                        let mut task = task;
-                        match tokio::time::timeout(LEGACY_NOTIFY_TIMEOUT, &mut task).await {
-                            Ok(Ok(buf)) => buf,
-                            Ok(Err(_join_err)) => Vec::new(),
-                            Err(_) => {
-                                task.abort();
-                                warn!(
-                                    timeout_ms = LEGACY_NOTIFY_TIMEOUT.as_millis() as u64,
-                                    "legacy_notify stdout reader timed out; continuing without actions"
-                                );
-                                Vec::new()
-                            }
-                        }
+                let stdout_bytes = match collect_stdout_bytes(stdout_task, LEGACY_NOTIFY_TIMEOUT)
+                    .await
+                {
+                    Ok(buf) => buf,
+                    Err(err) if err.kind() == ErrorKind::TimedOut => {
+                        warn!(
+                            timeout_ms = LEGACY_NOTIFY_TIMEOUT.as_millis() as u64,
+                            "legacy_notify stdout reader timed out; marking hook as failed_continue"
+                        );
+                        return HookExecution {
+                            result: HookResult::FailedContinue(err.into()),
+                            actions: Vec::new(),
+                        };
                     }
-                    None => Vec::new(),
+                    Err(err) => {
+                        return HookExecution {
+                            result: HookResult::FailedContinue(err.into()),
+                            actions: Vec::new(),
+                        };
+                    }
                 };
 
-                let actions = match String::from_utf8(stdout_bytes) {
-                    Ok(stdout) => match parse_hook_actions_from_stdout(&stdout) {
-                        Ok(parsed) => {
-                            debug!(
-                                hook_name = "legacy_notify",
-                                parsed_actions = parsed.actions.len(),
-                                ignored_unknown_actions = parsed.ignored_unknown_actions,
-                                stdout_len = stdout.len(),
-                                "parsed hook actions from legacy notify stdout"
-                            );
-                            parsed.actions
-                        }
-                        Err(err) if stdout.trim_start().starts_with('{') => {
-                            debug!(
-                                hook_name = "legacy_notify",
-                                stdout_len = stdout.len(),
-                                error = %err,
-                                "legacy notify stdout looked like JSON but actions parsing failed"
-                            );
-                            return HookExecution {
-                                result: HookResult::FailedContinue(err.into()),
-                                actions: Vec::new(),
-                            };
-                        }
-                        Err(_) => {
-                            debug!(
-                                hook_name = "legacy_notify",
-                                stdout_len = stdout.len(),
-                                "legacy notify stdout ignored (compat plain text)"
-                            );
-                            Vec::new()
-                        }
-                    },
+                let actions = match parse_legacy_notify_stdout(stdout_bytes) {
+                    Ok(actions) => actions,
                     Err(err) => {
                         return HookExecution {
                             result: HookResult::FailedContinue(err.into()),
@@ -635,7 +746,7 @@ mod tests {
 
     #[cfg(not(windows))]
     #[tokio::test]
-    async fn notify_hook_times_out_when_stdin_consumer_stalls_fail_open() -> Result<()> {
+    async fn notify_hook_times_out_when_stdin_consumer_stalls_as_failed_continue() -> Result<()> {
         let hook = notify_hook(vec![
             "python3".to_string(),
             "-c".to_string(),
@@ -665,7 +776,7 @@ mod tests {
         let outcome = hook.execute(&payload).await;
         let elapsed = started.elapsed();
 
-        assert!(matches!(outcome.result, HookResult::Success));
+        assert!(matches!(outcome.result, HookResult::FailedContinue(_)));
         assert!(outcome.actions.is_empty());
         assert!(elapsed < Duration::from_secs(3));
         Ok(())
@@ -707,7 +818,7 @@ mod tests {
 
     #[cfg(not(windows))]
     #[tokio::test]
-    async fn notify_hook_times_out_fail_open() -> Result<()> {
+    async fn notify_hook_times_out_before_stdout_as_failed_continue() -> Result<()> {
         let hook = notify_hook(vec![
             "/bin/sh".to_string(),
             "-c".to_string(),
@@ -738,8 +849,51 @@ mod tests {
         let outcome = hook.execute(&payload).await;
         let elapsed = started.elapsed();
 
-        assert!(matches!(outcome.result, HookResult::Success));
+        assert!(matches!(outcome.result, HookResult::FailedContinue(_)));
         assert!(outcome.actions.is_empty());
+        assert!(elapsed < Duration::from_secs(3));
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn notify_hook_recovers_actions_when_process_hangs_after_emitting_stdout() -> Result<()> {
+        let hook = notify_hook(vec![
+            "python3".to_string(),
+            "-c".to_string(),
+            "import sys,time; sys.stdout.write('{\"actions\":[{\"type\":\"visible_note\",\"message\":\"late-but-buffered\"}]}'); sys.stdout.flush(); time.sleep(3)".to_string(),
+        ]);
+
+        let payload = HookPayload {
+            session_id: ThreadId::new(),
+            cwd: tempdir()?.path().to_path_buf(),
+            client: None,
+            session_source: None,
+            session_agent_role: None,
+            nero_auto_runtime: None,
+            triggered_at: chrono::Utc::now(),
+            hook_event: HookEvent::AfterAgent {
+                event: crate::HookEventAfterAgent {
+                    thread_id: ThreadId::new(),
+                    thread_name: None,
+                    turn_id: "turn-timeout-buffered-stdout".to_string(),
+                    input_messages: vec!["hi".to_string()],
+                    last_assistant_message: Some("done".to_string()),
+                },
+            },
+        };
+
+        let started = std::time::Instant::now();
+        let outcome = hook.execute(&payload).await;
+        let elapsed = started.elapsed();
+
+        assert!(matches!(outcome.result, HookResult::Success));
+        assert_eq!(
+            outcome.actions,
+            vec![crate::HookAction::VisibleNote {
+                message: "late-but-buffered".to_string()
+            }]
+        );
         assert!(elapsed < Duration::from_secs(3));
         Ok(())
     }

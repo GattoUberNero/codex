@@ -962,6 +962,19 @@ impl Codex {
             .await
     }
 
+    pub(crate) async fn set_nero_auto_runtime(
+        &self,
+        nero_auto_runtime: NeroAutoRuntimeConfig,
+    ) -> ConstraintResult<ThreadConfigSnapshot> {
+        self.session
+            .update_settings(SessionSettingsUpdate {
+                nero_auto_runtime: Some(nero_auto_runtime),
+                ..Default::default()
+            })
+            .await?;
+        Ok(self.thread_config_snapshot().await)
+    }
+
     pub(crate) async fn agent_status(&self) -> AgentStatus {
         self.agent_status.borrow().clone()
     }
@@ -10818,6 +10831,71 @@ mod tests {
                 .iter()
                 .any(|text| text.contains("Reason: inactive")),
             "expected a realtime end update from previous turn settings, got {developer_texts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_settings_update_items_emits_runtime_developer_instruction_update_when_changed() {
+        let (session, mut previous_context) = make_session_and_context().await;
+        previous_context.developer_instructions = Some("base instructions".to_string());
+        let mut current_context = previous_context
+            .with_model(
+                previous_context.model_info.slug.clone(),
+                &session.services.models_manager,
+            )
+            .await;
+        current_context.developer_instructions = Some(
+            "base instructions\n\n## NERO-SYSTEM v1\nEmit the strict JSON block below.".to_string(),
+        );
+
+        let update_items = session
+            .build_settings_update_items(
+                Some(&previous_context.to_turn_context_item()),
+                &current_context,
+            )
+            .await;
+
+        let developer_texts = developer_input_texts(&update_items);
+        assert!(
+            developer_texts.iter().any(|text| {
+                text.contains("Runtime developer instructions update for this session.")
+                    && text.contains("## NERO-SYSTEM v1")
+                    && text.contains("Emit the strict JSON block below.")
+            }),
+            "expected a runtime developer instructions update, got {developer_texts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_settings_update_items_emits_runtime_developer_instruction_clear_note_when_removed()
+     {
+        let (session, mut previous_context) = make_session_and_context().await;
+        previous_context.developer_instructions = Some(
+            "base instructions\n\n## NERO-SYSTEM v1\nEmit the strict JSON block below.".to_string(),
+        );
+        let mut current_context = previous_context
+            .with_model(
+                previous_context.model_info.slug.clone(),
+                &session.services.models_manager,
+            )
+            .await;
+        current_context.developer_instructions = None;
+
+        let update_items = session
+            .build_settings_update_items(
+                Some(&previous_context.to_turn_context_item()),
+                &current_context,
+            )
+            .await;
+
+        let developer_texts = developer_input_texts(&update_items);
+        assert!(
+            developer_texts.iter().any(|text| {
+                text.contains("Runtime developer instructions update for this session.")
+                    && text
+                        .contains("No session-local runtime developer instructions are active now")
+            }),
+            "expected a runtime developer instructions clear note, got {developer_texts:?}"
         );
     }
 

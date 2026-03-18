@@ -12,7 +12,11 @@ use crate::bottom_pane::SelectionViewParams;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ExternalEditorState;
+use crate::chatwidget::NeroAutoHotkeyAction;
 use crate::chatwidget::ThreadInputState;
+use crate::chatwidget::nero_auto_action_message;
+use crate::chatwidget::nero_auto_status_message;
+use crate::chatwidget::next_nero_auto_runtime_config;
 use crate::cwd_prompt::CwdPromptAction;
 use crate::diff_render::DiffSummary;
 use crate::exec_command::strip_bash_lc_and_escape;
@@ -81,6 +85,7 @@ use codex_protocol::protocol::TokenUsage;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
+use color_eyre::eyre::eyre;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -88,18 +93,24 @@ use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
+use serde::Deserialize;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
+use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
 use tokio::select;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
@@ -113,6 +124,355 @@ use toml::Value as TomlValue;
 mod pending_interactive_replay;
 
 use self::pending_interactive_replay::PendingInteractiveReplayState;
+
+const NERO_RUNTIME_STATE_CONTROL_CWD_ENV: &str = "NERO_RUNTIME_STATE_CONTROL_CWD";
+const NERO_RUNTIME_STATE_CONTROL_CWD_ENV_COMPAT: &str = "NEROBAR_NERO_RUNTIME_STATE_CONTROL_CWD";
+const NERO_RUNTIME_STATE_CONTROL_MODULE_ENV: &str = "NERO_RUNTIME_STATE_CONTROL_MODULE";
+const NERO_RUNTIME_STATE_CONTROL_MODULE_ENV_COMPAT: &str =
+    "NEROBAR_NERO_RUNTIME_STATE_CONTROL_MODULE";
+const NERO_RUNTIME_STATE_CONTROL_TIMEOUT_ENV: &str = "NERO_RUNTIME_CONTROL_TIMEOUT_MS";
+const NERO_RUNTIME_STATE_CONTROL_TIMEOUT_ENV_COMPAT: &str =
+    "NEROBAR_NERO_RUNTIME_CONTROL_TIMEOUT_MS";
+const NERO_RUNTIME_STATE_CONTROL_PYTHON_ENV: &str = "NERO_RUNTIME_PYTHON_BIN";
+const NERO_RUNTIME_STATE_CONTROL_PYTHON_ENV_COMPAT: &str = "NEROBAR_NERO_RUNTIME_PYTHON_BIN";
+const NERO_AUTO_HOTKEY_CONFIG_ENV: &str = "CODEXN_CONFIG_NERO_AUTO_PATH";
+
+#[derive(Debug, Clone)]
+struct NeroAutoRuntimeBridgeSettings {
+    cwd: PathBuf,
+    module: String,
+    python_bin: String,
+    timeout: Duration,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NeroAutoBridgeReadRequest {
+    thread_id: String,
+    session_source: String,
+    config_path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NeroAutoBridgeApplyRequest {
+    path: String,
+    config_path: String,
+    expected_version: String,
+    thread_id: String,
+    has_enabled: bool,
+    enabled: bool,
+    has_autonomy_level: bool,
+    autonomy_level: i64,
+    has_autonomy_step: bool,
+    autonomy_step_per_round: Option<f64>,
+    has_max_rounds: bool,
+    max_auto_rounds: i64,
+    has_done_stop_scope: bool,
+    done_stop_scope: Option<String>,
+    has_auto_rounds: bool,
+    auto_rounds: Option<i64>,
+    has_reset_counter: bool,
+    reset_counter: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NeroAutoBridgePolicy {
+    #[serde(alias = "autonomy_level")]
+    autonomy_level: Option<i64>,
+    #[serde(alias = "autonomy_step_per_round")]
+    autonomy_step_per_round: Option<f64>,
+    #[serde(alias = "max_auto_rounds")]
+    max_auto_rounds: Option<i64>,
+    #[serde(alias = "done_stop_scope")]
+    done_stop_scope: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NeroAutoBridgeDefaults {
+    enabled: bool,
+    autonomy_level: i64,
+    autonomy_step_per_round: f64,
+    max_auto_rounds: i64,
+    done_stop_scope: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NeroAutoBridgeApplied {
+    enabled: Option<bool>,
+    policy_override: Option<NeroAutoBridgePolicy>,
+    auto_rounds: i64,
+    updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NeroAutoBridgeEffective {
+    enabled: bool,
+    source: String,
+    autonomy_level: i64,
+    autonomy_step_per_round: f64,
+    max_auto_rounds: i64,
+    done_stop_scope: String,
+    auto_rounds: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NeroAutoBridgeReadResponse {
+    ok: bool,
+    error: Option<String>,
+    message: Option<String>,
+    path: String,
+    config_path: String,
+    version: String,
+    thread_id: String,
+    session_source: Option<String>,
+    is_subagent: bool,
+    defaults: NeroAutoBridgeDefaults,
+    applied: NeroAutoBridgeApplied,
+    effective: NeroAutoBridgeEffective,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NeroAutoBridgeConflictCurrent {
+    path: Option<String>,
+    version: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NeroAutoBridgeApplyResponse {
+    ok: bool,
+    error: Option<String>,
+    message: Option<String>,
+    path: Option<String>,
+    version: Option<String>,
+    conflict: Option<bool>,
+    current: Option<NeroAutoBridgeConflictCurrent>,
+}
+
+fn first_non_empty_env(names: &[&str]) -> Option<String> {
+    names
+        .iter()
+        .find_map(|name| std::env::var(name).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn bounded_env_u64(names: &[&str], fallback: u64, min: u64, max: u64) -> u64 {
+    let parsed = first_non_empty_env(names)
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(fallback);
+    parsed.clamp(min, max)
+}
+
+fn nero_runtime_state_control_default_cwd() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join("codex-nero-sdk")
+}
+
+impl NeroAutoRuntimeBridgeSettings {
+    fn resolve() -> Self {
+        let cwd = first_non_empty_env(&[
+            NERO_RUNTIME_STATE_CONTROL_CWD_ENV,
+            NERO_RUNTIME_STATE_CONTROL_CWD_ENV_COMPAT,
+        ])
+        .map(PathBuf::from)
+        .unwrap_or_else(nero_runtime_state_control_default_cwd);
+        let module = first_non_empty_env(&[
+            NERO_RUNTIME_STATE_CONTROL_MODULE_ENV,
+            NERO_RUNTIME_STATE_CONTROL_MODULE_ENV_COMPAT,
+        ])
+        .unwrap_or_else(|| "nero_hook_runtime.state_runtime_control".to_string());
+        let python_bin = first_non_empty_env(&[
+            NERO_RUNTIME_STATE_CONTROL_PYTHON_ENV,
+            NERO_RUNTIME_STATE_CONTROL_PYTHON_ENV_COMPAT,
+        ])
+        .unwrap_or_else(|| "python3".to_string());
+        let timeout_ms = bounded_env_u64(
+            &[
+                NERO_RUNTIME_STATE_CONTROL_TIMEOUT_ENV,
+                NERO_RUNTIME_STATE_CONTROL_TIMEOUT_ENV_COMPAT,
+            ],
+            4000,
+            500,
+            30000,
+        );
+        Self {
+            cwd,
+            module,
+            python_bin,
+            timeout: Duration::from_millis(timeout_ms),
+        }
+    }
+}
+
+fn nero_auto_bridge_config_path(codex_home: &Path) -> PathBuf {
+    let codex_home_config = codex_home.join("config-nero-hook-auto.toml");
+    if codex_home_config.is_file() {
+        return codex_home_config;
+    }
+    if let Some(path) = std::env::var_os(NERO_AUTO_HOTKEY_CONFIG_ENV) {
+        return PathBuf::from(path);
+    }
+    codex_home_config
+}
+
+async fn run_nero_auto_runtime_bridge<T, U>(command_name: &str, payload: &T) -> Result<U>
+where
+    T: Serialize,
+    U: DeserializeOwned,
+{
+    let settings = NeroAutoRuntimeBridgeSettings::resolve();
+    if !settings.cwd.exists() {
+        return Err(eyre!(
+            "runtime bridge cwd missing: {}",
+            settings.cwd.display()
+        ));
+    }
+    let bridge_input =
+        serde_json::to_vec(payload).wrap_err("serialize nero-auto bridge payload")?;
+    let mut command = Command::new(&settings.python_bin);
+    command
+        .kill_on_drop(true)
+        .arg("-m")
+        .arg(&settings.module)
+        .arg(command_name)
+        .current_dir(&settings.cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .wrap_err_with(|| format!("spawn nero-auto runtime bridge: {}", settings.module))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| eyre!("runtime bridge stdin unavailable"))?;
+    stdin
+        .write_all(&bridge_input)
+        .await
+        .wrap_err("write nero-auto bridge stdin")?;
+    drop(stdin);
+    let output = tokio::time::timeout(settings.timeout, child.wait_with_output())
+        .await
+        .map_err(|_| {
+            eyre!(
+                "runtime bridge timed out after {}ms",
+                settings.timeout.as_millis()
+            )
+        })?
+        .wrap_err("wait for nero-auto runtime bridge output")?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stdout.is_empty() {
+        let detail = if stderr.is_empty() {
+            format!("exit status {}", output.status)
+        } else {
+            stderr
+        };
+        return Err(eyre!("runtime bridge returned empty stdout: {detail}"));
+    }
+    serde_json::from_str(&stdout).wrap_err_with(|| {
+        if stderr.is_empty() {
+            format!("parse runtime bridge payload from stdout: {stdout}")
+        } else {
+            format!("parse runtime bridge payload failed; stderr={stderr}; stdout={stdout}")
+        }
+    })
+}
+
+async fn read_nero_auto_runtime_bridge_state(
+    codex_home: &Path,
+    thread_id: ThreadId,
+    session_source: &SessionSource,
+) -> Result<NeroAutoBridgeReadResponse> {
+    let expected_thread_id = thread_id.to_string();
+    let expected_session_source = session_source.to_string();
+    let request = NeroAutoBridgeReadRequest {
+        thread_id: expected_thread_id.clone(),
+        session_source: expected_session_source.clone(),
+        config_path: nero_auto_bridge_config_path(codex_home)
+            .to_string_lossy()
+            .to_string(),
+    };
+    let response: NeroAutoBridgeReadResponse =
+        run_nero_auto_runtime_bridge("read-session-auto", &request).await?;
+    if response.ok {
+        if response.thread_id.trim() != expected_thread_id {
+            return Err(eyre!(
+                "runtime bridge thread mismatch: expected={expected_thread_id}, got={}",
+                response.thread_id.trim()
+            ));
+        }
+        if let Some(returned_session_source) = response.session_source.as_ref() {
+            let returned_session_source = returned_session_source.trim();
+            if !returned_session_source.is_empty() && returned_session_source != expected_session_source
+            {
+                return Err(eyre!(
+                    "runtime bridge session-source mismatch: expected={expected_session_source}, got={returned_session_source}"
+                ));
+            }
+        }
+        Ok(response)
+    } else {
+        let detail = response
+            .message
+            .clone()
+            .or(response.error.clone())
+            .unwrap_or_else(|| "runtime bridge read failed".to_string());
+        Err(eyre!(detail))
+    }
+}
+
+async fn apply_nero_auto_runtime_bridge_state(
+    current: &NeroAutoBridgeReadResponse,
+    next: codex_protocol::protocol::NeroAutoRuntimeConfig,
+) -> Result<NeroAutoBridgeApplyResponse> {
+    let request = NeroAutoBridgeApplyRequest {
+        path: current.path.clone(),
+        config_path: current.config_path.clone(),
+        expected_version: current.version.clone(),
+        thread_id: current.thread_id.clone(),
+        has_enabled: true,
+        enabled: next.enabled,
+        has_autonomy_level: true,
+        autonomy_level: next.autonomy_level,
+        has_autonomy_step: false,
+        autonomy_step_per_round: None,
+        has_max_rounds: true,
+        max_auto_rounds: next.max_auto_rounds,
+        has_done_stop_scope: false,
+        done_stop_scope: None,
+        has_auto_rounds: false,
+        auto_rounds: None,
+        has_reset_counter: false,
+        reset_counter: false,
+    };
+    let response: NeroAutoBridgeApplyResponse =
+        run_nero_auto_runtime_bridge("apply-session-auto", &request).await?;
+    if response.ok {
+        Ok(response)
+    } else {
+        Ok(response)
+    }
+}
+
+fn nero_auto_runtime_from_bridge_state(
+    state: &NeroAutoBridgeReadResponse,
+) -> codex_protocol::protocol::NeroAutoRuntimeConfig {
+    codex_protocol::protocol::NeroAutoRuntimeConfig {
+        enabled: state.effective.enabled,
+        autonomy_level: state.effective.autonomy_level.clamp(1, 10),
+        max_auto_rounds: state.effective.max_auto_rounds.max(0),
+    }
+}
 
 const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
 const THREAD_EVENT_CHANNEL_CAPACITY: usize = 32768;
@@ -1374,6 +1734,248 @@ impl App {
         Ok(())
     }
 
+    async fn nero_auto_hotkey_thread(
+        &self,
+        requested_thread_id: Option<ThreadId>,
+    ) -> Result<Option<(ThreadId, Arc<codex_core::CodexThread>)>> {
+        let Some(thread_id) = requested_thread_id else {
+            return Ok(None);
+        };
+        match self.server.get_thread(thread_id).await {
+            Ok(thread) => Ok(Some((thread_id, thread))),
+            Err(err) => {
+                if self.thread_event_channels.contains_key(&thread_id) {
+                    Ok(None)
+                } else {
+                    Err(err.into())
+                }
+            }
+        }
+    }
+
+    async fn refresh_nero_auto_runtime_context_from_bridge(
+        &mut self,
+        thread_id: ThreadId,
+        session_source: &SessionSource,
+    ) -> Result<NeroAutoBridgeReadResponse> {
+        if self.active_thread_id != Some(thread_id) {
+            return Err(eyre!(
+                "stale hotkey event: active thread switched before bridge read (requested={thread_id})"
+            ));
+        }
+        let state =
+            read_nero_auto_runtime_bridge_state(&self.config.codex_home, thread_id, session_source)
+                .await?;
+        if self.active_thread_id != Some(thread_id) {
+            return Err(eyre!(
+                "stale hotkey event: active thread switched before bridge apply (requested={thread_id})"
+            ));
+        }
+        self.chat_widget.set_nero_auto_runtime_context(
+            nero_auto_runtime_from_bridge_state(&state),
+            session_source.clone(),
+        );
+        Ok(state)
+    }
+
+    async fn handle_nero_auto_hotkey_event(
+        &mut self,
+        requested_thread_id: Option<ThreadId>,
+        action: NeroAutoHotkeyAction,
+    ) {
+        if let Some(requested_thread_id) = requested_thread_id
+            && self.active_thread_id != Some(requested_thread_id)
+        {
+            tracing::debug!(
+                "ignoring stale nero-auto hotkey event for non-active thread {requested_thread_id}"
+            );
+            return;
+        }
+        let Some((thread_id, thread)) =
+            (match self.nero_auto_hotkey_thread(requested_thread_id).await {
+                Ok(thread) => thread,
+                Err(err) => {
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to read current-session nero-auto control state: {err}"
+                    ));
+                    self.chat_widget.finish_nero_auto_hotkey_action(false);
+                    return;
+                }
+            })
+        else {
+            let message = if self.chat_widget.is_session_configured() {
+                "Nero-auto hotkeys require a live session thread.".to_string()
+            } else {
+                "Nero-auto hotkeys are available after session startup.".to_string()
+            };
+            let hint = if self.chat_widget.is_session_configured() {
+                Some(
+                    "Closed/replay sessions cannot change or read confirmed nero-auto state."
+                        .to_string(),
+                )
+            } else {
+                Some(
+                    "Wait for the Codex header and first turn context, then use F1/F2/F3/F4/F5."
+                        .to_string(),
+                )
+            };
+            self.chat_widget.add_info_message(message, hint);
+            self.chat_widget.finish_nero_auto_hotkey_action(false);
+            return;
+        };
+
+        let snapshot = thread.config_snapshot().await;
+        let session_source = snapshot.session_source.clone();
+        let current = match self
+            .refresh_nero_auto_runtime_context_from_bridge(thread_id, &session_source)
+            .await
+        {
+            Ok(current) => current,
+            Err(err) => {
+                if err.to_string().contains("stale hotkey event") {
+                    tracing::debug!("{err}");
+                    return;
+                }
+                self.chat_widget.add_error_message(format!(
+                    "Failed to read current-session nero-auto control state from runtime bridge: {err}"
+                ));
+                self.chat_widget.finish_nero_auto_hotkey_action(false);
+                return;
+            }
+        };
+        let confirmed_previous = nero_auto_runtime_from_bridge_state(&current);
+
+        if matches!(action, NeroAutoHotkeyAction::ShowStatus) {
+            let (message, hint) = nero_auto_status_message(confirmed_previous);
+            let source_label = current
+                .session_source
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| session_source.to_string());
+            let context_hint = format!(
+                "Bridge context: thread-id={}, session-source={}, state-path={}",
+                current.thread_id, source_label, current.path
+            );
+            let merged_hint = Some(match hint {
+                Some(base) => format!("{base}\n{context_hint}"),
+                None => context_hint,
+            });
+            self.chat_widget.add_info_message(message, merged_hint);
+            return;
+        }
+
+        if matches!(session_source, SessionSource::SubAgent(_)) || current.is_subagent {
+            self.chat_widget.add_info_message(
+                "Nero-auto stays OFF for subagent sessions.".to_string(),
+                Some(
+                    "Delegated agent threads never use nero-auto, so handoff/completion remains clean."
+                        .to_string(),
+                ),
+            );
+            self.chat_widget.finish_nero_auto_hotkey_action(true);
+            return;
+        }
+
+        let requested_next = next_nero_auto_runtime_config(confirmed_previous, action);
+        let apply_result = match apply_nero_auto_runtime_bridge_state(&current, requested_next)
+            .await
+        {
+            Ok(apply_result) => apply_result,
+            Err(err) => {
+                if err.to_string().contains("stale hotkey event") {
+                    tracing::debug!("{err}");
+                    return;
+                }
+                self.chat_widget.add_error_message(format!(
+                    "Failed to update session-local nero-auto control state through runtime bridge: {err}"
+                ));
+                if let Ok(refreshed) = self
+                    .refresh_nero_auto_runtime_context_from_bridge(thread_id, &session_source)
+                    .await
+                {
+                    self.chat_widget.set_nero_auto_runtime_context(
+                        nero_auto_runtime_from_bridge_state(&refreshed),
+                        session_source.clone(),
+                    );
+                }
+                self.chat_widget.finish_nero_auto_hotkey_action(false);
+                return;
+            }
+        };
+
+        if !apply_result.ok {
+            let detail = apply_result
+                .message
+                .clone()
+                .or(apply_result.error.clone())
+                .unwrap_or_else(|| "runtime bridge rejected nero-auto update".to_string());
+            let extra = if apply_result.conflict.unwrap_or(false) {
+                if let Some(current_state) = apply_result.current.as_ref() {
+                    format!(
+                        " (compare-and-swap conflict; current version: {})",
+                        current_state.version.as_deref().unwrap_or("unknown")
+                    )
+                } else {
+                    " (compare-and-swap conflict)".to_string()
+                }
+            } else {
+                String::new()
+            };
+            if let Ok(refreshed) = self
+                .refresh_nero_auto_runtime_context_from_bridge(thread_id, &session_source)
+                .await
+            {
+                self.chat_widget.set_nero_auto_runtime_context(
+                    nero_auto_runtime_from_bridge_state(&refreshed),
+                    session_source.clone(),
+                );
+            }
+            self.chat_widget
+                .add_error_message(format!("Failed to update session-local nero-auto control state through runtime bridge: {detail}{extra}"));
+            self.chat_widget.finish_nero_auto_hotkey_action(false);
+            return;
+        }
+
+        let confirmed_state = match self
+            .refresh_nero_auto_runtime_context_from_bridge(thread_id, &session_source)
+            .await
+        {
+            Ok(confirmed_state) => confirmed_state,
+            Err(err) => {
+                if err.to_string().contains("stale hotkey event") {
+                    tracing::debug!("{err}");
+                    return;
+                }
+                self.chat_widget.add_error_message(format!(
+                    "Nero-auto update applied, but confirmed readback from runtime bridge failed: {err}"
+                ));
+                self.chat_widget.finish_nero_auto_hotkey_action(false);
+                return;
+            }
+        };
+        let confirmed_next = nero_auto_runtime_from_bridge_state(&confirmed_state);
+        let (message, hint) = nero_auto_action_message(action, confirmed_previous, confirmed_next);
+        let source_label = confirmed_state
+            .session_source
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| session_source.to_string());
+        let context_hint = format!(
+            "Bridge context: thread-id={}, session-source={}, state-path={}",
+            confirmed_state.thread_id, source_label, confirmed_state.path
+        );
+        let merged_hint = Some(match hint {
+            Some(base) => format!("{base}\n{context_hint}"),
+            None => context_hint,
+        });
+        self.chat_widget.add_info_message(message, merged_hint);
+        self.chat_widget.finish_nero_auto_hotkey_action(true);
+    }
+
     fn reset_for_thread_switch(&mut self, tui: &mut tui::Tui) -> Result<()> {
         self.overlay = None;
         self.transcript_cells.clear();
@@ -2208,6 +2810,9 @@ impl App {
                     self.note_active_thread_outbound_op(op).await;
                     self.refresh_pending_thread_approvals().await;
                 }
+            }
+            AppEvent::ApplyNeroAutoHotkey { thread_id, action } => {
+                self.handle_nero_auto_hotkey_event(thread_id, action).await;
             }
             AppEvent::SubmitThreadOp { thread_id, op } => {
                 self.submit_op_to_thread(thread_id, op).await;
@@ -3737,6 +4342,7 @@ mod tests {
     use insta::assert_snapshot;
     use pretty_assertions::assert_eq;
     use ratatui::prelude::Line;
+    use std::path::Path;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -5403,6 +6009,232 @@ mod tests {
             rx,
             op_rx,
         )
+    }
+
+    fn drain_history_messages(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    ) -> Vec<String> {
+        let mut rendered = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let AppEvent::InsertHistoryCell(cell) = event {
+                let mut text = String::new();
+                for line in cell.display_lines(120) {
+                    for span in line.spans {
+                        text.push_str(&span.content);
+                    }
+                    text.push('\n');
+                }
+                rendered.push(text);
+            }
+        }
+        rendered
+    }
+
+    fn write_test_nero_auto_bridge_config(codex_home: &Path, state_path: &Path) -> PathBuf {
+        let config_path = codex_home.join("config-nero-hook-auto.toml");
+        std::fs::create_dir_all(codex_home).expect("create codex home");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[nero.hook.runtime.auto]\n\
+enabled = false\n\
+\n\
+[nero.hook.runtime.auto.policy]\n\
+autonomy_level = 5\n\
+autonomy_step_per_round = 1.0\n\
+max_auto_rounds = 7\n\
+done_stop_scope = \"active_phase\"\n\
+\n\
+[nero.hook.runtime.auto.state]\n\
+path = {:?}\n",
+                state_path.to_string_lossy()
+            ),
+        )
+        .expect("write nero-auto bridge config");
+        config_path
+    }
+
+    fn write_test_nero_auto_bridge_state(
+        state_path: &Path,
+        thread_id: ThreadId,
+        enabled: Option<bool>,
+        autonomy_level: Option<i64>,
+        max_auto_rounds: Option<i64>,
+    ) {
+        let mut thread_entry = serde_json::Map::new();
+        if let Some(enabled) = enabled {
+            thread_entry.insert(
+                "session_auto_enabled_override".to_string(),
+                serde_json::Value::Bool(enabled),
+            );
+        }
+        let mut policy = serde_json::Map::new();
+        if let Some(autonomy_level) = autonomy_level {
+            policy.insert(
+                "autonomy_level".to_string(),
+                serde_json::Value::Number(autonomy_level.into()),
+            );
+        }
+        if let Some(max_auto_rounds) = max_auto_rounds {
+            policy.insert(
+                "max_auto_rounds".to_string(),
+                serde_json::Value::Number(max_auto_rounds.into()),
+            );
+        }
+        if !policy.is_empty() {
+            thread_entry.insert(
+                "session_auto_policy_override".to_string(),
+                serde_json::Value::Object(policy),
+            );
+        }
+        thread_entry.insert(
+            "auto_rounds".to_string(),
+            serde_json::Value::Number(0.into()),
+        );
+        thread_entry.insert(
+            "session_auto_override_updated_at".to_string(),
+            serde_json::Value::String("2026-03-18T00:00:00Z".to_string()),
+        );
+        let mut threads = serde_json::Map::new();
+        threads.insert(
+            format!("id:{thread_id}"),
+            serde_json::Value::Object(thread_entry),
+        );
+        let payload = serde_json::json!({ "threads": threads });
+        if let Some(parent) = state_path.parent() {
+            std::fs::create_dir_all(parent).expect("create state path parent");
+        }
+        std::fs::write(
+            state_path,
+            serde_json::to_string(&payload).expect("serialize runtime state"),
+        )
+        .expect("write runtime bridge state");
+    }
+
+    #[tokio::test]
+    async fn nero_auto_hotkey_status_reads_confirmed_bridge_state() {
+        let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;
+        let codex_home = tempdir().expect("temp codex home");
+        let state_path = codex_home.path().join("log/nero-hook-auto-state.json");
+        write_test_nero_auto_bridge_config(codex_home.path(), &state_path);
+        app.config.codex_home = codex_home.path().to_path_buf();
+        let new_thread = app
+            .server
+            .start_thread(app.config.clone())
+            .await
+            .expect("start live thread for nero-auto test");
+        app.active_thread_id = Some(new_thread.thread_id);
+        write_test_nero_auto_bridge_state(
+            &state_path,
+            new_thread.thread_id,
+            Some(true),
+            Some(7),
+            Some(4),
+        );
+
+        app.handle_nero_auto_hotkey_event(
+            Some(new_thread.thread_id),
+            NeroAutoHotkeyAction::ShowStatus,
+        )
+        .await;
+
+        let messages = drain_history_messages(&mut rx).join("\n");
+        assert!(messages.contains("Nero-auto status"), "{messages:?}");
+        assert!(messages.contains("enabled=on"), "{messages:?}");
+        assert!(messages.contains("diff-check=7"), "{messages:?}");
+        assert!(messages.contains("max-rounds=4 (4)"), "{messages:?}");
+        assert_eq!(
+            app.chat_widget.nero_auto_runtime_context(),
+            codex_protocol::protocol::NeroAutoRuntimeConfig {
+                enabled: true,
+                autonomy_level: 7,
+                max_auto_rounds: 4,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn nero_auto_hotkey_toggle_updates_bridge_state_and_widget_from_confirmed_readback() {
+        let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;
+        let codex_home = tempdir().expect("temp codex home");
+        let state_path = codex_home.path().join("log/nero-hook-auto-state.json");
+        write_test_nero_auto_bridge_config(codex_home.path(), &state_path);
+        app.config.codex_home = codex_home.path().to_path_buf();
+        let new_thread = app
+            .server
+            .start_thread(app.config.clone())
+            .await
+            .expect("start live thread for nero-auto toggle test");
+        app.active_thread_id = Some(new_thread.thread_id);
+
+        app.handle_nero_auto_hotkey_event(
+            Some(new_thread.thread_id),
+            NeroAutoHotkeyAction::ToggleEnabled,
+        )
+        .await;
+
+        let messages = drain_history_messages(&mut rx).join("\n");
+        assert!(messages.contains("Nero-auto OFF -> ON"), "{messages:?}");
+        let confirmed = read_nero_auto_runtime_bridge_state(
+            &app.config.codex_home,
+            new_thread.thread_id,
+            &SessionSource::Cli,
+        )
+        .await
+        .expect("read confirmed runtime bridge state");
+        assert_eq!(
+            nero_auto_runtime_from_bridge_state(&confirmed),
+            codex_protocol::protocol::NeroAutoRuntimeConfig {
+                enabled: true,
+                autonomy_level: 5,
+                max_auto_rounds: 7,
+            }
+        );
+        assert_eq!(
+            app.chat_widget.nero_auto_runtime_context(),
+            nero_auto_runtime_from_bridge_state(&confirmed)
+        );
+    }
+
+    #[tokio::test]
+    async fn nero_auto_hotkey_event_for_non_active_thread_is_ignored() {
+        let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;
+        let codex_home = tempdir().expect("temp codex home");
+        let state_path = codex_home.path().join("log/nero-hook-auto-state.json");
+        write_test_nero_auto_bridge_config(codex_home.path(), &state_path);
+        app.config.codex_home = codex_home.path().to_path_buf();
+
+        let active_thread = app
+            .server
+            .start_thread(app.config.clone())
+            .await
+            .expect("start active thread for stale-event test");
+        let stale_thread = app
+            .server
+            .start_thread(app.config.clone())
+            .await
+            .expect("start stale thread for stale-event test");
+        app.active_thread_id = Some(active_thread.thread_id);
+
+        app.handle_nero_auto_hotkey_event(
+            Some(stale_thread.thread_id),
+            NeroAutoHotkeyAction::ToggleEnabled,
+        )
+        .await;
+
+        let messages = drain_history_messages(&mut rx).join("\n");
+        assert!(messages.is_empty(), "{messages:?}");
+
+        let active_state =
+            read_nero_auto_runtime_bridge_state(&app.config.codex_home, active_thread.thread_id, &SessionSource::Cli)
+                .await
+                .expect("read active thread runtime bridge state");
+        let stale_state =
+            read_nero_auto_runtime_bridge_state(&app.config.codex_home, stale_thread.thread_id, &SessionSource::Cli)
+                .await
+                .expect("read stale thread runtime bridge state");
+        assert!(!active_state.effective.enabled);
+        assert!(!stale_state.effective.enabled);
     }
 
     fn next_user_turn_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) -> Op {

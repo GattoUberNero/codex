@@ -1875,6 +1875,7 @@ async fn make_chatwidget_manual(
         last_rendered_user_message_event: None,
         last_nero_auto_hotkey_action: None,
         last_nero_auto_hotkey_at: None,
+        nero_auto_hotkey_inflight: false,
         nero_auto_runtime: NeroAutoRuntimeConfig::default(),
         is_subagent_session: false,
     };
@@ -1895,16 +1896,18 @@ fn next_submit_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) -> Op {
     }
 }
 
-fn next_override_turn_context(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) -> Op {
+fn next_nero_auto_hotkey_app_event(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+) -> AppEvent {
     loop {
-        match op_rx.try_recv() {
-            Ok(op @ Op::OverrideTurnContext { .. }) => return op,
-            Ok(_) => continue,
+        match rx.try_recv() {
+            Ok(event @ AppEvent::ApplyNeroAutoHotkey { .. }) => return event,
+            Ok(other) => panic!("unexpected app event while waiting for ApplyNeroAutoHotkey: {other:?}"),
             Err(TryRecvError::Empty) => {
-                panic!("expected OverrideTurnContext op but queue was empty")
+                panic!("expected ApplyNeroAutoHotkey app event but queue was empty")
             }
             Err(TryRecvError::Disconnected) => {
-                panic!("expected OverrideTurnContext op but channel closed")
+                panic!("expected ApplyNeroAutoHotkey app event but channel closed")
             }
         }
     }
@@ -5139,38 +5142,21 @@ async fn nero_auto_hotkey_toggle_updates_only_current_session_and_reports_state(
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
     let tmp = tempdir().expect("tempdir");
     chat.config.codex_home = tmp.path().to_path_buf();
-    chat.thread_id = Some(ThreadId::new());
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
 
     chat.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
 
-    let messages = drain_insert_history(&mut rx)
-        .iter()
-        .map(|lines| lines_to_single_string(lines.as_slice()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        messages.contains("Nero-auto OFF -> ON"),
-        "expected toggle confirmation message, got: {messages:?}"
-    );
-    assert!(
-        messages.contains("diff-check=5"),
-        "expected diff-check in status message, got: {messages:?}"
-    );
-    assert!(messages.contains("scope=current-session"));
-    assert_eq!(chat.nero_auto_runtime.enabled, true);
-    assert!(!nero_auto_config_path(&chat.config.codex_home).exists());
-
     assert_matches!(
-        next_override_turn_context(&mut op_rx),
-        Op::OverrideTurnContext {
-            nero_auto_runtime: Some(NeroAutoRuntimeConfig {
-                enabled: true,
-                autonomy_level: 5,
-                max_auto_rounds: 7,
-            }),
-            ..
-        }
+        next_nero_auto_hotkey_app_event(&mut rx),
+        AppEvent::ApplyNeroAutoHotkey {
+            thread_id: Some(id),
+            action: NeroAutoHotkeyAction::ToggleEnabled,
+        } if id == thread_id
     );
+    assert_eq!(chat.nero_auto_runtime.enabled, false);
+    assert!(chat.nero_auto_hotkey_inflight());
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
 }
 
 #[tokio::test]
@@ -5178,90 +5164,151 @@ async fn nero_auto_hotkey_toggle_debounces_duplicate_press_events() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
     let tmp = tempdir().expect("tempdir");
     chat.config.codex_home = tmp.path().to_path_buf();
-    chat.thread_id = Some(ThreadId::new());
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
 
     let toggle = KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE);
     chat.handle_key_event(toggle);
     // Some terminals can emit duplicate Press events for one physical keypress.
     chat.handle_key_event(toggle);
 
-    let messages = drain_insert_history(&mut rx)
-        .iter()
-        .map(|lines| lines_to_single_string(lines.as_slice()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        messages.contains("Nero-auto OFF -> ON"),
-        "expected ON confirmation message, got: {messages:?}"
-    );
-    assert!(
-        !messages.contains("Nero-auto ON -> OFF"),
-        "duplicate keypress should be debounced, got: {messages:?}"
-    );
-    assert_eq!(
-        messages.matches("Nero-auto ").count(),
-        1,
-        "expected exactly one toggle message, got: {messages:?}"
-    );
     assert_matches!(
-        next_override_turn_context(&mut op_rx),
-        Op::OverrideTurnContext {
-            nero_auto_runtime: Some(NeroAutoRuntimeConfig { enabled: true, .. }),
-            ..
-        }
+        next_nero_auto_hotkey_app_event(&mut rx),
+        AppEvent::ApplyNeroAutoHotkey {
+            thread_id: Some(id),
+            action: NeroAutoHotkeyAction::ToggleEnabled,
+        } if id == thread_id
     );
+    while let Ok(event) = rx.try_recv() {
+        panic!("unexpected extra app event after debounced duplicate toggle: {event:?}");
+    }
     assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
-    assert!(!nero_auto_config_path(&chat.config.codex_home).exists());
+    assert!(chat.nero_auto_hotkey_inflight());
 }
 
 #[tokio::test]
 async fn nero_auto_hotkeys_adjust_policy_and_respect_composer_focus() {
-    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
     let tmp = tempdir().expect("tempdir");
     chat.config.codex_home = tmp.path().to_path_buf();
-    chat.thread_id = Some(ThreadId::new());
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
 
     // F2 -> difficulty +1
     chat.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+    assert_matches!(
+        next_nero_auto_hotkey_app_event(&mut rx),
+        AppEvent::ApplyNeroAutoHotkey {
+            thread_id: Some(id),
+            action: NeroAutoHotkeyAction::IncreaseDifficulty,
+        } if id == thread_id
+    );
+    assert!(chat.nero_auto_hotkey_inflight());
+    chat.finish_nero_auto_hotkey_action(false);
+
     // F3 -> max rounds +1
     chat.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
     assert_matches!(
-        next_override_turn_context(&mut op_rx),
-        Op::OverrideTurnContext {
-            nero_auto_runtime: Some(NeroAutoRuntimeConfig {
-                autonomy_level: 6,
-                max_auto_rounds: 7,
-                ..
-            }),
-            ..
-        }
+        next_nero_auto_hotkey_app_event(&mut rx),
+        AppEvent::ApplyNeroAutoHotkey {
+            thread_id: Some(id),
+            action: NeroAutoHotkeyAction::CycleMaxRounds,
+        } if id == thread_id
     );
-    assert_matches!(
-        next_override_turn_context(&mut op_rx),
-        Op::OverrideTurnContext {
-            nero_auto_runtime: Some(NeroAutoRuntimeConfig {
-                autonomy_level: 6,
-                max_auto_rounds: 8,
-                ..
-            }),
-            ..
-        }
-    );
-    assert_eq!(chat.nero_auto_runtime.autonomy_level, 6);
-    assert_eq!(chat.nero_auto_runtime.max_auto_rounds, 8);
+    assert!(chat.nero_auto_hotkey_inflight());
+    chat.finish_nero_auto_hotkey_action(false);
+    assert_eq!(chat.nero_auto_runtime.autonomy_level, 5);
+    assert_eq!(chat.nero_auto_runtime.max_auto_rounds, 7);
 
     // With composer draft, hotkey should not be consumed (must behave like regular typing flow).
     chat.bottom_pane
         .set_composer_text("draft".to_string(), Vec::new(), Vec::new());
     chat.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
     assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
-    assert_eq!(chat.nero_auto_runtime.autonomy_level, 6);
+    assert_eq!(chat.nero_auto_runtime.autonomy_level, 5);
+}
+
+#[tokio::test]
+async fn nero_auto_hotkey_queues_next_user_turn_until_confirmed_bridge_apply() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+    let tmp = tempdir().expect("tempdir");
+    chat.config.codex_home = tmp.path().to_path_buf();
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+    assert!(chat.nero_auto_hotkey_inflight());
+
+    chat.submit_user_message("hello".to_string().into());
+    assert_eq!(chat.queued_user_message_texts(), vec!["hello".to_string()]);
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+
+    chat.finish_nero_auto_hotkey_action(true);
+    assert!(!chat.nero_auto_hotkey_inflight());
+    assert!(chat.queued_user_message_texts().is_empty());
+    assert_matches!(next_submit_op(&mut op_rx), Op::UserTurn { .. });
+    while let Ok(op) = op_rx.try_recv() {
+        assert!(
+            !matches!(op, Op::OverrideTurnContext { .. }),
+            "did not expect runtime override submission from widget hotkey path, got {op:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn nero_auto_hotkey_mutation_is_serialized_while_inflight() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+    assert!(chat.nero_auto_hotkey_inflight());
+
+    // While mutating action is in-flight, another mutating shortcut must be ignored.
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+
+    assert_matches!(
+        next_nero_auto_hotkey_app_event(&mut rx),
+        AppEvent::ApplyNeroAutoHotkey {
+            thread_id: Some(id),
+            action: NeroAutoHotkeyAction::ToggleEnabled,
+        } if id == thread_id
+    );
+    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn nero_auto_hotkey_status_leaves_follow_up_user_turn_unmodified() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.set_nero_auto_runtime_context(
+        NeroAutoRuntimeConfig {
+            enabled: true,
+            autonomy_level: 7,
+            max_auto_rounds: 4,
+        },
+        SessionSource::Cli,
+    );
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE));
+    chat.submit_user_message("hello".to_string().into());
+
+    assert_matches!(next_submit_op(&mut op_rx), Op::UserTurn { .. });
+    while let Ok(op) = op_rx.try_recv() {
+        assert!(
+            !matches!(op, Op::OverrideTurnContext { .. }),
+            "did not expect runtime override resubmit after F5 status, got {op:?}"
+        );
+    }
 }
 
 #[tokio::test]
 async fn nero_auto_hotkey_status_reports_without_mutation() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
-    chat.thread_id = Some(ThreadId::new());
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
     chat.set_nero_auto_runtime_context(
         NeroAutoRuntimeConfig {
             enabled: true,
@@ -5273,15 +5320,13 @@ async fn nero_auto_hotkey_status_reports_without_mutation() {
 
     chat.handle_key_event(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE));
 
-    let messages = drain_insert_history(&mut rx)
-        .iter()
-        .map(|lines| lines_to_single_string(lines.as_slice()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(messages.contains("Nero-auto status"));
-    assert!(messages.contains("enabled=on"));
-    assert!(messages.contains("diff-check=7"));
-    assert!(messages.contains("max-rounds=4 (4)"));
+    assert_matches!(
+        next_nero_auto_hotkey_app_event(&mut rx),
+        AppEvent::ApplyNeroAutoHotkey {
+            thread_id: Some(id),
+            action: NeroAutoHotkeyAction::ShowStatus,
+        } if id == thread_id
+    );
     assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
     assert_eq!(
         chat.nero_auto_runtime,
@@ -5296,7 +5341,8 @@ async fn nero_auto_hotkey_status_reports_without_mutation() {
 #[tokio::test]
 async fn nero_auto_hotkey_status_works_with_pending_composer_text() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
-    chat.thread_id = Some(ThreadId::new());
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
     chat.set_nero_auto_runtime_context(
         NeroAutoRuntimeConfig {
             enabled: true,
@@ -5308,14 +5354,12 @@ async fn nero_auto_hotkey_status_works_with_pending_composer_text() {
     chat.bottom_pane
         .set_composer_text("draft".to_string(), Vec::new(), Vec::new());
     chat.handle_key_event(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE));
-    let messages = drain_insert_history(&mut rx)
-        .iter()
-        .map(|lines| lines_to_single_string(lines.as_slice()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        messages.contains("Nero-auto status"),
-        "F5 status should still work with pending composer text",
+    assert_matches!(
+        next_nero_auto_hotkey_app_event(&mut rx),
+        AppEvent::ApplyNeroAutoHotkey {
+            thread_id: Some(id),
+            action: NeroAutoHotkeyAction::ShowStatus,
+        } if id == thread_id
     );
     assert_eq!(chat.bottom_pane.composer_text(), "draft");
     assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
@@ -5331,94 +5375,90 @@ async fn nero_auto_hotkey_status_works_with_pending_composer_text() {
 
 #[tokio::test]
 async fn nero_auto_hotkeys_function_keys_ignore_ctrl_and_alt_modifiers() {
-    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
     chat.thread_id = Some(ThreadId::new());
 
     chat.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::CONTROL));
     chat.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::ALT));
     chat.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::CONTROL));
+    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
     assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
 }
 
 #[tokio::test]
 async fn nero_auto_hotkeys_function_key_shift_supports_decrement() {
-    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
-    chat.thread_id = Some(ThreadId::new());
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
 
     // Increase first.
     chat.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+    assert_matches!(
+        next_nero_auto_hotkey_app_event(&mut rx),
+        AppEvent::ApplyNeroAutoHotkey {
+            thread_id: Some(id),
+            action: NeroAutoHotkeyAction::IncreaseDifficulty,
+        } if id == thread_id
+    );
+    assert!(chat.nero_auto_hotkey_inflight());
+    chat.finish_nero_auto_hotkey_action(false);
+
     chat.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+    assert_matches!(
+        next_nero_auto_hotkey_app_event(&mut rx),
+        AppEvent::ApplyNeroAutoHotkey {
+            thread_id: Some(id),
+            action: NeroAutoHotkeyAction::CycleMaxRounds,
+        } if id == thread_id
+    );
+    assert!(chat.nero_auto_hotkey_inflight());
+    chat.finish_nero_auto_hotkey_action(false);
+
     // Decrease with Shift.
     chat.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT));
+    assert_matches!(
+        next_nero_auto_hotkey_app_event(&mut rx),
+        AppEvent::ApplyNeroAutoHotkey {
+            thread_id: Some(id),
+            action: NeroAutoHotkeyAction::DecreaseDifficulty,
+        } if id == thread_id
+    );
+    assert!(chat.nero_auto_hotkey_inflight());
+    chat.finish_nero_auto_hotkey_action(false);
+
     chat.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::SHIFT));
     assert_matches!(
-        next_override_turn_context(&mut op_rx),
-        Op::OverrideTurnContext {
-            nero_auto_runtime: Some(NeroAutoRuntimeConfig {
-                autonomy_level: 6,
-                max_auto_rounds: 7,
-                ..
-            }),
-            ..
-        }
+        next_nero_auto_hotkey_app_event(&mut rx),
+        AppEvent::ApplyNeroAutoHotkey {
+            thread_id: Some(id),
+            action: NeroAutoHotkeyAction::DecreaseMaxRounds,
+        } if id == thread_id
     );
-    assert_matches!(
-        next_override_turn_context(&mut op_rx),
-        Op::OverrideTurnContext {
-            nero_auto_runtime: Some(NeroAutoRuntimeConfig {
-                autonomy_level: 6,
-                max_auto_rounds: 8,
-                ..
-            }),
-            ..
-        }
-    );
-    assert_matches!(
-        next_override_turn_context(&mut op_rx),
-        Op::OverrideTurnContext {
-            nero_auto_runtime: Some(NeroAutoRuntimeConfig {
-                autonomy_level: 5,
-                max_auto_rounds: 8,
-                ..
-            }),
-            ..
-        }
-    );
-    assert_matches!(
-        next_override_turn_context(&mut op_rx),
-        Op::OverrideTurnContext {
-            nero_auto_runtime: Some(NeroAutoRuntimeConfig {
-                autonomy_level: 5,
-                max_auto_rounds: 7,
-                ..
-            }),
-            ..
-        }
-    );
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
 }
 
 #[tokio::test]
 async fn nero_auto_hotkeys_function_key_f4_decrements_max_rounds() {
-    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
-    chat.thread_id = Some(ThreadId::new());
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
 
     chat.handle_key_event(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
     assert_matches!(
-        next_override_turn_context(&mut op_rx),
-        Op::OverrideTurnContext {
-            nero_auto_runtime: Some(NeroAutoRuntimeConfig {
-                max_auto_rounds: 6,
-                ..
-            }),
-            ..
-        }
+        next_nero_auto_hotkey_app_event(&mut rx),
+        AppEvent::ApplyNeroAutoHotkey {
+            thread_id: Some(id),
+            action: NeroAutoHotkeyAction::DecreaseMaxRounds,
+        } if id == thread_id
     );
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
 }
 
 #[tokio::test]
 async fn nero_auto_hotkeys_stay_disabled_for_subagent_sessions() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
-    chat.thread_id = Some(ThreadId::new());
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
     chat.set_nero_auto_runtime_context(
         NeroAutoRuntimeConfig {
             enabled: true,
@@ -5432,12 +5472,13 @@ async fn nero_auto_hotkeys_stay_disabled_for_subagent_sessions() {
 
     chat.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
 
-    let messages = drain_insert_history(&mut rx)
-        .iter()
-        .map(|lines| lines_to_single_string(lines.as_slice()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(messages.contains("Nero-auto stays OFF for subagent sessions."));
+    assert_matches!(
+        next_nero_auto_hotkey_app_event(&mut rx),
+        AppEvent::ApplyNeroAutoHotkey {
+            thread_id: Some(id),
+            action: NeroAutoHotkeyAction::ToggleEnabled,
+        } if id == thread_id
+    );
     assert_eq!(
         chat.nero_auto_runtime,
         NeroAutoRuntimeConfig {
@@ -5446,6 +5487,22 @@ async fn nero_auto_hotkeys_stay_disabled_for_subagent_sessions() {
             max_auto_rounds: 8,
         }
     );
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn nero_auto_hotkey_failure_keeps_queued_prompt_unsent() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+    assert!(chat.nero_auto_hotkey_inflight());
+    chat.submit_user_message("hello".to_string().into());
+
+    chat.finish_nero_auto_hotkey_action(false);
+
+    assert!(!chat.nero_auto_hotkey_inflight());
+    assert_eq!(chat.queued_user_message_texts(), vec!["hello".to_string()]);
     assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
 }
 

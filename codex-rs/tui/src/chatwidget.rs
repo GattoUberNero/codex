@@ -184,7 +184,7 @@ const NERO_AUTO_HOTKEY_DEBOUNCE: Duration = Duration::from_millis(180);
 const NERO_AUTO_TOGGLE_HOTKEY_DEBOUNCE: Duration = Duration::from_millis(450);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NeroAutoHotkeyAction {
+pub(crate) enum NeroAutoHotkeyAction {
     ShowStatus,
     ToggleEnabled,
     IncreaseDifficulty,
@@ -752,6 +752,7 @@ pub(crate) struct ChatWidget {
     last_nero_auto_hotkey_at: Option<Instant>,
     nero_auto_runtime: NeroAutoRuntimeConfig,
     is_subagent_session: bool,
+    nero_auto_hotkey_inflight: bool,
 }
 
 /// Snapshot of active-cell state that affects transcript overlay rendering.
@@ -3224,6 +3225,7 @@ impl ChatWidget {
             last_nero_auto_hotkey_at: None,
             nero_auto_runtime,
             is_subagent_session: false,
+            nero_auto_hotkey_inflight: false,
         };
 
         widget.prefetch_rate_limits();
@@ -3411,6 +3413,7 @@ impl ChatWidget {
             last_nero_auto_hotkey_at: None,
             nero_auto_runtime,
             is_subagent_session: false,
+            nero_auto_hotkey_inflight: false,
         };
 
         widget.prefetch_rate_limits();
@@ -3590,6 +3593,7 @@ impl ChatWidget {
             last_nero_auto_hotkey_at: None,
             nero_auto_runtime,
             is_subagent_session: false,
+            nero_auto_hotkey_inflight: false,
         };
 
         widget.prefetch_rate_limits();
@@ -3699,6 +3703,12 @@ impl ChatWidget {
         }
 
         if let Some(action) = detect_nero_auto_hotkey_action(key_event) {
+            if !matches!(action, NeroAutoHotkeyAction::ShowStatus) && self.nero_auto_hotkey_inflight
+            {
+                // Keep mutating hotkeys serialized: while one bridge apply is in-flight,
+                // ignore additional mutating shortcuts until the current action completes.
+                return;
+            }
             // Status must stay available even with pending composer text, because it is read-only.
             // Mutating actions still require the safe idle surface.
             let can_handle_hotkey = matches!(action, NeroAutoHotkeyAction::ShowStatus)
@@ -3709,7 +3719,7 @@ impl ChatWidget {
                 if key_event.kind == KeyEventKind::Press
                     && self.should_apply_nero_auto_hotkey_action(action)
                 {
-                    self.apply_nero_auto_hotkey_action(action);
+                    self.request_nero_auto_hotkey_action(action);
                 }
                 return;
             }
@@ -4401,6 +4411,7 @@ impl ChatWidget {
         if !self.is_session_configured()
             || self.bottom_pane.is_task_running()
             || self.is_review_mode
+            || self.nero_auto_hotkey_inflight
         {
             self.queued_user_messages.push_back(user_message);
             self.refresh_pending_input_preview();
@@ -4413,6 +4424,11 @@ impl ChatWidget {
         if !self.is_session_configured() {
             tracing::warn!("cannot submit user message before session is configured; queueing");
             self.queued_user_messages.push_front(user_message);
+            self.refresh_pending_input_preview();
+            return;
+        }
+        if self.nero_auto_hotkey_inflight {
+            self.queued_user_messages.push_back(user_message);
             self.refresh_pending_input_preview();
             return;
         }
@@ -5145,6 +5161,9 @@ impl ChatWidget {
     // If idle and there are queued inputs, submit exactly one to start the next turn.
     pub(crate) fn maybe_send_next_queued_input(&mut self) {
         if self.suppress_queue_autosend {
+            return;
+        }
+        if self.nero_auto_hotkey_inflight {
             return;
         }
         if self.bottom_pane.is_task_running() {
@@ -7487,7 +7506,7 @@ impl ChatWidget {
         self.active_mode_kind()
     }
 
-    fn is_session_configured(&self) -> bool {
+    pub(crate) fn is_session_configured(&self) -> bool {
         self.thread_id.is_some()
     }
 
@@ -8032,102 +8051,16 @@ impl ChatWidget {
         true
     }
 
-    fn apply_nero_auto_hotkey_action(&mut self, action: NeroAutoHotkeyAction) {
-        if matches!(action, NeroAutoHotkeyAction::ShowStatus) {
-            let max_rounds = if self.nero_auto_runtime.max_auto_rounds == 0 {
-                "∞".to_string()
-            } else {
-                self.nero_auto_runtime.max_auto_rounds.to_string()
-            };
-            self.add_info_message(
-                format!(
-                    "Nero-auto status · scope=current-session · state: enabled={}, diff-check={}, max-rounds={} ({})",
-                    if self.nero_auto_runtime.enabled { "on" } else { "off" },
-                    self.nero_auto_runtime.autonomy_level,
-                    max_rounds,
-                    self.nero_auto_runtime.max_auto_rounds
-                ),
-                Some(
-                    "Shortcuts: F5 status, F1 toggle, F2 diff+, Shift+F2 diff-, F3 max-rounds+, Shift+F3 max-rounds-, F4 max-rounds-. This is live current-session state; NERO HOOK SYSTEM block reflects the last completed turn."
-                        .to_string(),
-                ),
-            );
+    fn request_nero_auto_hotkey_action(&mut self, action: NeroAutoHotkeyAction) {
+        let thread_id = self.thread_id();
+        if !matches!(action, NeroAutoHotkeyAction::ShowStatus) && self.nero_auto_hotkey_inflight {
             return;
         }
-        if !self.is_session_configured() {
-            self.add_info_message(
-                "Nero-auto hotkeys are available after session startup.".to_string(),
-                Some(
-                    "Wait for the Codex header and first turn context, then use F1/F2/F3/F4/F5."
-                        .to_string(),
-                ),
-            );
-            return;
+        if !matches!(action, NeroAutoHotkeyAction::ShowStatus) && thread_id.is_some() {
+            self.nero_auto_hotkey_inflight = true;
         }
-        if self.is_subagent_session {
-            self.add_info_message(
-                "Nero-auto stays OFF for subagent sessions.".to_string(),
-                Some("Delegated agent threads never use nero-auto, so handoff/completion remains clean.".to_string()),
-            );
-            return;
-        }
-        let previous_enabled = self.nero_auto_runtime.enabled;
-        let next = next_nero_auto_runtime_config(self.nero_auto_runtime, action);
-        if !self.submit_op(Op::OverrideTurnContext {
-            cwd: None,
-            approval_policy: None,
-            sandbox_policy: None,
-            windows_sandbox_level: None,
-            model: None,
-            effort: None,
-            summary: None,
-            service_tier: None,
-            collaboration_mode: None,
-            personality: None,
-            nero_auto_runtime: Some(next),
-        }) {
-            self.add_error_message("Failed to update session-local nero-auto state.".to_string());
-            return;
-        }
-        self.nero_auto_runtime = next;
-        let max_rounds = if next.max_auto_rounds == 0 {
-            "∞".to_string()
-        } else {
-            next.max_auto_rounds.to_string()
-        };
-        let action_label = match action {
-            NeroAutoHotkeyAction::ShowStatus => "Nero-auto status".to_string(),
-            NeroAutoHotkeyAction::ToggleEnabled => format!(
-                "Nero-auto {} -> {}",
-                if previous_enabled { "ON" } else { "OFF" },
-                if next.enabled { "ON" } else { "OFF" }
-            ),
-            NeroAutoHotkeyAction::IncreaseDifficulty => {
-                format!("Nero-auto diff-check -> {}", next.autonomy_level)
-            }
-            NeroAutoHotkeyAction::DecreaseDifficulty => {
-                format!("Nero-auto diff-check -> {}", next.autonomy_level)
-            }
-            NeroAutoHotkeyAction::CycleMaxRounds => {
-                format!("Nero-auto max-rounds -> {}", max_rounds)
-            }
-            NeroAutoHotkeyAction::DecreaseMaxRounds => {
-                format!("Nero-auto max-rounds -> {}", max_rounds)
-            }
-        };
-        self.add_info_message(
-            format!(
-                "{action_label} · scope=current-session · state: enabled={}, diff-check={}, max-rounds={} ({})",
-                if next.enabled { "on" } else { "off" },
-                next.autonomy_level,
-                max_rounds,
-                next.max_auto_rounds
-            ),
-            Some(
-                "Shortcuts: F5 status, F1 toggle, F2 diff+, Shift+F2 diff-, F3 max-rounds+, Shift+F3 max-rounds-, F4 max-rounds-. NERO HOOK SYSTEM updates on the next completed turn."
-                    .to_string(),
-            ),
-        );
+        self.app_event_tx
+            .send(AppEvent::ApplyNeroAutoHotkey { thread_id, action });
     }
 
     pub(crate) fn set_nero_auto_runtime_context(
@@ -8137,6 +8070,28 @@ impl ChatWidget {
     ) {
         self.nero_auto_runtime = runtime;
         self.is_subagent_session = matches!(session_source, SessionSource::SubAgent(_));
+    }
+
+    pub(crate) fn finish_nero_auto_hotkey_action(&mut self, auto_send_next: bool) {
+        if !self.nero_auto_hotkey_inflight {
+            return;
+        }
+        self.nero_auto_hotkey_inflight = false;
+        if auto_send_next {
+            self.maybe_send_next_queued_input();
+        } else {
+            self.refresh_pending_input_preview();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn nero_auto_runtime_context(&self) -> NeroAutoRuntimeConfig {
+        self.nero_auto_runtime
+    }
+
+    #[cfg(test)]
+    pub(crate) fn nero_auto_hotkey_inflight(&self) -> bool {
+        self.nero_auto_hotkey_inflight
     }
 
     /// True if `key` matches the armed quit shortcut and the window has not expired.
@@ -8883,7 +8838,72 @@ fn bump_wrapping_down(value: i64, min: i64, max: i64) -> i64 {
     if value <= min { max } else { value - 1 }
 }
 
-fn next_nero_auto_runtime_config(
+fn nero_auto_max_rounds_label(runtime: NeroAutoRuntimeConfig) -> String {
+    if runtime.max_auto_rounds == 0 {
+        "∞".to_string()
+    } else {
+        runtime.max_auto_rounds.to_string()
+    }
+}
+
+fn nero_auto_shortcuts_hint(confirmed: bool) -> String {
+    let truth_line = if confirmed {
+        "This is confirmed current-session control state from the runtime bridge."
+    } else {
+        "This is session-local requested state."
+    };
+    format!(
+        "Shortcuts: F5 status, F1 toggle, F2 diff+, Shift+F2 diff-, F3 max-rounds+, Shift+F3 max-rounds-, F4 max-rounds-. {truth_line} The next user turn uses that confirmed session control state; the NERO HOOK SYSTEM block reflects the last completed turn."
+    )
+}
+
+pub(crate) fn nero_auto_status_message(runtime: NeroAutoRuntimeConfig) -> (String, Option<String>) {
+    let max_rounds = nero_auto_max_rounds_label(runtime);
+    (
+        format!(
+            "Nero-auto status · scope=current-session · state: enabled={}, diff-check={}, max-rounds={} ({})",
+            if runtime.enabled { "on" } else { "off" },
+            runtime.autonomy_level,
+            max_rounds,
+            runtime.max_auto_rounds
+        ),
+        Some(nero_auto_shortcuts_hint(true)),
+    )
+}
+
+pub(crate) fn nero_auto_action_message(
+    action: NeroAutoHotkeyAction,
+    previous: NeroAutoRuntimeConfig,
+    confirmed: NeroAutoRuntimeConfig,
+) -> (String, Option<String>) {
+    let max_rounds = nero_auto_max_rounds_label(confirmed);
+    let action_label = match action {
+        NeroAutoHotkeyAction::ShowStatus => "Nero-auto status".to_string(),
+        NeroAutoHotkeyAction::ToggleEnabled => format!(
+            "Nero-auto {} -> {}",
+            if previous.enabled { "ON" } else { "OFF" },
+            if confirmed.enabled { "ON" } else { "OFF" }
+        ),
+        NeroAutoHotkeyAction::IncreaseDifficulty | NeroAutoHotkeyAction::DecreaseDifficulty => {
+            format!("Nero-auto diff-check -> {}", confirmed.autonomy_level)
+        }
+        NeroAutoHotkeyAction::CycleMaxRounds | NeroAutoHotkeyAction::DecreaseMaxRounds => {
+            format!("Nero-auto max-rounds -> {}", max_rounds)
+        }
+    };
+    (
+        format!(
+            "{action_label} · scope=current-session · state: enabled={}, diff-check={}, max-rounds={} ({})",
+            if confirmed.enabled { "on" } else { "off" },
+            confirmed.autonomy_level,
+            max_rounds,
+            confirmed.max_auto_rounds
+        ),
+        Some(nero_auto_shortcuts_hint(true)),
+    )
+}
+
+pub(crate) fn next_nero_auto_runtime_config(
     current: NeroAutoRuntimeConfig,
     action: NeroAutoHotkeyAction,
 ) -> NeroAutoRuntimeConfig {
