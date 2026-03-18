@@ -181,7 +181,15 @@ struct NeroAutoBridgeApplyRequest {
 struct NeroAutoBridgeEffective {
     enabled: bool,
     autonomy_level: i64,
+    #[serde(rename = "autonomyStepPerRound")]
+    _autonomy_step_per_round: f64,
     max_auto_rounds: i64,
+    #[serde(rename = "doneStopScope")]
+    _done_stop_scope: String,
+    #[serde(rename = "autoRounds")]
+    _auto_rounds: i64,
+    #[serde(rename = "source")]
+    _source: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -196,12 +204,18 @@ struct NeroAutoBridgeReadResponse {
     thread_id: String,
     session_source: Option<String>,
     is_subagent: bool,
+    #[serde(rename = "defaults")]
+    _defaults: serde_json::Value,
+    #[serde(rename = "applied")]
+    _applied: serde_json::Value,
     effective: NeroAutoBridgeEffective,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NeroAutoBridgeConflictCurrent {
+    #[serde(rename = "path")]
+    _path: Option<String>,
     version: Option<String>,
 }
 
@@ -211,6 +225,9 @@ struct NeroAutoBridgeApplyResponse {
     ok: bool,
     error: Option<String>,
     message: Option<String>,
+    path: String,
+    version: Option<String>,
+    applied: Option<serde_json::Value>,
     conflict: Option<bool>,
     current: Option<NeroAutoBridgeConflictCurrent>,
 }
@@ -416,11 +433,38 @@ async fn apply_nero_auto_runtime_bridge_state(
     };
     let response: NeroAutoBridgeApplyResponse =
         run_nero_auto_runtime_bridge("apply-session-auto", &request).await?;
-    if response.ok {
-        Ok(response)
-    } else {
-        Ok(response)
+    validate_nero_auto_runtime_bridge_apply_response(&response)?;
+    Ok(response)
+}
+
+fn validate_nero_auto_runtime_bridge_apply_response(
+    response: &NeroAutoBridgeApplyResponse,
+) -> Result<()> {
+    if !response.ok {
+        return Ok(());
     }
+    if response.path.trim().is_empty() {
+        return Err(eyre!("runtime bridge apply returned empty path"));
+    }
+    let has_version = response
+        .version
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    if !has_version {
+        return Err(eyre!("runtime bridge apply succeeded without version"));
+    }
+    let Some(applied) = response.applied.as_ref() else {
+        return Err(eyre!(
+            "runtime bridge apply succeeded without applied payload"
+        ));
+    };
+    if !applied.is_object() {
+        return Err(eyre!(
+            "runtime bridge apply returned non-object applied payload"
+        ));
+    }
+    Ok(())
 }
 
 fn nero_auto_runtime_from_bridge_state(
@@ -6068,6 +6112,117 @@ path = {:?}\n",
             serde_json::to_string(&payload).expect("serialize runtime state"),
         )
         .expect("write runtime bridge state");
+    }
+
+    #[test]
+    fn nero_auto_bridge_read_response_schema_guard_rejects_missing_required_sections() {
+        let mut valid = serde_json::json!({
+            "ok": true,
+            "error": null,
+            "message": null,
+            "path": "/tmp/nero-hook-auto-state.json",
+            "configPath": "/tmp/config.toml",
+            "version": "v1",
+            "threadId": "019cff6b-e81d-7901-982d-aeb87eab5f13",
+            "sessionSource": "cli",
+            "isSubagent": false,
+            "defaults": { "enabled": true },
+            "applied": { "enabled": true },
+            "effective": {
+                "enabled": true,
+                "autonomyLevel": 5,
+                "autonomyStepPerRound": 1.0,
+                "maxAutoRounds": 4,
+                "doneStopScope": "active_phase",
+                "autoRounds": 0,
+                "source": "session-override"
+            }
+        });
+        let parsed_ok = serde_json::from_value::<NeroAutoBridgeReadResponse>(valid.clone());
+        assert!(parsed_ok.is_ok(), "{parsed_ok:?}");
+
+        valid
+            .as_object_mut()
+            .expect("object")
+            .remove("defaults")
+            .expect("remove defaults");
+        let parsed_missing_defaults =
+            serde_json::from_value::<NeroAutoBridgeReadResponse>(valid.clone());
+        assert!(parsed_missing_defaults.is_err());
+
+        valid["defaults"] = serde_json::json!({ "enabled": true });
+        valid["effective"]["source"] = serde_json::Value::Null;
+        let parsed_wrong_effective =
+            serde_json::from_value::<NeroAutoBridgeReadResponse>(valid);
+        assert!(parsed_wrong_effective.is_err());
+    }
+
+    #[test]
+    fn nero_auto_bridge_apply_success_requires_version_and_applied_payload() {
+        let response_ok = serde_json::json!({
+            "ok": true,
+            "path": "/tmp/nero-hook-auto-state.json",
+            "version": "v2",
+            "applied": { "enabled": true }
+        });
+        let parsed_ok =
+            serde_json::from_value::<NeroAutoBridgeApplyResponse>(response_ok).expect("parse ok");
+        assert!(validate_nero_auto_runtime_bridge_apply_response(&parsed_ok).is_ok());
+
+        let missing_version = serde_json::json!({
+            "ok": true,
+            "path": "/tmp/nero-hook-auto-state.json",
+            "applied": { "enabled": true }
+        });
+        let parsed_missing_version = serde_json::from_value::<NeroAutoBridgeApplyResponse>(
+            missing_version,
+        )
+        .expect("parse missing version");
+        assert!(validate_nero_auto_runtime_bridge_apply_response(&parsed_missing_version).is_err());
+
+        let empty_path = serde_json::json!({
+            "ok": true,
+            "path": "   ",
+            "version": "v2",
+            "applied": { "enabled": true }
+        });
+        let parsed_empty_path =
+            serde_json::from_value::<NeroAutoBridgeApplyResponse>(empty_path)
+                .expect("parse empty path");
+        assert!(validate_nero_auto_runtime_bridge_apply_response(&parsed_empty_path).is_err());
+
+        let missing_applied = serde_json::json!({
+            "ok": true,
+            "path": "/tmp/nero-hook-auto-state.json",
+            "version": "v2"
+        });
+        let parsed_missing_applied =
+            serde_json::from_value::<NeroAutoBridgeApplyResponse>(missing_applied)
+                .expect("parse missing applied");
+        assert!(validate_nero_auto_runtime_bridge_apply_response(&parsed_missing_applied).is_err());
+
+        let null_applied = serde_json::json!({
+            "ok": true,
+            "path": "/tmp/nero-hook-auto-state.json",
+            "version": "v2",
+            "applied": null
+        });
+        let parsed_null_applied =
+            serde_json::from_value::<NeroAutoBridgeApplyResponse>(null_applied)
+                .expect("parse null applied");
+        assert!(validate_nero_auto_runtime_bridge_apply_response(&parsed_null_applied).is_err());
+
+        let non_object_applied = serde_json::json!({
+            "ok": true,
+            "path": "/tmp/nero-hook-auto-state.json",
+            "version": "v2",
+            "applied": "invalid"
+        });
+        let parsed_non_object_applied = serde_json::from_value::<NeroAutoBridgeApplyResponse>(
+            non_object_applied,
+        )
+        .expect("parse non-object applied");
+        assert!(validate_nero_auto_runtime_bridge_apply_response(&parsed_non_object_applied).is_err());
     }
 
     #[tokio::test]

@@ -20,8 +20,8 @@ use crate::parse_hook_actions_from_stdout;
 const LEGACY_NOTIFY_TIMEOUT: Duration = Duration::from_millis(1500);
 const LEGACY_NOTIFY_KILL_REAP_TIMEOUT: Duration = Duration::from_millis(250);
 const LEGACY_NOTIFY_STDIN_WRITE_BASE_TIMEOUT_MS: u64 = 1500;
-const LEGACY_NOTIFY_STDIN_WRITE_PER_64KB_TIMEOUT_MS: u64 = 500;
-const LEGACY_NOTIFY_STDIN_WRITE_MAX_TIMEOUT_MS: u64 = 10_000;
+const LEGACY_NOTIFY_STDIN_WRITE_PER_64KB_TIMEOUT_MS: u64 = 250;
+const LEGACY_NOTIFY_STDIN_WRITE_MAX_TIMEOUT_MS: u64 = 5_000;
 
 fn legacy_notify_timeout_error(stage: &str, timeout: Duration) -> io::Error {
     io::Error::new(
@@ -270,6 +270,26 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                         {
                             Ok(Ok(())) => {}
                             Ok(Err(err)) if err.kind() == std::io::ErrorKind::BrokenPipe => {
+                                if using_stdin_only_payload {
+                                    // In stdin-only fallback mode this payload is authoritative.
+                                    // BrokenPipe means the hook could not have consumed the full input.
+                                    let _ = child.start_kill();
+                                    let _ = tokio::time::timeout(
+                                        LEGACY_NOTIFY_KILL_REAP_TIMEOUT,
+                                        child.wait(),
+                                    )
+                                    .await;
+                                    return HookExecution {
+                                        result: HookResult::FailedContinue(
+                                            io::Error::new(
+                                                ErrorKind::BrokenPipe,
+                                                "legacy notify stdin closed before payload was fully consumed in stdin-only fallback",
+                                            )
+                                            .into(),
+                                        ),
+                                        actions: Vec::new(),
+                                    };
+                                }
                                 debug!(
                                     hook_name = "legacy_notify",
                                     "legacy notify stdin closed before payload was fully consumed"
@@ -566,6 +586,37 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn legacy_notify_stdin_timeout_scales_with_payload_and_caps() {
+        const CHUNK: usize = 64 * 1024;
+        assert_eq!(
+            legacy_notify_stdin_write_timeout(0),
+            Duration::from_millis(LEGACY_NOTIFY_STDIN_WRITE_BASE_TIMEOUT_MS)
+        );
+        assert_eq!(
+            legacy_notify_stdin_write_timeout(CHUNK),
+            Duration::from_millis(LEGACY_NOTIFY_STDIN_WRITE_BASE_TIMEOUT_MS)
+        );
+        assert_eq!(
+            legacy_notify_stdin_write_timeout(CHUNK + 1),
+            Duration::from_millis(
+                LEGACY_NOTIFY_STDIN_WRITE_BASE_TIMEOUT_MS
+                    + LEGACY_NOTIFY_STDIN_WRITE_PER_64KB_TIMEOUT_MS
+            )
+        );
+        assert_eq!(
+            legacy_notify_stdin_write_timeout(2 * CHUNK),
+            Duration::from_millis(
+                LEGACY_NOTIFY_STDIN_WRITE_BASE_TIMEOUT_MS
+                    + LEGACY_NOTIFY_STDIN_WRITE_PER_64KB_TIMEOUT_MS
+            )
+        );
+        assert_eq!(
+            legacy_notify_stdin_write_timeout(usize::MAX),
+            Duration::from_millis(LEGACY_NOTIFY_STDIN_WRITE_MAX_TIMEOUT_MS)
+        );
+    }
+
     #[cfg(not(windows))]
     #[tokio::test]
     async fn notify_hook_parses_actions_from_stdout() -> Result<()> {
@@ -762,6 +813,55 @@ mod tests {
                 message: huge_message.len().to_string()
             }]
         );
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn notify_hook_fails_when_stdin_only_payload_hits_broken_pipe() -> Result<()> {
+        let hook = notify_hook(vec![
+            "python3".to_string(),
+            "-c".to_string(),
+            "import os,time; os.close(0); time.sleep(1)".to_string(),
+        ]);
+
+        // Force argv->stdin fallback path, then close stdin in child.
+        let huge_message = "x".repeat(3_000_000);
+        let payload = HookPayload {
+            session_id: ThreadId::new(),
+            cwd: tempdir()?.path().to_path_buf(),
+            client: None,
+            session_source: None,
+            session_agent_role: None,
+            nero_auto_runtime: None,
+            triggered_at: chrono::Utc::now(),
+            hook_event: HookEvent::AfterAgent {
+                event: crate::HookEventAfterAgent {
+                    thread_id: ThreadId::new(),
+                    thread_name: Some("example-A-".to_string()),
+                    turn_id: "turn-stdin-only-broken-pipe".to_string(),
+                    input_messages: vec!["hi".to_string()],
+                    last_assistant_message: Some(huge_message),
+                },
+            },
+        };
+
+        let outcome = hook.execute(&payload).await;
+        assert!(outcome.actions.is_empty());
+        match outcome.result {
+            HookResult::FailedContinue(err) => {
+                let io_err = err.downcast_ref::<std::io::Error>();
+                assert!(io_err.is_some(), "{err}");
+                let io_err = io_err.expect("downcast io::Error");
+                assert_eq!(io_err.kind(), std::io::ErrorKind::BrokenPipe);
+                let detail = io_err.to_string();
+                assert!(
+                    detail.contains("stdin-only fallback"),
+                    "{detail}"
+                );
+            }
+            other => panic!("expected FailedContinue, got {other:?}"),
+        }
         Ok(())
     }
 
