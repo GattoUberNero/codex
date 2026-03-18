@@ -262,6 +262,7 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                         let payload_bytes = notify_payload.len();
                         let stdin_write_timeout =
                             legacy_notify_stdin_write_timeout(payload_bytes);
+                        let stdin_payload_authoritative = using_stdin_only_payload;
                         match tokio::time::timeout(
                             stdin_write_timeout,
                             stdin.write_all(notify_payload.as_bytes()),
@@ -270,7 +271,7 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                         {
                             Ok(Ok(())) => {}
                             Ok(Err(err)) if err.kind() == std::io::ErrorKind::BrokenPipe => {
-                                if using_stdin_only_payload {
+                                if stdin_payload_authoritative {
                                     // In stdin-only fallback mode this payload is authoritative.
                                     // BrokenPipe means the hook could not have consumed the full input.
                                     let _ = child.start_kill();
@@ -296,44 +297,59 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                                 );
                             }
                             Ok(Err(err)) => {
-                                if let Some(stdout) = child.stdout.take() {
-                                    drop(stdout);
+                                if stdin_payload_authoritative {
+                                    if let Some(stdout) = child.stdout.take() {
+                                        drop(stdout);
+                                    }
+                                    let _ = child.start_kill();
+                                    let _ = tokio::time::timeout(
+                                        LEGACY_NOTIFY_KILL_REAP_TIMEOUT,
+                                        child.wait(),
+                                    )
+                                    .await;
+                                    return HookExecution {
+                                        result: HookResult::FailedContinue(err.into()),
+                                        actions: Vec::new(),
+                                    };
                                 }
-                                let _ = child.start_kill();
-                                let _ = tokio::time::timeout(
-                                    LEGACY_NOTIFY_KILL_REAP_TIMEOUT,
-                                    child.wait(),
-                                )
-                                .await;
-                                return HookExecution {
-                                    result: HookResult::FailedContinue(err.into()),
-                                    actions: Vec::new(),
-                                };
+                                warn!(
+                                    hook_name = "legacy_notify",
+                                    payload_bytes,
+                                    error = %err,
+                                    "legacy_notify stdin write failed in argv-compat mode; continuing because payload is already provided via argv"
+                                );
                             }
                             Err(_) => {
-                                let _ = child.start_kill();
-                                let _ = tokio::time::timeout(
-                                    LEGACY_NOTIFY_KILL_REAP_TIMEOUT,
-                                    child.wait(),
-                                )
-                                .await;
+                                if stdin_payload_authoritative {
+                                    let _ = child.start_kill();
+                                    let _ = tokio::time::timeout(
+                                        LEGACY_NOTIFY_KILL_REAP_TIMEOUT,
+                                        child.wait(),
+                                    )
+                                    .await;
+                                    warn!(
+                                        timeout_ms = stdin_write_timeout.as_millis() as u64,
+                                        payload_bytes,
+                                        kill_reap_timeout_ms =
+                                            LEGACY_NOTIFY_KILL_REAP_TIMEOUT.as_millis() as u64,
+                                        "legacy_notify stdin writer timed out; attempted to kill/reap direct child and marking hook as failed_continue"
+                                    );
+                                    return HookExecution {
+                                        result: HookResult::FailedContinue(
+                                            legacy_notify_timeout_error(
+                                                "stdin writer",
+                                                stdin_write_timeout,
+                                            )
+                                            .into(),
+                                        ),
+                                        actions: Vec::new(),
+                                    };
+                                }
                                 warn!(
                                     timeout_ms = stdin_write_timeout.as_millis() as u64,
                                     payload_bytes,
-                                    kill_reap_timeout_ms =
-                                        LEGACY_NOTIFY_KILL_REAP_TIMEOUT.as_millis() as u64,
-                                    "legacy_notify stdin writer timed out; attempted to kill/reap direct child and marking hook as failed_continue"
+                                    "legacy_notify stdin writer timed out in argv-compat mode; continuing because payload is already provided via argv"
                                 );
-                                return HookExecution {
-                                    result: HookResult::FailedContinue(
-                                        legacy_notify_timeout_error(
-                                            "stdin writer",
-                                            stdin_write_timeout,
-                                        )
-                                        .into(),
-                                    ),
-                                    actions: Vec::new(),
-                                };
                             }
                         }
                     }
