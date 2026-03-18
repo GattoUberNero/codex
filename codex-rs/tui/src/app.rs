@@ -178,46 +178,10 @@ struct NeroAutoBridgeApplyRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct NeroAutoBridgePolicy {
-    #[serde(alias = "autonomy_level")]
-    autonomy_level: Option<i64>,
-    #[serde(alias = "autonomy_step_per_round")]
-    autonomy_step_per_round: Option<f64>,
-    #[serde(alias = "max_auto_rounds")]
-    max_auto_rounds: Option<i64>,
-    #[serde(alias = "done_stop_scope")]
-    done_stop_scope: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct NeroAutoBridgeDefaults {
-    enabled: bool,
-    autonomy_level: i64,
-    autonomy_step_per_round: f64,
-    max_auto_rounds: i64,
-    done_stop_scope: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct NeroAutoBridgeApplied {
-    enabled: Option<bool>,
-    policy_override: Option<NeroAutoBridgePolicy>,
-    auto_rounds: i64,
-    updated_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct NeroAutoBridgeEffective {
     enabled: bool,
-    source: String,
     autonomy_level: i64,
-    autonomy_step_per_round: f64,
     max_auto_rounds: i64,
-    done_stop_scope: String,
-    auto_rounds: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -232,15 +196,12 @@ struct NeroAutoBridgeReadResponse {
     thread_id: String,
     session_source: Option<String>,
     is_subagent: bool,
-    defaults: NeroAutoBridgeDefaults,
-    applied: NeroAutoBridgeApplied,
     effective: NeroAutoBridgeEffective,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NeroAutoBridgeConflictCurrent {
-    path: Option<String>,
     version: Option<String>,
 }
 
@@ -250,8 +211,6 @@ struct NeroAutoBridgeApplyResponse {
     ok: bool,
     error: Option<String>,
     message: Option<String>,
-    path: Option<String>,
-    version: Option<String>,
     conflict: Option<bool>,
     current: Option<NeroAutoBridgeConflictCurrent>,
 }
