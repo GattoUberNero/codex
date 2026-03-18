@@ -293,7 +293,9 @@ fn nero_auto_bridge_config_path(codex_home: &Path) -> PathBuf {
     // Keep the same precedence as NeroBar backend runtime controls:
     // explicit env override first, then CODEX_HOME fallback.
     if let Some(path) = std::env::var_os(NERO_AUTO_HOTKEY_CONFIG_ENV) {
-        return PathBuf::from(path);
+        if !path.is_empty() {
+            return PathBuf::from(path);
+        }
     }
     let codex_home_config = codex_home.join("config-nero-hook-auto.toml");
     if codex_home_config.is_file() {
