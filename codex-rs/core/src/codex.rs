@@ -1393,6 +1393,17 @@ fn should_trigger_model_fallback(err: &CodexErr) -> bool {
     }
 }
 
+fn model_fallback_reasoning_label(effort: Option<ReasoningEffortConfig>) -> Option<String> {
+    effort.map(|value| format!("{value:?}").to_ascii_lowercase())
+}
+
+enum ModelFallbackAfterErrorOutcome {
+    Noop,
+    Switched(Arc<TurnContext>, CodexnForkModelFallbackStep),
+    Exhausted,
+    DisabledOverflow,
+}
+
 #[derive(Clone)]
 pub(crate) struct SessionConfiguration {
     /// Provider identifier ("openai", "openrouter", ...).
@@ -3086,12 +3097,12 @@ impl Session {
         wait_deadline: &mut Option<StdInstant>,
         cancellation_token: &CancellationToken,
         delivery_log_path: Option<&Path>,
-    ) -> CodexResult<Option<(Arc<TurnContext>, CodexnForkModelFallbackStep)>> {
+    ) -> CodexResult<ModelFallbackAfterErrorOutcome> {
         let Some(model_fallback) = turn_context.model_fallback.clone() else {
-            return Ok(None);
+            return Ok(ModelFallbackAfterErrorOutcome::Noop);
         };
         if !should_trigger_model_fallback(err) {
-            return Ok(None);
+            return Ok(ModelFallbackAfterErrorOutcome::Noop);
         }
 
         let current_model = turn_context.model_info.slug.clone();
@@ -3122,7 +3133,7 @@ impl Session {
                     }),
                 )
                 .await;
-                return Ok(None);
+                return Ok(ModelFallbackAfterErrorOutcome::DisabledOverflow);
             };
             let (candidate, wait_for) = {
                 let mut state = self.state.lock().await;
@@ -3162,21 +3173,6 @@ impl Session {
                     EventMsg::Warning(WarningEvent { message: warning }),
                 )
                 .await;
-                append_nero_model_fallback_audit(
-                    delivery_log_path,
-                    &self.conversation_id,
-                    turn_context,
-                    "attempt",
-                    json!({
-                        "from_model": current_model.clone(),
-                        "to_model": step.model.clone(),
-                        "to_reasoning_effort": format!("{:?}", step.reasoning_effort).to_ascii_lowercase(),
-                        "trigger_error": err.to_string(),
-                        "cooldown_seconds": model_fallback.cooldown_seconds,
-                        "max_wait_seconds": model_fallback.max_wait_seconds,
-                    }),
-                )
-                .await;
                 let next_context = Arc::new(
                     turn_context
                         .with_model_and_reasoning(
@@ -3186,15 +3182,31 @@ impl Session {
                         )
                         .await,
                 );
-                return Ok(Some((next_context, step)));
+                append_nero_model_fallback_audit(
+                    delivery_log_path,
+                    &self.conversation_id,
+                    turn_context,
+                    "attempt",
+                    json!({
+                        "from_model": current_model.clone(),
+                        "to_model": step.model.clone(),
+                        "to_reasoning_effort": model_fallback_reasoning_label(next_context.reasoning_effort),
+                        "requested_reasoning_effort": model_fallback_reasoning_label(Some(step.reasoning_effort)),
+                        "trigger_error": err.to_string(),
+                        "cooldown_seconds": model_fallback.cooldown_seconds,
+                        "max_wait_seconds": model_fallback.max_wait_seconds,
+                    }),
+                )
+                .await;
+                return Ok(ModelFallbackAfterErrorOutcome::Switched(next_context, step));
             }
 
             if model_fallback.max_wait_seconds == 0 {
-                return Ok(None);
+                return Ok(ModelFallbackAfterErrorOutcome::Exhausted);
             }
 
             let Some(wait_for) = wait_for else {
-                return Ok(None);
+                return Ok(ModelFallbackAfterErrorOutcome::Exhausted);
             };
             let max_wait = StdDuration::from_secs(model_fallback.max_wait_seconds);
             let deadline = if let Some(existing_deadline) = wait_deadline.as_ref() {
@@ -3223,18 +3235,18 @@ impl Session {
                         }),
                     )
                     .await;
-                    return Ok(None);
+                    return Ok(ModelFallbackAfterErrorOutcome::DisabledOverflow);
                 };
                 *wait_deadline = Some(new_deadline);
                 new_deadline
             };
             if now >= deadline {
-                return Ok(None);
+                return Ok(ModelFallbackAfterErrorOutcome::Exhausted);
             }
             let remaining_budget = deadline.saturating_duration_since(now);
             let sleep_for = wait_for.min(remaining_budget);
             if sleep_for.is_zero() {
-                return Ok(None);
+                return Ok(ModelFallbackAfterErrorOutcome::Exhausted);
             }
             let warning = format!(
                 "All fallback models are cooling down. Waiting {:?} before retry.",
@@ -6696,8 +6708,12 @@ pub(crate) async fn run_turn(
     let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
     let mut server_model_warning_emitted_for_turn = false;
     let mut fallback_wait_deadline: Option<StdInstant> = None;
-    let mut pending_fallback_success_step: Option<(String, CodexnForkModelFallbackStep, String)> =
-        None;
+    let mut pending_fallback_success_step: Option<(
+        String,
+        CodexnForkModelFallbackStep,
+        Option<ReasoningEffortConfig>,
+        String,
+    )> = None;
     let model_fallback_delivery_log_path = if turn_context.model_fallback.is_some() {
         Some(
             sess.codex_home()
@@ -6776,7 +6792,7 @@ pub(crate) async fn run_turn(
         .await
         {
             Ok(sampling_request_output) => {
-                if let Some((from_model, step, trigger_error)) =
+                if let Some((from_model, step, resolved_effort, trigger_error)) =
                     pending_fallback_success_step.take()
                     && let Some(model_fallback) = turn_context.model_fallback.as_ref()
                 {
@@ -6788,7 +6804,8 @@ pub(crate) async fn run_turn(
                         json!({
                             "from_model": from_model,
                             "to_model": step.model.clone(),
-                            "to_reasoning_effort": format!("{:?}", step.reasoning_effort).to_ascii_lowercase(),
+                            "to_reasoning_effort": model_fallback_reasoning_label(resolved_effort),
+                            "requested_reasoning_effort": model_fallback_reasoning_label(Some(step.reasoning_effort)),
                             "trigger_error": trigger_error,
                             "sticky": model_fallback.sticky,
                         }),
@@ -7537,14 +7554,42 @@ pub(crate) async fn run_turn(
                         )
                         .await
                     {
-                        Ok(Some((next_turn_context, step))) => {
+                        Ok(ModelFallbackAfterErrorOutcome::Switched(next_turn_context, step)) => {
                             let from_model = turn_context.model_info.slug.clone();
+                            let resolved_effort = next_turn_context.reasoning_effort;
+                            if let Some((
+                                previous_from_model,
+                                previous_step,
+                                previous_resolved_effort,
+                                previous_trigger_error,
+                            )) = pending_fallback_success_step.take()
+                            {
+                                let previous_to_model = previous_step.model;
+                                let previous_requested_effort = previous_step.reasoning_effort;
+                                append_nero_model_fallback_audit(
+                                    model_fallback_delivery_log_path.as_deref(),
+                                    &sess.conversation_id,
+                                    &turn_context,
+                                    "superseded",
+                                    json!({
+                                        "from_model": previous_from_model,
+                                        "to_model": previous_to_model,
+                                        "to_reasoning_effort": model_fallback_reasoning_label(previous_resolved_effort),
+                                        "requested_reasoning_effort": model_fallback_reasoning_label(Some(previous_requested_effort)),
+                                        "trigger_error": previous_trigger_error,
+                                        "superseded_by_model": step.model.clone(),
+                                        "superseded_by_reasoning_effort": model_fallback_reasoning_label(resolved_effort),
+                                    }),
+                                )
+                                .await;
+                            }
                             turn_context = next_turn_context;
-                            pending_fallback_success_step = Some((from_model, step, e.to_string()));
+                            pending_fallback_success_step =
+                                Some((from_model, step, resolved_effort, e.to_string()));
                             client_session = sess.services.model_client.new_session();
                             continue;
                         }
-                        Ok(None) => {
+                        Ok(ModelFallbackAfterErrorOutcome::Exhausted) => {
                             if let Some(model_fallback) = turn_context.model_fallback.as_ref() {
                                 let message = format!(
                                     "Model fallback exhausted: all configured models are unavailable or cooling down (max_wait_seconds={}). Last provider error: {e}",
@@ -7578,6 +7623,8 @@ pub(crate) async fn run_turn(
                                 break;
                             }
                         }
+                        Ok(ModelFallbackAfterErrorOutcome::DisabledOverflow)
+                        | Ok(ModelFallbackAfterErrorOutcome::Noop) => {}
                         Err(CodexErr::TurnAborted) => {
                             break;
                         }
