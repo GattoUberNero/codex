@@ -687,6 +687,30 @@ async fn append_nero_hook_delivery_audit(
     }
 }
 
+async fn append_nero_model_fallback_audit(
+    log_path: Option<&Path>,
+    conversation_id: &ThreadId,
+    turn_context: &TurnContext,
+    status: &str,
+    details: Value,
+) {
+    let Some(log_path) = log_path else {
+        return;
+    };
+    append_nero_hook_delivery_audit(
+        log_path,
+        conversation_id,
+        turn_context,
+        "model-fallback",
+        "model_fallback",
+        status,
+        false,
+        false,
+        details,
+    )
+    .await;
+}
+
 impl Codex {
     /// Spawn a new [`Codex`] and initialize the session.
     #[allow(clippy::too_many_arguments)]
@@ -3061,6 +3085,7 @@ impl Session {
         err: &CodexErr,
         wait_deadline: &mut Option<StdInstant>,
         cancellation_token: &CancellationToken,
+        delivery_log_path: Option<&Path>,
     ) -> CodexResult<Option<(Arc<TurnContext>, CodexnForkModelFallbackStep)>> {
         let Some(model_fallback) = turn_context.model_fallback.clone() else {
             return Ok(None);
@@ -3083,6 +3108,18 @@ impl Session {
                 self.send_event(
                     turn_context,
                     EventMsg::Warning(WarningEvent { message: warning }),
+                )
+                .await;
+                append_nero_model_fallback_audit(
+                    delivery_log_path,
+                    &self.conversation_id,
+                    turn_context,
+                    "disabled-overflow",
+                    json!({
+                        "reason": "cooldown_overflow",
+                        "cooldown_seconds": model_fallback.cooldown_seconds,
+                        "from_model": current_model,
+                    }),
                 )
                 .await;
                 return Ok(None);
@@ -3125,6 +3162,21 @@ impl Session {
                     EventMsg::Warning(WarningEvent { message: warning }),
                 )
                 .await;
+                append_nero_model_fallback_audit(
+                    delivery_log_path,
+                    &self.conversation_id,
+                    turn_context,
+                    "attempt",
+                    json!({
+                        "from_model": current_model.clone(),
+                        "to_model": step.model.clone(),
+                        "to_reasoning_effort": format!("{:?}", step.reasoning_effort).to_ascii_lowercase(),
+                        "trigger_error": err.to_string(),
+                        "cooldown_seconds": model_fallback.cooldown_seconds,
+                        "max_wait_seconds": model_fallback.max_wait_seconds,
+                    }),
+                )
+                .await;
                 let next_context = Arc::new(
                     turn_context
                         .with_model_and_reasoning(
@@ -3157,6 +3209,18 @@ impl Session {
                     self.send_event(
                         turn_context,
                         EventMsg::Warning(WarningEvent { message: warning }),
+                    )
+                    .await;
+                    append_nero_model_fallback_audit(
+                        delivery_log_path,
+                        &self.conversation_id,
+                        turn_context,
+                        "disabled-overflow",
+                        json!({
+                            "reason": "max_wait_overflow",
+                            "max_wait_seconds": model_fallback.max_wait_seconds,
+                            "from_model": current_model,
+                        }),
                     )
                     .await;
                     return Ok(None);
@@ -6632,7 +6696,18 @@ pub(crate) async fn run_turn(
     let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
     let mut server_model_warning_emitted_for_turn = false;
     let mut fallback_wait_deadline: Option<StdInstant> = None;
-    let mut pending_fallback_success_step: Option<CodexnForkModelFallbackStep> = None;
+    let mut pending_fallback_success_step: Option<(String, CodexnForkModelFallbackStep, String)> =
+        None;
+    let model_fallback_delivery_log_path = if turn_context.model_fallback.is_some() {
+        Some(
+            sess.codex_home()
+                .await
+                .join("log")
+                .join(NERO_HOOK_DELIVERY_LOG_FILENAME),
+        )
+    } else {
+        None
+    };
 
     // `ModelClientSession` is turn-scoped and caches WebSocket + sticky routing state, so we reuse
     // one instance across retries within this turn.
@@ -6701,9 +6776,24 @@ pub(crate) async fn run_turn(
         .await
         {
             Ok(sampling_request_output) => {
-                if let Some(step) = pending_fallback_success_step.take()
+                if let Some((from_model, step, trigger_error)) =
+                    pending_fallback_success_step.take()
                     && let Some(model_fallback) = turn_context.model_fallback.as_ref()
                 {
+                    append_nero_model_fallback_audit(
+                        model_fallback_delivery_log_path.as_deref(),
+                        &sess.conversation_id,
+                        &turn_context,
+                        "success",
+                        json!({
+                            "from_model": from_model,
+                            "to_model": step.model.clone(),
+                            "to_reasoning_effort": format!("{:?}", step.reasoning_effort).to_ascii_lowercase(),
+                            "trigger_error": trigger_error,
+                            "sticky": model_fallback.sticky,
+                        }),
+                    )
+                    .await;
                     sess.mark_model_fallback_success(model_fallback, &step)
                         .await;
                 }
@@ -7443,12 +7533,14 @@ pub(crate) async fn run_turn(
                             &e,
                             &mut fallback_wait_deadline,
                             &cancellation_token,
+                            model_fallback_delivery_log_path.as_deref(),
                         )
                         .await
                     {
                         Ok(Some((next_turn_context, step))) => {
+                            let from_model = turn_context.model_info.slug.clone();
                             turn_context = next_turn_context;
-                            pending_fallback_success_step = Some(step);
+                            pending_fallback_success_step = Some((from_model, step, e.to_string()));
                             client_session = sess.services.model_client.new_session();
                             continue;
                         }
@@ -7468,6 +7560,18 @@ pub(crate) async fn run_turn(
                                     EventMsg::Error(ErrorEvent {
                                         message,
                                         codex_error_info: Some(CodexErrorInfo::ServerOverloaded),
+                                    }),
+                                )
+                                .await;
+                                append_nero_model_fallback_audit(
+                                    model_fallback_delivery_log_path.as_deref(),
+                                    &sess.conversation_id,
+                                    &turn_context,
+                                    "exhausted",
+                                    json!({
+                                        "from_model": turn_context.model_info.slug.clone(),
+                                        "max_wait_seconds": model_fallback.max_wait_seconds,
+                                        "last_provider_error": e.to_string(),
                                     }),
                                 )
                                 .await;

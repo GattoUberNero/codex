@@ -3896,11 +3896,15 @@ Protocol appendix: this section is user-authored and must be preserved.
                 sticky = true
 
                 [[nero.model_fallback.ladder]]
+                model = "gpt-5.4-mini"
+                reasoning_effort = "xhigh"
+
+                [[nero.model_fallback.ladder]]
                 model = "gpt-5.3-codex"
                 reasoning_effort = "high"
 
                 [[nero.model_fallback.ladder]]
-                model = "gpt-5.2-codex"
+                model = "gpt-5.4"
                 reasoning_effort = "medium"
             "####,
         )
@@ -3916,11 +3920,15 @@ Protocol appendix: this section is user-authored and must be preserved.
                 sticky: true,
                 ladder: vec![
                     CodexnForkModelFallbackStep {
+                        model: "gpt-5.4-mini".to_string(),
+                        reasoning_effort: ReasoningEffort::XHigh,
+                    },
+                    CodexnForkModelFallbackStep {
                         model: "gpt-5.3-codex".to_string(),
                         reasoning_effort: ReasoningEffort::High,
                     },
                     CodexnForkModelFallbackStep {
-                        model: "gpt-5.2-codex".to_string(),
+                        model: "gpt-5.4".to_string(),
                         reasoning_effort: ReasoningEffort::Medium,
                     },
                 ],
