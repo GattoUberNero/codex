@@ -717,6 +717,26 @@ const CODEXN_CONFIG_NERO_MSG_PATH_ENV: &str = "CODEXN_CONFIG_NERO_MSG_PATH";
 const CODEXN_CONFIG_NERO_AUTO_PATH_ENV: &str = "CODEXN_CONFIG_NERO_AUTO_PATH";
 const CODEXN_CONFIG_NERO_DEV_PATH_ENV: &str = "CODEXN_CONFIG_NERO_DEV_PATH";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexnForkModelFallbackStep {
+    pub model: String,
+    pub reasoning_effort: ReasoningEffort,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexnForkModelFallbackConfig {
+    pub cooldown_seconds: u64,
+    pub max_wait_seconds: u64,
+    pub sticky: bool,
+    pub ladder: Vec<CodexnForkModelFallbackStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CodexnForkModelFallbackResolution {
+    pub config: Option<CodexnForkModelFallbackConfig>,
+    pub warning: Option<String>,
+}
+
 fn codexn_fork_main_agent_developer_instructions(extra_toml: &TomlValue) -> Option<String> {
     let root = extra_toml.as_table()?;
     let nero = root.get("nero")?.as_table()?;
@@ -1033,6 +1053,202 @@ fn effective_codexn_fork_nero_auto_runtime(
     runtime
 }
 
+fn parse_codexn_fork_reasoning_effort(value: &TomlValue) -> Option<ReasoningEffort> {
+    let value = value.as_str()?.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "none" => Some(ReasoningEffort::None),
+        "minimal" => Some(ReasoningEffort::Minimal),
+        "low" => Some(ReasoningEffort::Low),
+        "medium" => Some(ReasoningEffort::Medium),
+        "high" => Some(ReasoningEffort::High),
+        "xhigh" => Some(ReasoningEffort::XHigh),
+        _ => None,
+    }
+}
+
+pub(crate) fn codexn_fork_model_fallback_identity(model: &str) -> String {
+    let normalized = model.trim().to_ascii_lowercase();
+    // Keep identity rules aligned with model-manager lookup behavior for one-segment namespaces
+    // like `custom/gpt-5.3-codex`.
+    let Some((namespace, suffix)) = normalized.split_once('/') else {
+        return normalized;
+    };
+    if suffix.contains('/') {
+        return normalized;
+    }
+    if namespace
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        suffix.to_string()
+    } else {
+        normalized
+    }
+}
+
+fn read_codexn_fork_model_fallback(extra_toml: &TomlValue) -> CodexnForkModelFallbackResolution {
+    let Some(model_fallback) = extra_toml
+        .get("nero")
+        .and_then(|v| v.get("model_fallback"))
+        .and_then(TomlValue::as_table)
+    else {
+        return CodexnForkModelFallbackResolution::default();
+    };
+
+    let enabled = match model_fallback.get("enabled") {
+        Some(value) => match value.as_bool() {
+            Some(enabled) => enabled,
+            None => {
+                return CodexnForkModelFallbackResolution {
+                    config: None,
+                    warning: Some(
+                        "[nero.model_fallback] has non-boolean `enabled`; disabling fallback for this session."
+                            .to_string(),
+                    ),
+                };
+            }
+        },
+        None => {
+            let has_non_enabled_keys = model_fallback.keys().any(|key| key.as_str() != "enabled");
+            if has_non_enabled_keys {
+                return CodexnForkModelFallbackResolution {
+                    config: None,
+                    warning: Some(
+                        "[nero.model_fallback] is present but missing explicit boolean `enabled`; disabling fallback for this session."
+                            .to_string(),
+                    ),
+                };
+            }
+            false
+        }
+    };
+    if !enabled {
+        return CodexnForkModelFallbackResolution::default();
+    }
+
+    let mut issues = Vec::<String>::new();
+
+    let cooldown_seconds = match model_fallback
+        .get("cooldown_seconds")
+        .and_then(TomlValue::as_integer)
+    {
+        Some(value) if value >= 0 => Some(value as u64),
+        Some(_) => {
+            issues.push("cooldown_seconds must be >= 0".to_string());
+            None
+        }
+        None => {
+            issues.push("missing required `cooldown_seconds`".to_string());
+            None
+        }
+    };
+
+    let max_wait_seconds = match model_fallback
+        .get("max_wait_seconds")
+        .and_then(TomlValue::as_integer)
+    {
+        Some(value) if value >= 0 => Some(value as u64),
+        Some(_) => {
+            issues.push("max_wait_seconds must be >= 0".to_string());
+            None
+        }
+        None => {
+            issues.push("missing required `max_wait_seconds`".to_string());
+            None
+        }
+    };
+
+    let sticky = match model_fallback.get("sticky").and_then(TomlValue::as_bool) {
+        Some(value) => Some(value),
+        None => {
+            issues.push("missing required `sticky`".to_string());
+            None
+        }
+    };
+
+    let mut ladder = Vec::<CodexnForkModelFallbackStep>::new();
+    let mut seen_models = std::collections::HashSet::<String>::new();
+    match model_fallback.get("ladder").and_then(TomlValue::as_array) {
+        Some(entries) => {
+            for (index, entry) in entries.iter().enumerate() {
+                let Some(table) = entry.as_table() else {
+                    issues.push(format!("ladder[{index}] must be a table"));
+                    continue;
+                };
+                let model = table
+                    .get("model")
+                    .and_then(TomlValue::as_str)
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string();
+                if model.is_empty() {
+                    issues.push(format!("ladder[{index}].model is required"));
+                    continue;
+                }
+                let identity = codexn_fork_model_fallback_identity(model.as_str());
+                if !seen_models.insert(identity.clone()) {
+                    issues.push(format!(
+                        "ladder contains duplicate model identity `{identity}` (index {index})"
+                    ));
+                    continue;
+                }
+                let Some(reasoning_effort) = table
+                    .get("reasoning_effort")
+                    .and_then(parse_codexn_fork_reasoning_effort)
+                else {
+                    issues.push(format!(
+                        "ladder[{index}].reasoning_effort must be one of: none|minimal|low|medium|high|xhigh"
+                    ));
+                    continue;
+                };
+                ladder.push(CodexnForkModelFallbackStep {
+                    model,
+                    reasoning_effort,
+                });
+            }
+        }
+        None => issues.push("missing required `ladder` array".to_string()),
+    }
+
+    if ladder.is_empty() {
+        issues.push("ladder must contain at least one valid model step".to_string());
+    }
+
+    if !issues.is_empty() {
+        return CodexnForkModelFallbackResolution {
+            config: None,
+            warning: Some(format!(
+                "[nero.model_fallback] is enabled but invalid ({}); disabling fallback for this session.",
+                issues.join("; ")
+            )),
+        };
+    }
+
+    CodexnForkModelFallbackResolution {
+        config: Some(CodexnForkModelFallbackConfig {
+            cooldown_seconds: cooldown_seconds.expect("validated cooldown_seconds"),
+            max_wait_seconds: max_wait_seconds.expect("validated max_wait_seconds"),
+            sticky: sticky.expect("validated sticky"),
+            ladder,
+        }),
+        warning: None,
+    }
+}
+
+fn session_source_disables_codexn_fork_model_fallback(session_source: &SessionSource) -> bool {
+    matches!(session_source, SessionSource::SubAgent(_))
+}
+
+fn effective_codexn_fork_model_fallback_resolution(
+    mut resolution: CodexnForkModelFallbackResolution,
+    session_source: &SessionSource,
+) -> CodexnForkModelFallbackResolution {
+    if session_source_disables_codexn_fork_model_fallback(session_source) {
+        resolution.config = None;
+    }
+    resolution
+}
+
 fn codexn_fork_auto_developer_instructions(extra_toml: &TomlValue) -> Option<String> {
     let root = extra_toml.as_table()?;
     let nero = root.get("nero")?.as_table()?;
@@ -1155,7 +1371,7 @@ fn load_codexn_extra_config_from_env() -> std::io::Result<Option<TomlValue>> {
     let mut combined_extra_toml = TomlValue::Table(toml::map::Map::new());
     for (env_name, extra_path) in extra_paths {
         if !extra_path.exists() {
-            tracing::debug!(
+            tracing::warn!(
                 env_name,
                 path = %extra_path.display(),
                 "codexn extra config path is set but file does not exist; skipping overlay"
@@ -1220,6 +1436,18 @@ pub(crate) fn resolve_codexn_fork_nero_auto_runtime_from_env(
     };
     Ok(effective_codexn_fork_nero_auto_runtime(
         read_codexn_fork_nero_auto_runtime(&combined_extra_toml),
+        session_source,
+    ))
+}
+
+pub(crate) fn resolve_codexn_fork_model_fallback_from_env(
+    session_source: &SessionSource,
+) -> std::io::Result<CodexnForkModelFallbackResolution> {
+    let Some(combined_extra_toml) = load_codexn_extra_config_from_env()? else {
+        return Ok(CodexnForkModelFallbackResolution::default());
+    };
+    Ok(effective_codexn_fork_model_fallback_resolution(
+        read_codexn_fork_model_fallback(&combined_extra_toml),
         session_source,
     ))
 }
@@ -3654,6 +3882,187 @@ Protocol appendix: this section is user-authored and must be preserved.
         assert!(
             codexn_fork_auto_developer_instructions(&extra_toml).is_none(),
             "subagent runtime overlay must remove auto developer instructions"
+        );
+    }
+
+    #[test]
+    fn read_codexn_fork_model_fallback_accepts_valid_enabled_config() {
+        let extra_toml: TomlValue = toml::from_str(
+            r####"
+                [nero.model_fallback]
+                enabled = true
+                cooldown_seconds = 30
+                max_wait_seconds = 120
+                sticky = true
+
+                [[nero.model_fallback.ladder]]
+                model = "gpt-5.3-codex"
+                reasoning_effort = "high"
+
+                [[nero.model_fallback.ladder]]
+                model = "gpt-5.2-codex"
+                reasoning_effort = "medium"
+            "####,
+        )
+        .expect("parse extra toml");
+
+        let resolution = read_codexn_fork_model_fallback(&extra_toml);
+        assert!(resolution.warning.is_none(), "no warning expected");
+        assert_eq!(
+            resolution.config,
+            Some(CodexnForkModelFallbackConfig {
+                cooldown_seconds: 30,
+                max_wait_seconds: 120,
+                sticky: true,
+                ladder: vec![
+                    CodexnForkModelFallbackStep {
+                        model: "gpt-5.3-codex".to_string(),
+                        reasoning_effort: ReasoningEffort::High,
+                    },
+                    CodexnForkModelFallbackStep {
+                        model: "gpt-5.2-codex".to_string(),
+                        reasoning_effort: ReasoningEffort::Medium,
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn read_codexn_fork_model_fallback_disables_invalid_enabled_config() {
+        let extra_toml: TomlValue = toml::from_str(
+            r####"
+                [nero.model_fallback]
+                enabled = true
+                cooldown_seconds = 30
+                sticky = false
+
+                [[nero.model_fallback.ladder]]
+                model = ""
+                reasoning_effort = "nope"
+            "####,
+        )
+        .expect("parse extra toml");
+
+        let resolution = read_codexn_fork_model_fallback(&extra_toml);
+        assert!(
+            resolution.config.is_none(),
+            "invalid config must be disabled"
+        );
+        let warning = resolution.warning.unwrap_or_default();
+        assert!(warning.contains("missing required `max_wait_seconds`"));
+        assert!(warning.contains("ladder[0].model is required"));
+    }
+
+    #[test]
+    fn read_codexn_fork_model_fallback_warns_when_enabled_is_missing() {
+        let extra_toml: TomlValue = toml::from_str(
+            r####"
+                [nero.model_fallback]
+                cooldown_seconds = 30
+                max_wait_seconds = 120
+                sticky = true
+            "####,
+        )
+        .expect("parse extra toml");
+
+        let resolution = read_codexn_fork_model_fallback(&extra_toml);
+        assert!(
+            resolution.config.is_none(),
+            "missing enabled should disable config"
+        );
+        assert!(
+            resolution
+                .warning
+                .unwrap_or_default()
+                .contains("missing explicit boolean `enabled`"),
+            "missing enabled warning should be explicit"
+        );
+    }
+
+    #[test]
+    fn read_codexn_fork_model_fallback_warns_when_enabled_is_not_bool() {
+        let extra_toml: TomlValue = toml::from_str(
+            r####"
+                [nero.model_fallback]
+                enabled = "true"
+            "####,
+        )
+        .expect("parse extra toml");
+
+        let resolution = read_codexn_fork_model_fallback(&extra_toml);
+        assert!(
+            resolution.config.is_none(),
+            "non-boolean enabled should disable config"
+        );
+        assert!(
+            resolution
+                .warning
+                .unwrap_or_default()
+                .contains("non-boolean `enabled`"),
+            "non-boolean enabled warning should be explicit"
+        );
+    }
+
+    #[test]
+    fn read_codexn_fork_model_fallback_rejects_namespaced_duplicate_identity() {
+        let extra_toml: TomlValue = toml::from_str(
+            r####"
+                [nero.model_fallback]
+                enabled = true
+                cooldown_seconds = 30
+                max_wait_seconds = 120
+                sticky = true
+
+                [[nero.model_fallback.ladder]]
+                model = "custom/gpt-5.3-codex"
+                reasoning_effort = "high"
+
+                [[nero.model_fallback.ladder]]
+                model = "gpt-5.3-codex"
+                reasoning_effort = "high"
+            "####,
+        )
+        .expect("parse extra toml");
+
+        let resolution = read_codexn_fork_model_fallback(&extra_toml);
+        assert!(
+            resolution.config.is_none(),
+            "duplicate normalized identity should disable config"
+        );
+        assert!(
+            resolution
+                .warning
+                .unwrap_or_default()
+                .contains("duplicate model identity"),
+            "duplicate identity warning should be explicit"
+        );
+    }
+
+    #[test]
+    fn effective_codexn_fork_model_fallback_resolution_disables_for_subagents() {
+        let resolution = CodexnForkModelFallbackResolution {
+            config: Some(CodexnForkModelFallbackConfig {
+                cooldown_seconds: 10,
+                max_wait_seconds: 20,
+                sticky: true,
+                ladder: vec![CodexnForkModelFallbackStep {
+                    model: "gpt-5.3-codex".to_string(),
+                    reasoning_effort: ReasoningEffort::High,
+                }],
+            }),
+            warning: None,
+        };
+
+        let effective = effective_codexn_fork_model_fallback_resolution(
+            resolution,
+            &SessionSource::SubAgent(codex_protocol::protocol::SubAgentSource::Other(
+                "reviewer".to_string(),
+            )),
+        );
+        assert!(
+            effective.config.is_none(),
+            "fallback config should be disabled for subagents"
         );
     }
 

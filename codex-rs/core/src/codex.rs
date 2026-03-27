@@ -29,6 +29,8 @@ use crate::compact::InitialContextInjection;
 use crate::compact::run_inline_auto_compact_task;
 use crate::compact::should_use_remote_compact_task;
 use crate::compact_remote::run_inline_remote_auto_compact_task;
+use crate::config::CodexnForkModelFallbackConfig;
+use crate::config::CodexnForkModelFallbackStep;
 use crate::config::ManagedFeatures;
 use crate::connectors;
 use crate::exec_policy::ExecPolicyManager;
@@ -757,6 +759,25 @@ impl Codex {
             .await
             .map_err(|err| CodexErr::Fatal(format!("failed to load rules: {err}")))?;
 
+        let model_fallback_resolution =
+            crate::config::resolve_codexn_fork_model_fallback_from_env(&session_source)
+                .unwrap_or_else(|err| {
+                    warn!(
+                        error = %err,
+                        "failed to resolve codexn fork model fallback from env; disabling feature"
+                    );
+                    crate::config::CodexnForkModelFallbackResolution {
+                        config: None,
+                        warning: Some(
+                            "Failed to load [nero.model_fallback] from CODEXN_CONFIG_NERO_* overlays; fallback is disabled for this session.".to_string(),
+                        ),
+                    }
+                });
+        if let Some(message) = model_fallback_resolution.warning.as_ref() {
+            warn!("{message}");
+            config.startup_warnings.push(message.clone());
+        }
+
         let config = Arc::new(config);
         let refresh_strategy = match session_source {
             SessionSource::SubAgent(_) => crate::models_manager::manager::RefreshStrategy::Offline,
@@ -853,6 +874,7 @@ impl Codex {
             app_server_client_name: None,
             session_source,
             nero_auto_runtime,
+            nero_model_fallback: model_fallback_resolution.config,
             dynamic_tools,
             persist_extended_history,
             inherited_shell_snapshot,
@@ -1062,6 +1084,7 @@ pub(crate) struct TurnContext {
     pub(crate) compact_prompt: Option<String>,
     pub(crate) user_instructions: Option<String>,
     pub(crate) collaboration_mode: CollaborationMode,
+    pub(crate) model_fallback: Option<CodexnForkModelFallbackConfig>,
     pub(crate) personality: Option<Personality>,
     pub(crate) approval_policy: Constrained<AskForApproval>,
     pub(crate) sandbox_policy: Constrained<SandboxPolicy>,
@@ -1089,6 +1112,16 @@ impl TurnContext {
     }
 
     pub(crate) async fn with_model(&self, model: String, models_manager: &ModelsManager) -> Self {
+        self.with_model_and_reasoning(model, None, models_manager)
+            .await
+    }
+
+    pub(crate) async fn with_model_and_reasoning(
+        &self,
+        model: String,
+        requested_reasoning_effort: Option<ReasoningEffortConfig>,
+        models_manager: &ModelsManager,
+    ) -> Self {
         let mut config = (*self.config).clone();
         config.model = Some(model.clone());
         let model_info = models_manager.get_model_info(model.as_str(), &config).await;
@@ -1098,9 +1131,11 @@ impl TurnContext {
             .iter()
             .map(|preset| preset.effort)
             .collect::<Vec<_>>();
-        let reasoning_effort = if let Some(current_reasoning_effort) = self.reasoning_effort {
-            if supported_reasoning_levels.contains(&current_reasoning_effort) {
-                Some(current_reasoning_effort)
+        let preferred_reasoning_effort = requested_reasoning_effort.or(self.reasoning_effort);
+        let reasoning_effort = if let Some(preferred_reasoning_effort) = preferred_reasoning_effort
+        {
+            if supported_reasoning_levels.contains(&preferred_reasoning_effort) {
+                Some(preferred_reasoning_effort)
             } else {
                 supported_reasoning_levels
                     .get(supported_reasoning_levels.len().saturating_sub(1) / 2)
@@ -1151,6 +1186,7 @@ impl TurnContext {
             compact_prompt: self.compact_prompt.clone(),
             user_instructions: self.user_instructions.clone(),
             collaboration_mode,
+            model_fallback: self.model_fallback.clone(),
             personality: self.personality,
             approval_policy: self.approval_policy.clone(),
             sandbox_policy: self.sandbox_policy.clone(),
@@ -1265,6 +1301,74 @@ fn effective_nero_auto_runtime(
     runtime
 }
 
+fn model_fallback_rotated_indices(
+    ladder_len: usize,
+    start_model: Option<&str>,
+    ladder: &[CodexnForkModelFallbackStep],
+) -> Vec<usize> {
+    if ladder_len == 0 {
+        return Vec::new();
+    }
+    let Some(start_model) = start_model else {
+        return (0..ladder_len).collect();
+    };
+    let Some(start_index) = ladder.iter().position(|step| step.model == start_model) else {
+        return (0..ladder_len).collect();
+    };
+    let mut indices = Vec::with_capacity(ladder_len);
+    for offset in 0..ladder_len {
+        indices.push((start_index + offset) % ladder_len);
+    }
+    indices
+}
+
+fn next_available_model_fallback_step(
+    ladder: &[CodexnForkModelFallbackStep],
+    start_after_model: Option<&str>,
+    now: StdInstant,
+    cooldown_remaining: impl Fn(&str, StdInstant) -> Option<StdDuration>,
+) -> Option<CodexnForkModelFallbackStep> {
+    let indices = model_fallback_rotated_indices(ladder.len(), start_after_model, ladder);
+    let skip_current_model = start_after_model.map(str::to_string);
+    for index in indices {
+        let step = ladder.get(index)?;
+        if skip_current_model.as_deref() == Some(step.model.as_str()) {
+            continue;
+        }
+        if cooldown_remaining(step.model.as_str(), now).is_none() {
+            return Some(step.clone());
+        }
+    }
+    None
+}
+
+fn is_controlled_model_fallback_service_unavailable(
+    err: &crate::error::UnexpectedResponseError,
+) -> bool {
+    if err.status.as_u16() != 503 {
+        return false;
+    }
+    let body = err.body.to_ascii_lowercase();
+    [
+        "server_is_overloaded",
+        "slow_down",
+        "model currently not available",
+        "currently not available",
+        "high demand",
+        "temporarily unavailable",
+    ]
+    .iter()
+    .any(|needle| body.contains(needle))
+}
+
+fn should_trigger_model_fallback(err: &CodexErr) -> bool {
+    match err {
+        CodexErr::ServerOverloaded => true,
+        CodexErr::UnexpectedStatus(err) => is_controlled_model_fallback_service_unavailable(err),
+        _ => false,
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct SessionConfiguration {
     /// Provider identifier ("openai", "openrouter", ...).
@@ -1313,6 +1417,7 @@ pub(crate) struct SessionConfiguration {
     /// Source of the session (cli, vscode, exec, mcp, ...)
     session_source: SessionSource,
     nero_auto_runtime: NeroAutoRuntimeConfig,
+    nero_model_fallback: Option<CodexnForkModelFallbackConfig>,
     dynamic_tools: Vec<DynamicToolSpec>,
     persist_extended_history: bool,
     inherited_shell_snapshot: Option<Arc<ShellSnapshot>>,
@@ -1583,6 +1688,7 @@ impl Session {
             compact_prompt: session_configuration.compact_prompt.clone(),
             user_instructions: session_configuration.user_instructions.clone(),
             collaboration_mode: session_configuration.collaboration_mode.clone(),
+            model_fallback: session_configuration.nero_model_fallback.clone(),
             personality: session_configuration.personality,
             approval_policy: session_configuration.approval_policy.clone(),
             sandbox_policy: session_configuration.sandbox_policy.clone(),
@@ -2878,6 +2984,228 @@ impl Session {
             .await)
     }
 
+    async fn apply_model_fallback_pre_turn(
+        &self,
+        mut session_configuration: SessionConfiguration,
+    ) -> SessionConfiguration {
+        let Some(model_fallback) = session_configuration.nero_model_fallback.clone() else {
+            return session_configuration;
+        };
+
+        let requested_model = session_configuration.collaboration_mode.model().to_string();
+        let requested_effort = session_configuration.collaboration_mode.reasoning_effort();
+        let now = StdInstant::now();
+        let selected_step = {
+            let mut state = self.state.lock().await;
+            let runtime = &mut state.model_fallback_runtime;
+            runtime.prune_expired(now);
+
+            if runtime.last_requested_model.as_deref() != Some(requested_model.as_str()) {
+                runtime.sticky_step = None;
+            }
+            runtime.last_requested_model = Some(requested_model.clone());
+
+            let sticky_candidate = if model_fallback.sticky {
+                runtime.sticky_step.clone()
+            } else {
+                None
+            };
+            if let Some(sticky_step) = sticky_candidate {
+                if runtime
+                    .cooldown_remaining(sticky_step.model.as_str(), now)
+                    .is_none()
+                {
+                    Some(sticky_step)
+                } else {
+                    next_available_model_fallback_step(
+                        &model_fallback.ladder,
+                        Some(sticky_step.model.as_str()),
+                        now,
+                        |model, now| runtime.cooldown_remaining(model, now),
+                    )
+                }
+            } else if runtime
+                .cooldown_remaining(requested_model.as_str(), now)
+                .is_some()
+            {
+                next_available_model_fallback_step(
+                    &model_fallback.ladder,
+                    Some(requested_model.as_str()),
+                    now,
+                    |model, now| runtime.cooldown_remaining(model, now),
+                )
+            } else {
+                None
+            }
+        };
+
+        if let Some(step) = selected_step
+            && (step.model != requested_model || Some(step.reasoning_effort) != requested_effort)
+        {
+            warn!(
+                from_model = %requested_model,
+                to_model = %step.model,
+                "applying pre-turn model fallback selection"
+            );
+            session_configuration.collaboration_mode = session_configuration
+                .collaboration_mode
+                .with_updates(Some(step.model), Some(Some(step.reasoning_effort)), None);
+        }
+
+        session_configuration
+    }
+
+    async fn try_model_fallback_after_error(
+        &self,
+        turn_context: &Arc<TurnContext>,
+        err: &CodexErr,
+        wait_deadline: &mut Option<StdInstant>,
+        cancellation_token: &CancellationToken,
+    ) -> CodexResult<Option<(Arc<TurnContext>, CodexnForkModelFallbackStep)>> {
+        let Some(model_fallback) = turn_context.model_fallback.clone() else {
+            return Ok(None);
+        };
+        if !should_trigger_model_fallback(err) {
+            return Ok(None);
+        }
+
+        let current_model = turn_context.model_info.slug.clone();
+        loop {
+            let now = StdInstant::now();
+            let Some(cooldown_until) =
+                now.checked_add(StdDuration::from_secs(model_fallback.cooldown_seconds))
+            else {
+                let warning = format!(
+                    "Model fallback disabled for this turn: cooldown_seconds={} overflows runtime duration arithmetic.",
+                    model_fallback.cooldown_seconds
+                );
+                warn!("{warning}");
+                self.send_event(
+                    turn_context,
+                    EventMsg::Warning(WarningEvent { message: warning }),
+                )
+                .await;
+                return Ok(None);
+            };
+            let (candidate, wait_for) = {
+                let mut state = self.state.lock().await;
+                let runtime = &mut state.model_fallback_runtime;
+                runtime.prune_expired(now);
+                runtime.set_cooldown_for(current_model.clone(), cooldown_until);
+
+                let candidate = next_available_model_fallback_step(
+                    &model_fallback.ladder,
+                    Some(current_model.as_str()),
+                    now,
+                    |model, now| runtime.cooldown_remaining(model, now),
+                );
+                let wait_for = if candidate.is_none() {
+                    model_fallback
+                        .ladder
+                        .iter()
+                        .filter(|step| step.model != current_model)
+                        .filter_map(|step| runtime.cooldown_remaining(step.model.as_str(), now))
+                        .min()
+                } else {
+                    None
+                };
+                (candidate, wait_for)
+            };
+
+            if let Some(step) = candidate {
+                self.services
+                    .otel_manager
+                    .counter("codex.nero.model_fallback.attempt", 1, &[]);
+                let warning = format!(
+                    "Model fallback activated: `{}` -> `{}` ({err}).",
+                    current_model, step.model
+                );
+                self.send_event(
+                    turn_context,
+                    EventMsg::Warning(WarningEvent { message: warning }),
+                )
+                .await;
+                let next_context = Arc::new(
+                    turn_context
+                        .with_model_and_reasoning(
+                            step.model.clone(),
+                            Some(step.reasoning_effort),
+                            &self.services.models_manager,
+                        )
+                        .await,
+                );
+                return Ok(Some((next_context, step)));
+            }
+
+            if model_fallback.max_wait_seconds == 0 {
+                return Ok(None);
+            }
+
+            let Some(wait_for) = wait_for else {
+                return Ok(None);
+            };
+            let max_wait = StdDuration::from_secs(model_fallback.max_wait_seconds);
+            let deadline = if let Some(existing_deadline) = wait_deadline.as_ref() {
+                *existing_deadline
+            } else {
+                let Some(new_deadline) = now.checked_add(max_wait) else {
+                    let warning = format!(
+                        "Model fallback disabled for this turn: max_wait_seconds={} overflows runtime duration arithmetic.",
+                        model_fallback.max_wait_seconds
+                    );
+                    warn!("{warning}");
+                    self.send_event(
+                        turn_context,
+                        EventMsg::Warning(WarningEvent { message: warning }),
+                    )
+                    .await;
+                    return Ok(None);
+                };
+                *wait_deadline = Some(new_deadline);
+                new_deadline
+            };
+            if now >= deadline {
+                return Ok(None);
+            }
+            let remaining_budget = deadline.saturating_duration_since(now);
+            let sleep_for = wait_for.min(remaining_budget);
+            if sleep_for.is_zero() {
+                return Ok(None);
+            }
+            let warning = format!(
+                "All fallback models are cooling down. Waiting {:?} before retry.",
+                sleep_for
+            );
+            self.send_event(
+                turn_context,
+                EventMsg::Warning(WarningEvent { message: warning }),
+            )
+            .await;
+            tokio::select! {
+                _ = tokio::time::sleep(sleep_for) => {},
+                _ = cancellation_token.cancelled() => return Err(CodexErr::TurnAborted),
+            }
+        }
+    }
+
+    async fn mark_model_fallback_success(
+        &self,
+        model_fallback: &CodexnForkModelFallbackConfig,
+        step: &CodexnForkModelFallbackStep,
+    ) {
+        let mut state = self.state.lock().await;
+        let runtime = &mut state.model_fallback_runtime;
+        runtime.clear_cooldown_for(step.model.as_str());
+        if model_fallback.sticky {
+            runtime.sticky_step = Some(step.clone());
+        } else {
+            runtime.sticky_step = None;
+        }
+        self.services
+            .otel_manager
+            .counter("codex.nero.model_fallback.success", 1, &[]);
+    }
+
     async fn new_turn_from_configuration(
         &self,
         sub_id: String,
@@ -2885,6 +3213,9 @@ impl Session {
         final_output_json_schema: Option<Option<Value>>,
         sandbox_policy_changed: bool,
     ) -> Arc<TurnContext> {
+        let session_configuration = self
+            .apply_model_fallback_pre_turn(session_configuration)
+            .await;
         let per_turn_config = Self::build_per_turn_config(&session_configuration);
         self.services
             .mcp_connection_manager
@@ -4832,8 +5163,8 @@ mod handlers {
     use serde::Deserialize;
     use serde::Serialize;
     use serde_json::Value;
-    use std::process::Stdio;
     use std::path::PathBuf;
+    use std::process::Stdio;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::io::AsyncWriteExt;
@@ -4842,14 +5173,18 @@ mod handlers {
     use tracing::warn;
 
     const NERO_RUNTIME_STATE_CONTROL_CWD_ENV: &str = "NERO_RUNTIME_STATE_CONTROL_CWD";
-    const NERO_RUNTIME_STATE_CONTROL_CWD_ENV_COMPAT: &str = "NEROBAR_NERO_RUNTIME_STATE_CONTROL_CWD";
+    const NERO_RUNTIME_STATE_CONTROL_CWD_ENV_COMPAT: &str =
+        "NEROBAR_NERO_RUNTIME_STATE_CONTROL_CWD";
     const NERO_RUNTIME_STATE_CONTROL_MODULE_ENV: &str = "NERO_RUNTIME_STATE_CONTROL_MODULE";
-    const NERO_RUNTIME_STATE_CONTROL_MODULE_ENV_COMPAT: &str = "NEROBAR_NERO_RUNTIME_STATE_CONTROL_MODULE";
+    const NERO_RUNTIME_STATE_CONTROL_MODULE_ENV_COMPAT: &str =
+        "NEROBAR_NERO_RUNTIME_STATE_CONTROL_MODULE";
     const NERO_RUNTIME_STATE_CONTROL_TIMEOUT_ENV: &str = "NERO_RUNTIME_CONTROL_TIMEOUT_MS";
-    const NERO_RUNTIME_STATE_CONTROL_TIMEOUT_ENV_COMPAT: &str = "NEROBAR_NERO_RUNTIME_CONTROL_TIMEOUT_MS";
+    const NERO_RUNTIME_STATE_CONTROL_TIMEOUT_ENV_COMPAT: &str =
+        "NEROBAR_NERO_RUNTIME_CONTROL_TIMEOUT_MS";
     const NERO_RUNTIME_STATE_CONTROL_PYTHON_ENV: &str = "NERO_RUNTIME_PYTHON_BIN";
     const NERO_RUNTIME_STATE_CONTROL_PYTHON_ENV_COMPAT: &str = "NEROBAR_NERO_RUNTIME_PYTHON_BIN";
-    const NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE: &str = "nero_hook_runtime.state_runtime_control";
+    const NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE: &str =
+        "nero_hook_runtime.state_runtime_control";
     const NERO_RUNTIME_STATE_CONTROL_DEFAULT_TIMEOUT_MS: u64 = 2_500;
     const NERO_AUTO_TURN_BOOST_TAG_PREFIX: &str = "[nero-hook-auto-boost";
 
@@ -4938,8 +5273,8 @@ mod handlers {
         payload: &impl Serialize,
     ) -> Result<NeroAutoBridgeReadResponse, String> {
         let settings = resolve_nero_auto_runtime_bridge_settings();
-        let bridge_input =
-            serde_json::to_vec(payload).map_err(|err| format!("serialize bridge payload: {err}"))?;
+        let bridge_input = serde_json::to_vec(payload)
+            .map_err(|err| format!("serialize bridge payload: {err}"))?;
         let mut command = Command::new(&settings.python_bin);
         command
             .current_dir(&settings.cwd)
@@ -4985,7 +5320,9 @@ mod handlers {
             if stderr.is_empty() {
                 format!("parse runtime bridge payload failed: {err}; stdout={stdout}")
             } else {
-                format!("parse runtime bridge payload failed: {err}; stderr={stderr}; stdout={stdout}")
+                format!(
+                    "parse runtime bridge payload failed: {err}; stderr={stderr}; stdout={stdout}"
+                )
             }
         })
     }
@@ -5100,9 +5437,15 @@ In your final assistant response include the auto protocol JSON block required b
 
         #[test]
         fn developer_instructions_auto_marker_detection_is_stable() {
-            assert!(developer_instructions_have_auto_path(Some("... NERO_AUTO_V1 ...")));
-            assert!(developer_instructions_have_auto_path(Some("... scoring_system ...")));
-            assert!(!developer_instructions_have_auto_path(Some("plain instructions")));
+            assert!(developer_instructions_have_auto_path(Some(
+                "... NERO_AUTO_V1 ..."
+            )));
+            assert!(developer_instructions_have_auto_path(Some(
+                "... scoring_system ..."
+            )));
+            assert!(!developer_instructions_have_auto_path(Some(
+                "plain instructions"
+            )));
             assert!(!developer_instructions_have_auto_path(None));
         }
 
@@ -5117,23 +5460,13 @@ In your final assistant response include the auto protocol JSON block required b
 
         #[test]
         fn bridge_response_shapes_for_booster_preconditions_are_explicit() {
-            let enabled = sample_bridge_response(
-                true,
-                "session-override",
-                false,
-                0,
-            );
+            let enabled = sample_bridge_response(true, "session-override", false, 0);
             assert!(enabled.effective.enabled);
             assert_eq!(enabled.effective.source, "session-override");
             assert_eq!(enabled.effective.auto_rounds, 0);
             assert!(!enabled.is_subagent);
 
-            let subagent = sample_bridge_response(
-                true,
-                "subagent-forced-off",
-                true,
-                0,
-            );
+            let subagent = sample_bridge_response(true, "subagent-forced-off", true, 0);
             assert!(subagent.is_subagent);
             assert_eq!(subagent.effective.source, "subagent-forced-off");
         }
@@ -5992,6 +6325,7 @@ async fn spawn_review_thread(
         user_instructions: None,
         compact_prompt: parent_turn_context.compact_prompt.clone(),
         collaboration_mode: parent_turn_context.collaboration_mode.clone(),
+        model_fallback: parent_turn_context.model_fallback.clone(),
         personality: parent_turn_context.personality,
         approval_policy: parent_turn_context.approval_policy.clone(),
         sandbox_policy: parent_turn_context.sandbox_policy.clone(),
@@ -6110,8 +6444,7 @@ pub(crate) async fn run_turn(
         return None;
     }
 
-    let model_info = turn_context.model_info.clone();
-    let auto_compact_limit = model_info.auto_compact_token_limit().unwrap_or(i64::MAX);
+    let mut turn_context = turn_context;
 
     let event = EventMsg::TurnStarted(TurnStartedEvent {
         turn_id: turn_context.sub_id.clone(),
@@ -6131,7 +6464,7 @@ pub(crate) async fn run_turn(
         return None;
     }
 
-    let skills_outcome = Some(turn_context.turn_skills.outcome.as_ref());
+    let turn_skills_outcome = turn_context.turn_skills.outcome.clone();
 
     sess.record_context_updates_and_set_reference_context_item(turn_context.as_ref())
         .await;
@@ -6175,19 +6508,17 @@ pub(crate) async fn run_turn(
         Vec::new()
     };
     let connector_slug_counts = build_connector_slug_counts(&available_connectors);
-    let skill_name_counts_lower = skills_outcome
-        .as_ref()
-        .map_or_else(HashMap::new, |outcome| {
-            build_skill_name_counts(&outcome.skills, &outcome.disabled_paths).1
-        });
-    let mentioned_skills = skills_outcome.as_ref().map_or_else(Vec::new, |outcome| {
-        collect_explicit_skill_mentions(
-            &input,
-            &outcome.skills,
-            &outcome.disabled_paths,
-            &connector_slug_counts,
-        )
-    });
+    let skill_name_counts_lower = build_skill_name_counts(
+        &turn_skills_outcome.skills,
+        &turn_skills_outcome.disabled_paths,
+    )
+    .1;
+    let mentioned_skills = collect_explicit_skill_mentions(
+        &input,
+        &turn_skills_outcome.skills,
+        &turn_skills_outcome.disabled_paths,
+        &connector_slug_counts,
+    );
     let config = turn_context.config.clone();
     if config
         .features
@@ -6300,6 +6631,8 @@ pub(crate) async fn run_turn(
     // many turns, from the perspective of the user, it is a single turn.
     let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
     let mut server_model_warning_emitted_for_turn = false;
+    let mut fallback_wait_deadline: Option<StdInstant> = None;
+    let mut pending_fallback_success_step: Option<CodexnForkModelFallbackStep> = None;
 
     // `ModelClientSession` is turn-scoped and caches WebSocket + sticky routing state, so we reuse
     // one instance across retries within this turn.
@@ -6361,17 +6694,27 @@ pub(crate) async fn run_turn(
             turn_metadata_header.as_deref(),
             sampling_request_input,
             &turn_enabled_connectors,
-            skills_outcome,
+            Some(turn_skills_outcome.as_ref()),
             &mut server_model_warning_emitted_for_turn,
             cancellation_token.child_token(),
         )
         .await
         {
             Ok(sampling_request_output) => {
+                if let Some(step) = pending_fallback_success_step.take()
+                    && let Some(model_fallback) = turn_context.model_fallback.as_ref()
+                {
+                    sess.mark_model_fallback_success(model_fallback, &step)
+                        .await;
+                }
                 let SamplingRequestResult {
                     needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
                 } = sampling_request_output;
+                let auto_compact_limit = turn_context
+                    .model_info
+                    .auto_compact_token_limit()
+                    .unwrap_or(i64::MAX);
                 let total_usage_tokens = sess.get_total_token_usage().await;
                 let token_limit_reached = total_usage_tokens >= auto_compact_limit;
 
@@ -7093,6 +7436,55 @@ pub(crate) async fn run_turn(
                 break;
             }
             Err(e) => {
+                if should_trigger_model_fallback(&e) && turn_context.model_fallback.is_some() {
+                    match sess
+                        .try_model_fallback_after_error(
+                            &turn_context,
+                            &e,
+                            &mut fallback_wait_deadline,
+                            &cancellation_token,
+                        )
+                        .await
+                    {
+                        Ok(Some((next_turn_context, step))) => {
+                            turn_context = next_turn_context;
+                            pending_fallback_success_step = Some(step);
+                            client_session = sess.services.model_client.new_session();
+                            continue;
+                        }
+                        Ok(None) => {
+                            if let Some(model_fallback) = turn_context.model_fallback.as_ref() {
+                                let message = format!(
+                                    "Model fallback exhausted: all configured models are unavailable or cooling down (max_wait_seconds={}). Last provider error: {e}",
+                                    model_fallback.max_wait_seconds
+                                );
+                                sess.services.otel_manager.counter(
+                                    "codex.nero.model_fallback.exhausted",
+                                    1,
+                                    &[],
+                                );
+                                sess.send_event(
+                                    &turn_context,
+                                    EventMsg::Error(ErrorEvent {
+                                        message,
+                                        codex_error_info: Some(CodexErrorInfo::ServerOverloaded),
+                                    }),
+                                )
+                                .await;
+                                break;
+                            }
+                        }
+                        Err(CodexErr::TurnAborted) => {
+                            break;
+                        }
+                        Err(err) => {
+                            info!("Turn error: {err:#}");
+                            let event = EventMsg::Error(err.to_error_event(None));
+                            sess.send_event(&turn_context, event).await;
+                            break;
+                        }
+                    }
+                }
                 info!("Turn error: {e:#}");
                 let event = EventMsg::Error(e.to_error_event(None));
                 sess.send_event(&turn_context, event).await;
@@ -7101,6 +7493,12 @@ pub(crate) async fn run_turn(
             }
         }
     }
+
+    sess.set_previous_turn_settings(Some(PreviousTurnSettings {
+        model: turn_context.model_info.slug.clone(),
+        realtime_active: Some(turn_context.realtime_active),
+    }))
+    .await;
 
     last_agent_message
 }
@@ -9712,6 +10110,7 @@ mod tests {
             app_server_client_name: None,
             session_source: SessionSource::Exec,
             nero_auto_runtime: NeroAutoRuntimeConfig::default(),
+            nero_model_fallback: None,
             dynamic_tools: Vec::new(),
             persist_extended_history: false,
             inherited_shell_snapshot: None,
@@ -9807,6 +10206,7 @@ mod tests {
             app_server_client_name: None,
             session_source: SessionSource::Exec,
             nero_auto_runtime: NeroAutoRuntimeConfig::default(),
+            nero_model_fallback: None,
             dynamic_tools: Vec::new(),
             persist_extended_history: false,
             inherited_shell_snapshot: None,
@@ -10133,6 +10533,7 @@ mod tests {
             app_server_client_name: None,
             session_source: SessionSource::Exec,
             nero_auto_runtime: NeroAutoRuntimeConfig::default(),
+            nero_model_fallback: None,
             dynamic_tools: Vec::new(),
             persist_extended_history: false,
             inherited_shell_snapshot: None,
@@ -10245,6 +10646,7 @@ mod tests {
             app_server_client_name: None,
             session_source: SessionSource::Exec,
             nero_auto_runtime: NeroAutoRuntimeConfig::default(),
+            nero_model_fallback: None,
             dynamic_tools: Vec::new(),
             persist_extended_history: false,
             inherited_shell_snapshot: None,
@@ -10340,6 +10742,7 @@ mod tests {
             app_server_client_name: None,
             session_source: SessionSource::Exec,
             nero_auto_runtime: NeroAutoRuntimeConfig::default(),
+            nero_model_fallback: None,
             dynamic_tools: Vec::new(),
             persist_extended_history: false,
             inherited_shell_snapshot: None,
@@ -10760,6 +11163,7 @@ mod tests {
             app_server_client_name: None,
             session_source: SessionSource::Exec,
             nero_auto_runtime: NeroAutoRuntimeConfig::default(),
+            nero_model_fallback: None,
             dynamic_tools,
             persist_extended_history: false,
             inherited_shell_snapshot: None,
@@ -12536,5 +12940,65 @@ mod tests {
         );
 
         pretty_assertions::assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn model_fallback_trigger_policy_is_conservative_for_503() {
+        assert!(should_trigger_model_fallback(&CodexErr::ServerOverloaded));
+
+        let controlled_503 = crate::error::UnexpectedResponseError {
+            status: http::StatusCode::SERVICE_UNAVAILABLE,
+            body: r#"{"error":{"message":"provider temporarily unavailable due to high demand"}}"#
+                .to_string(),
+            url: None,
+            cf_ray: None,
+            request_id: None,
+        };
+        assert!(should_trigger_model_fallback(&CodexErr::UnexpectedStatus(
+            controlled_503
+        )));
+
+        let unrelated_503 = crate::error::UnexpectedResponseError {
+            status: http::StatusCode::SERVICE_UNAVAILABLE,
+            body: "maintenance window".to_string(),
+            url: None,
+            cf_ray: None,
+            request_id: None,
+        };
+        assert!(!should_trigger_model_fallback(&CodexErr::UnexpectedStatus(
+            unrelated_503
+        )));
+    }
+
+    #[test]
+    fn next_available_model_fallback_step_respects_rotation_and_cooldown() {
+        let ladder = vec![
+            CodexnForkModelFallbackStep {
+                model: "model-a".to_string(),
+                reasoning_effort: ReasoningEffortConfig::High,
+            },
+            CodexnForkModelFallbackStep {
+                model: "model-b".to_string(),
+                reasoning_effort: ReasoningEffortConfig::Medium,
+            },
+            CodexnForkModelFallbackStep {
+                model: "model-c".to_string(),
+                reasoning_effort: ReasoningEffortConfig::Low,
+            },
+        ];
+        let now = StdInstant::now();
+        let mut cooldown = std::collections::HashMap::<String, StdInstant>::new();
+        cooldown.insert("model-b".to_string(), now + StdDuration::from_secs(20));
+
+        let selected =
+            next_available_model_fallback_step(&ladder, Some("model-a"), now, |model, now| {
+                cooldown
+                    .get(model)
+                    .and_then(|until| until.checked_duration_since(now))
+            });
+        assert_eq!(
+            selected.as_ref().map(|step| step.model.as_str()),
+            Some("model-c")
+        );
     }
 }

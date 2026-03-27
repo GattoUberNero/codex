@@ -3,10 +3,14 @@
 use codex_protocol::models::ResponseItem;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::time::Duration as StdDuration;
+use std::time::Instant as StdInstant;
 use tokio::task::JoinHandle;
 
 use crate::codex::PreviousTurnSettings;
 use crate::codex::SessionConfiguration;
+use crate::config::CodexnForkModelFallbackStep;
+use crate::config::codexn_fork_model_fallback_identity;
 use crate::context_manager::ContextManager;
 use crate::error::Result as CodexResult;
 use crate::protocol::RateLimitSnapshot;
@@ -19,6 +23,7 @@ use codex_protocol::protocol::TurnContextItem;
 /// Persistent, session-scoped state previously stored directly on `Session`.
 pub(crate) struct SessionState {
     pub(crate) session_configuration: SessionConfiguration,
+    pub(crate) model_fallback_runtime: ModelFallbackRuntimeState,
     pub(crate) history: ContextManager,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
     pub(crate) server_reasoning_included: bool,
@@ -34,12 +39,43 @@ pub(crate) struct SessionState {
     pub(crate) active_connector_selection: HashSet<String>,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct ModelFallbackRuntimeState {
+    pub(crate) cooldown_by_model: HashMap<String, StdInstant>,
+    pub(crate) sticky_step: Option<CodexnForkModelFallbackStep>,
+    pub(crate) last_requested_model: Option<String>,
+}
+
+impl ModelFallbackRuntimeState {
+    pub(crate) fn prune_expired(&mut self, now: StdInstant) {
+        self.cooldown_by_model.retain(|_, until| *until > now);
+    }
+
+    pub(crate) fn cooldown_remaining(&self, model: &str, now: StdInstant) -> Option<StdDuration> {
+        let model = codexn_fork_model_fallback_identity(model);
+        self.cooldown_by_model
+            .get(model.as_str())
+            .and_then(|until| until.checked_duration_since(now))
+    }
+
+    pub(crate) fn set_cooldown_for(&mut self, model: impl Into<String>, until: StdInstant) {
+        let key = codexn_fork_model_fallback_identity(model.into().as_str());
+        self.cooldown_by_model.insert(key, until);
+    }
+
+    pub(crate) fn clear_cooldown_for(&mut self, model: &str) {
+        let key = codexn_fork_model_fallback_identity(model);
+        self.cooldown_by_model.remove(key.as_str());
+    }
+}
+
 impl SessionState {
     /// Create a new session state mirroring previous `State::default()` semantics.
     pub(crate) fn new(session_configuration: SessionConfiguration) -> Self {
         let history = ContextManager::new();
         Self {
             session_configuration,
+            model_fallback_runtime: ModelFallbackRuntimeState::default(),
             history,
             latest_rate_limits: None,
             server_reasoning_included: false,
