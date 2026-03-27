@@ -1902,7 +1902,9 @@ fn next_nero_auto_hotkey_app_event(
     loop {
         match rx.try_recv() {
             Ok(event @ AppEvent::ApplyNeroAutoHotkey { .. }) => return event,
-            Ok(other) => panic!("unexpected app event while waiting for ApplyNeroAutoHotkey: {other:?}"),
+            Ok(other) => {
+                panic!("unexpected app event while waiting for ApplyNeroAutoHotkey: {other:?}")
+            }
             Err(TryRecvError::Empty) => {
                 panic!("expected ApplyNeroAutoHotkey app event but queue was empty")
             }

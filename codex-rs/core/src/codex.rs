@@ -4782,6 +4782,8 @@ mod handlers {
     use crate::codex::Session;
     use crate::codex::SessionSettingsUpdate;
     use crate::codex::SteerInputError;
+    use crate::codex::TurnContext;
+    use crate::protocol::SessionSource;
 
     use crate::codex::spawn_review_thread;
     use crate::config::Config;
@@ -4827,11 +4829,327 @@ mod handlers {
     use codex_protocol::user_input::UserInput;
     use codex_rmcp_client::ElicitationAction;
     use codex_rmcp_client::ElicitationResponse;
+    use serde::Deserialize;
+    use serde::Serialize;
     use serde_json::Value;
+    use std::process::Stdio;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+    use tokio::process::Command;
     use tracing::info;
     use tracing::warn;
+
+    const NERO_RUNTIME_STATE_CONTROL_CWD_ENV: &str = "NERO_RUNTIME_STATE_CONTROL_CWD";
+    const NERO_RUNTIME_STATE_CONTROL_CWD_ENV_COMPAT: &str = "NEROBAR_NERO_RUNTIME_STATE_CONTROL_CWD";
+    const NERO_RUNTIME_STATE_CONTROL_MODULE_ENV: &str = "NERO_RUNTIME_STATE_CONTROL_MODULE";
+    const NERO_RUNTIME_STATE_CONTROL_MODULE_ENV_COMPAT: &str = "NEROBAR_NERO_RUNTIME_STATE_CONTROL_MODULE";
+    const NERO_RUNTIME_STATE_CONTROL_TIMEOUT_ENV: &str = "NERO_RUNTIME_CONTROL_TIMEOUT_MS";
+    const NERO_RUNTIME_STATE_CONTROL_TIMEOUT_ENV_COMPAT: &str = "NEROBAR_NERO_RUNTIME_CONTROL_TIMEOUT_MS";
+    const NERO_RUNTIME_STATE_CONTROL_PYTHON_ENV: &str = "NERO_RUNTIME_PYTHON_BIN";
+    const NERO_RUNTIME_STATE_CONTROL_PYTHON_ENV_COMPAT: &str = "NEROBAR_NERO_RUNTIME_PYTHON_BIN";
+    const NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE: &str = "nero_hook_runtime.state_runtime_control";
+    const NERO_RUNTIME_STATE_CONTROL_DEFAULT_TIMEOUT_MS: u64 = 2_500;
+    const NERO_AUTO_TURN_BOOST_TAG_PREFIX: &str = "[nero-hook-auto-boost";
+
+    #[derive(Debug, Clone)]
+    struct NeroAutoRuntimeBridgeSettings {
+        cwd: PathBuf,
+        module: String,
+        python_bin: String,
+        timeout: Duration,
+    }
+
+    #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct NeroAutoBridgeReadRequest {
+        thread_id: String,
+        session_source: String,
+        config_path: String,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct NeroAutoBridgeEffective {
+        enabled: bool,
+        source: String,
+        #[serde(default)]
+        auto_rounds: usize,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct NeroAutoBridgeReadResponse {
+        ok: bool,
+        error: Option<String>,
+        message: Option<String>,
+        is_subagent: bool,
+        effective: NeroAutoBridgeEffective,
+    }
+
+    fn first_non_empty_env(names: &[&str]) -> Option<String> {
+        names.iter().find_map(|name| {
+            std::env::var(name).ok().and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            })
+        })
+    }
+
+    fn resolve_nero_auto_runtime_bridge_settings() -> NeroAutoRuntimeBridgeSettings {
+        let cwd = first_non_empty_env(&[
+            NERO_RUNTIME_STATE_CONTROL_CWD_ENV,
+            NERO_RUNTIME_STATE_CONTROL_CWD_ENV_COMPAT,
+        ])
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/workspace/purrnet/apps/codex-nero-sdk"));
+        let module = first_non_empty_env(&[
+            NERO_RUNTIME_STATE_CONTROL_MODULE_ENV,
+            NERO_RUNTIME_STATE_CONTROL_MODULE_ENV_COMPAT,
+        ])
+        .unwrap_or_else(|| NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE.to_string());
+        let python_bin = first_non_empty_env(&[
+            NERO_RUNTIME_STATE_CONTROL_PYTHON_ENV,
+            NERO_RUNTIME_STATE_CONTROL_PYTHON_ENV_COMPAT,
+        ])
+        .unwrap_or_else(|| "python3".to_string());
+        let timeout_ms = first_non_empty_env(&[
+            NERO_RUNTIME_STATE_CONTROL_TIMEOUT_ENV,
+            NERO_RUNTIME_STATE_CONTROL_TIMEOUT_ENV_COMPAT,
+        ])
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(NERO_RUNTIME_STATE_CONTROL_DEFAULT_TIMEOUT_MS);
+        NeroAutoRuntimeBridgeSettings {
+            cwd,
+            module,
+            python_bin,
+            timeout: Duration::from_millis(timeout_ms),
+        }
+    }
+
+    async fn run_nero_auto_runtime_bridge(
+        command_name: &str,
+        payload: &impl Serialize,
+    ) -> Result<NeroAutoBridgeReadResponse, String> {
+        let settings = resolve_nero_auto_runtime_bridge_settings();
+        let bridge_input =
+            serde_json::to_vec(payload).map_err(|err| format!("serialize bridge payload: {err}"))?;
+        let mut command = Command::new(&settings.python_bin);
+        command
+            .current_dir(&settings.cwd)
+            .arg("-m")
+            .arg(&settings.module)
+            .arg(command_name)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|err| format!("spawn nero-auto runtime bridge: {err}"))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "runtime bridge stdin unavailable".to_string())?;
+        stdin
+            .write_all(&bridge_input)
+            .await
+            .map_err(|err| format!("write runtime bridge stdin: {err}"))?;
+        drop(stdin);
+
+        let output = tokio::time::timeout(settings.timeout, child.wait_with_output())
+            .await
+            .map_err(|_| {
+                format!(
+                    "runtime bridge timed out after {}ms",
+                    settings.timeout.as_millis()
+                )
+            })?
+            .map_err(|err| format!("wait runtime bridge output: {err}"))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stdout.is_empty() {
+            let detail = if stderr.is_empty() {
+                format!("exit status {}", output.status)
+            } else {
+                stderr
+            };
+            return Err(format!("runtime bridge returned empty stdout: {detail}"));
+        }
+        serde_json::from_str::<NeroAutoBridgeReadResponse>(&stdout).map_err(|err| {
+            if stderr.is_empty() {
+                format!("parse runtime bridge payload failed: {err}; stdout={stdout}")
+            } else {
+                format!("parse runtime bridge payload failed: {err}; stderr={stderr}; stdout={stdout}")
+            }
+        })
+    }
+
+    fn developer_instructions_have_auto_path(value: Option<&str>) -> bool {
+        let text = value.unwrap_or_default();
+        text.contains("NERO_AUTO_V1")
+            || text.contains("nero_auto_v1")
+            || text.contains("NERO-HOOK-AUTO")
+            || text.contains("scoring_system")
+    }
+
+    fn build_nero_auto_turn_booster(turn_id: &str, source: &str) -> String {
+        format!(
+            "{tag} stage=activation_boost turn_id={turn_id} source={source}]\n\
+NERO-HOOK-AUTO bootstrap: auto runtime is enabled for this turn.\n\
+In your final assistant response include the auto protocol JSON block required by runtime hooks.",
+            tag = NERO_AUTO_TURN_BOOST_TAG_PREFIX
+        )
+    }
+
+    fn should_inject_nero_auto_turn_booster(response: &NeroAutoBridgeReadResponse) -> bool {
+        if !response.ok {
+            return false;
+        }
+        if response.is_subagent || response.effective.source == "subagent-forced-off" {
+            return false;
+        }
+        if !response.effective.enabled {
+            return false;
+        }
+        let source = response.effective.source.trim();
+        if source.is_empty() || source == "unknown" {
+            return false;
+        }
+        if source != "session-override" {
+            return false;
+        }
+        response.effective.auto_rounds == 0
+    }
+
+    async fn maybe_prepare_nero_auto_turn_booster(
+        sess: &Arc<Session>,
+        turn_context: &Arc<TurnContext>,
+        submission_id: &str,
+    ) -> Option<String> {
+        if submission_id.starts_with(super::HOOK_AUTO_REPLY_SUBMISSION_PREFIX) {
+            return None;
+        }
+        if matches!(turn_context.session_source, SessionSource::SubAgent(_)) {
+            return None;
+        }
+        if developer_instructions_have_auto_path(turn_context.developer_instructions.as_deref()) {
+            return None;
+        }
+
+        let request = NeroAutoBridgeReadRequest {
+            thread_id: sess.conversation_id.to_string(),
+            session_source: turn_context.session_source.to_string(),
+            config_path: sess
+                .codex_home()
+                .await
+                .join(codex_config::CONFIG_TOML_FILE)
+                .to_string_lossy()
+                .to_string(),
+        };
+        let response = match run_nero_auto_runtime_bridge("read-session-auto", &request).await {
+            Ok(response) => response,
+            Err(err) => {
+                warn!("failed to read runtime bridge state for auto-turn booster: {err}");
+                return None;
+            }
+        };
+        if !response.ok {
+            let detail = response
+                .message
+                .clone()
+                .or(response.error.clone())
+                .unwrap_or_else(|| "runtime bridge read failed".to_string());
+            warn!("runtime bridge read reported failure for auto-turn booster: {detail}");
+            return None;
+        }
+        if !should_inject_nero_auto_turn_booster(&response) {
+            return None;
+        }
+        let source = response.effective.source.trim();
+        Some(build_nero_auto_turn_booster(&turn_context.sub_id, source))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn sample_bridge_response(
+            enabled: bool,
+            source: &str,
+            is_subagent: bool,
+            auto_rounds: usize,
+        ) -> NeroAutoBridgeReadResponse {
+            NeroAutoBridgeReadResponse {
+                ok: true,
+                error: None,
+                message: None,
+                is_subagent,
+                effective: NeroAutoBridgeEffective {
+                    enabled,
+                    source: source.to_string(),
+                    auto_rounds,
+                },
+            }
+        }
+
+        #[test]
+        fn developer_instructions_auto_marker_detection_is_stable() {
+            assert!(developer_instructions_have_auto_path(Some("... NERO_AUTO_V1 ...")));
+            assert!(developer_instructions_have_auto_path(Some("... scoring_system ...")));
+            assert!(!developer_instructions_have_auto_path(Some("plain instructions")));
+            assert!(!developer_instructions_have_auto_path(None));
+        }
+
+        #[test]
+        fn turn_booster_tag_contains_machine_parseable_marker() {
+            let text = build_nero_auto_turn_booster("turn-123", "session-override");
+            assert!(text.contains("[nero-hook-auto-boost"));
+            assert!(text.contains("stage=activation_boost"));
+            assert!(text.contains("turn_id=turn-123"));
+            assert!(text.contains("source=session-override"));
+        }
+
+        #[test]
+        fn bridge_response_shapes_for_booster_preconditions_are_explicit() {
+            let enabled = sample_bridge_response(
+                true,
+                "session-override",
+                false,
+                0,
+            );
+            assert!(enabled.effective.enabled);
+            assert_eq!(enabled.effective.source, "session-override");
+            assert_eq!(enabled.effective.auto_rounds, 0);
+            assert!(!enabled.is_subagent);
+
+            let subagent = sample_bridge_response(
+                true,
+                "subagent-forced-off",
+                true,
+                0,
+            );
+            assert!(subagent.is_subagent);
+            assert_eq!(subagent.effective.source, "subagent-forced-off");
+        }
+
+        #[test]
+        fn booster_injection_requires_session_override_boundary() {
+            let boundary = sample_bridge_response(true, "session-override", false, 0);
+            assert!(should_inject_nero_auto_turn_booster(&boundary));
+
+            let later_round = sample_bridge_response(true, "session-override", false, 2);
+            assert!(!should_inject_nero_auto_turn_booster(&later_round));
+
+            let default_source = sample_bridge_response(true, "config-default", false, 0);
+            assert!(!should_inject_nero_auto_turn_booster(&default_source));
+        }
+    }
 
     pub async fn interrupt(sess: &Arc<Session>) {
         sess.interrupt_task().await;
@@ -4913,6 +5231,7 @@ mod handlers {
             _ => unreachable!(),
         };
 
+        let submission_id = sub_id.clone();
         let Ok(current_context) = sess.new_turn_with_sub_id(sub_id, updates).await else {
             // new_turn_with_sub_id already emits the error event.
             return;
@@ -4923,6 +5242,17 @@ mod handlers {
 
         // Attempt to inject input into current task.
         if let Err(SteerInputError::NoActiveTurn(items)) = sess.steer_input(items, None).await {
+            if let Some(booster) =
+                maybe_prepare_nero_auto_turn_booster(sess, &current_context, &submission_id).await
+            {
+                let response_item: crate::codex::ResponseItem =
+                    crate::codex::DeveloperInstructions::new(booster).into();
+                sess.record_conversation_items(
+                    &current_context,
+                    std::slice::from_ref(&response_item),
+                )
+                .await;
+            }
             sess.refresh_mcp_servers_if_requested(&current_context)
                 .await;
             let regular_task = sess.take_startup_regular_task().await.unwrap_or_default();

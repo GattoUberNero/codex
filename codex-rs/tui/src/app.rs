@@ -54,6 +54,7 @@ use codex_core::config::edit::ConfigEditsBuilder;
 use codex_core::config::types::ModelAvailabilityNuxConfig;
 use codex_core::config_loader::ConfigLayerStackOrdering;
 use codex_core::features::Feature;
+use codex_core::find_thread_name_by_id;
 use codex_core::models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use codex_core::models_manager::manager::RefreshStrategy;
 use codex_core::models_manager::model_presets::HIDE_GPT_5_1_CODEX_MAX_MIGRATION_PROMPT_CONFIG;
@@ -160,6 +161,9 @@ struct NeroAutoBridgeApplyRequest {
     config_path: String,
     expected_version: String,
     thread_id: String,
+    session_source: String,
+    thread_name: Option<String>,
+    cwd: Option<String>,
     has_enabled: bool,
     enabled: bool,
     has_autonomy_level: bool,
@@ -393,7 +397,8 @@ async fn read_nero_auto_runtime_bridge_state(
         }
         if let Some(returned_session_source) = response.session_source.as_ref() {
             let returned_session_source = returned_session_source.trim();
-            if !returned_session_source.is_empty() && returned_session_source != expected_session_source
+            if !returned_session_source.is_empty()
+                && returned_session_source != expected_session_source
             {
                 return Err(eyre!(
                     "runtime bridge session-source mismatch: expected={expected_session_source}, got={returned_session_source}"
@@ -414,12 +419,18 @@ async fn read_nero_auto_runtime_bridge_state(
 async fn apply_nero_auto_runtime_bridge_state(
     current: &NeroAutoBridgeReadResponse,
     next: codex_protocol::protocol::NeroAutoRuntimeConfig,
+    session_source: &SessionSource,
+    thread_name: Option<String>,
+    cwd: &Path,
 ) -> Result<NeroAutoBridgeApplyResponse> {
     let request = NeroAutoBridgeApplyRequest {
         path: current.path.clone(),
         config_path: current.config_path.clone(),
         expected_version: current.version.clone(),
         thread_id: current.thread_id.clone(),
+        session_source: session_source.to_string(),
+        thread_name,
+        cwd: Some(cwd.to_string_lossy().to_string()),
         has_enabled: true,
         enabled: next.enabled,
         has_autonomy_level: true,
@@ -1886,8 +1897,22 @@ impl App {
         }
 
         let requested_next = next_nero_auto_runtime_config(confirmed_previous, action);
-        let apply_result = match apply_nero_auto_runtime_bridge_state(&current, requested_next)
-            .await
+        let thread_name = match self.chat_widget.thread_name() {
+            Some(name) if !name.trim().is_empty() => Some(name),
+            _ => find_thread_name_by_id(&self.config.codex_home, &thread_id)
+                .await
+                .ok()
+                .flatten()
+                .filter(|name| !name.trim().is_empty()),
+        };
+        let apply_result = match apply_nero_auto_runtime_bridge_state(
+            &current,
+            requested_next,
+            &session_source,
+            thread_name,
+            &snapshot.cwd,
+        )
+        .await
         {
             Ok(apply_result) => apply_result,
             Err(err) => {
@@ -6046,7 +6071,10 @@ mod tests {
         std::fs::write(
             &config_path,
             format!(
-                "[nero.hook.runtime.auto]\n\
+                "[nero.hook.runtime.delivery]\n\
+require_runtime_msg_for_auto = false\n\
+\n\
+[nero.hook.runtime.auto]\n\
 enabled = false\n\
 \n\
 [nero.hook.runtime.auto.policy]\n\
@@ -6159,8 +6187,7 @@ path = {:?}\n",
 
         valid["defaults"] = serde_json::json!({ "enabled": true });
         valid["effective"]["source"] = serde_json::Value::Null;
-        let parsed_wrong_effective =
-            serde_json::from_value::<NeroAutoBridgeReadResponse>(valid);
+        let parsed_wrong_effective = serde_json::from_value::<NeroAutoBridgeReadResponse>(valid);
         assert!(parsed_wrong_effective.is_err());
     }
 
@@ -6181,10 +6208,9 @@ path = {:?}\n",
             "path": "/tmp/nero-hook-auto-state.json",
             "applied": { "enabled": true }
         });
-        let parsed_missing_version = serde_json::from_value::<NeroAutoBridgeApplyResponse>(
-            missing_version,
-        )
-        .expect("parse missing version");
+        let parsed_missing_version =
+            serde_json::from_value::<NeroAutoBridgeApplyResponse>(missing_version)
+                .expect("parse missing version");
         assert!(validate_nero_auto_runtime_bridge_apply_response(&parsed_missing_version).is_err());
 
         let empty_path = serde_json::json!({
@@ -6193,9 +6219,8 @@ path = {:?}\n",
             "version": "v2",
             "applied": { "enabled": true }
         });
-        let parsed_empty_path =
-            serde_json::from_value::<NeroAutoBridgeApplyResponse>(empty_path)
-                .expect("parse empty path");
+        let parsed_empty_path = serde_json::from_value::<NeroAutoBridgeApplyResponse>(empty_path)
+            .expect("parse empty path");
         assert!(validate_nero_auto_runtime_bridge_apply_response(&parsed_empty_path).is_err());
 
         let missing_applied = serde_json::json!({
@@ -6225,11 +6250,59 @@ path = {:?}\n",
             "version": "v2",
             "applied": "invalid"
         });
-        let parsed_non_object_applied = serde_json::from_value::<NeroAutoBridgeApplyResponse>(
-            non_object_applied,
-        )
-        .expect("parse non-object applied");
-        assert!(validate_nero_auto_runtime_bridge_apply_response(&parsed_non_object_applied).is_err());
+        let parsed_non_object_applied =
+            serde_json::from_value::<NeroAutoBridgeApplyResponse>(non_object_applied)
+                .expect("parse non-object applied");
+        assert!(
+            validate_nero_auto_runtime_bridge_apply_response(&parsed_non_object_applied).is_err()
+        );
+    }
+
+    #[test]
+    fn nero_auto_bridge_apply_request_serializes_session_context_fields() {
+        let request = NeroAutoBridgeApplyRequest {
+            path: "/tmp/nero-hook-auto-state.json".to_string(),
+            config_path: "/tmp/config-nero-hook-auto.toml".to_string(),
+            expected_version: "sha256:test".to_string(),
+            thread_id: "thread-123".to_string(),
+            session_source: "cli".to_string(),
+            thread_name: Some("www-02-B-".to_string()),
+            cwd: Some("/workspace/www/www-3d-law-01".to_string()),
+            has_enabled: true,
+            enabled: true,
+            has_autonomy_level: true,
+            autonomy_level: 6,
+            has_autonomy_step: false,
+            autonomy_step_per_round: None,
+            has_max_rounds: true,
+            max_auto_rounds: 9,
+            has_done_stop_scope: false,
+            done_stop_scope: None,
+            has_auto_rounds: false,
+            auto_rounds: None,
+            has_reset_counter: false,
+            reset_counter: false,
+        };
+
+        let value = serde_json::to_value(&request).expect("serialize apply request");
+        assert_eq!(
+            value.get("sessionSource"),
+            Some(&serde_json::Value::String("cli".to_string()))
+        );
+        assert_eq!(
+            value.get("threadName"),
+            Some(&serde_json::Value::String("www-02-B-".to_string()))
+        );
+        assert_eq!(
+            value.get("cwd"),
+            Some(&serde_json::Value::String(
+                "/workspace/www/www-3d-law-01".to_string()
+            ))
+        );
+        assert_eq!(
+            value.get("threadId"),
+            Some(&serde_json::Value::String("thread-123".to_string()))
+        );
     }
 
     #[tokio::test]
@@ -6346,14 +6419,20 @@ path = {:?}\n",
         let messages = drain_history_messages(&mut rx).join("\n");
         assert!(messages.is_empty(), "{messages:?}");
 
-        let active_state =
-            read_nero_auto_runtime_bridge_state(&app.config.codex_home, active_thread.thread_id, &SessionSource::Cli)
-                .await
-                .expect("read active thread runtime bridge state");
-        let stale_state =
-            read_nero_auto_runtime_bridge_state(&app.config.codex_home, stale_thread.thread_id, &SessionSource::Cli)
-                .await
-                .expect("read stale thread runtime bridge state");
+        let active_state = read_nero_auto_runtime_bridge_state(
+            &app.config.codex_home,
+            active_thread.thread_id,
+            &SessionSource::Cli,
+        )
+        .await
+        .expect("read active thread runtime bridge state");
+        let stale_state = read_nero_auto_runtime_bridge_state(
+            &app.config.codex_home,
+            stale_thread.thread_id,
+            &SessionSource::Cli,
+        )
+        .await
+        .expect("read stale thread runtime bridge state");
         assert!(!active_state.effective.enabled);
         assert!(!stale_state.effective.enabled);
     }

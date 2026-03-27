@@ -1,0 +1,23 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../codex-nero-sdk"
+		},
+		{
+			"path": "../nerobar-ui"
+		},
+		{
+			"path": "../nerobar"
+		},
+		{
+			"path": "../../../../home/dev/.codex"
+		},
+		{
+			"path": "../../../../home/dev"
+		}
+	],
+	"settings": {}
+}
