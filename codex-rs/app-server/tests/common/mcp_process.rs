@@ -52,6 +52,10 @@ use codex_app_server_protocol::ThreadRealtimeStartParams;
 use codex_app_server_protocol::ThreadRealtimeStopParams;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadRollbackParams;
+use codex_app_server_protocol::ThreadRolloutAnalyzeParams;
+use codex_app_server_protocol::ThreadRolloutBackupDeleteParams;
+use codex_app_server_protocol::ThreadRolloutBackupRestoreParams;
+use codex_app_server_protocol::ThreadRolloutTrimParams;
 use codex_app_server_protocol::ThreadSetNameParams;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadUnarchiveParams;
@@ -404,6 +408,44 @@ impl McpProcess {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("thread/read", params).await
+    }
+
+    /// Send a `thread/rollout/analyze` JSON-RPC request.
+    pub async fn send_thread_rollout_analyze_request(
+        &mut self,
+        params: ThreadRolloutAnalyzeParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("thread/rollout/analyze", params).await
+    }
+
+    /// Send a `thread/rollout/trim` JSON-RPC request.
+    pub async fn send_thread_rollout_trim_request(
+        &mut self,
+        params: ThreadRolloutTrimParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("thread/rollout/trim", params).await
+    }
+
+    /// Send a `thread/rollout/backup/restore` JSON-RPC request.
+    pub async fn send_thread_rollout_backup_restore_request(
+        &mut self,
+        params: ThreadRolloutBackupRestoreParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("thread/rollout/backup/restore", params)
+            .await
+    }
+
+    /// Send a `thread/rollout/backup/delete` JSON-RPC request.
+    pub async fn send_thread_rollout_backup_delete_request(
+        &mut self,
+        params: ThreadRolloutBackupDeleteParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("thread/rollout/backup/delete", params)
+            .await
     }
 
     /// Send a `model/list` JSON-RPC request.

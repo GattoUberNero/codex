@@ -244,6 +244,22 @@ client_request_definitions! {
         params: v2::ThreadReadParams,
         response: v2::ThreadReadResponse,
     },
+    ThreadRolloutAnalyze => "thread/rollout/analyze" {
+        params: v2::ThreadRolloutAnalyzeParams,
+        response: v2::ThreadRolloutAnalyzeResponse,
+    },
+    ThreadRolloutTrim => "thread/rollout/trim" {
+        params: v2::ThreadRolloutTrimParams,
+        response: v2::ThreadRolloutTrimResponse,
+    },
+    ThreadRolloutBackupRestore => "thread/rollout/backup/restore" {
+        params: v2::ThreadRolloutBackupRestoreParams,
+        response: v2::ThreadRolloutBackupRestoreResponse,
+    },
+    ThreadRolloutBackupDelete => "thread/rollout/backup/delete" {
+        params: v2::ThreadRolloutBackupDeleteParams,
+        response: v2::ThreadRolloutBackupDeleteResponse,
+    },
     SkillsList => "skills/list" {
         params: v2::SkillsListParams,
         response: v2::SkillsListResponse,

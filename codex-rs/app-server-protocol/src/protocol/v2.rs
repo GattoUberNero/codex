@@ -2340,6 +2340,139 @@ pub struct ThreadReadResponse {
     pub thread: Thread,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadRolloutAnalyzeParams {
+    pub thread_id: String,
+    pub keep_tail_lines: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadRolloutTrimParams {
+    pub thread_id: String,
+    pub keep_tail_lines: u32,
+    pub analysis_fingerprint: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadRolloutBackupRestoreParams {
+    pub thread_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadRolloutBackupDeleteParams {
+    pub thread_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadRolloutBackupInfo {
+    pub backup_root: PathBuf,
+    pub manifest_path: PathBuf,
+    pub backup_rollout_path: PathBuf,
+    pub original_rollout_path: PathBuf,
+    pub created_at: String,
+    pub original_total_lines: u64,
+    pub original_total_bytes: u64,
+    pub trimmed_total_lines: u64,
+    pub trimmed_total_bytes: u64,
+    pub protected_head_end_line: u64,
+    pub requested_tail_lines: u32,
+    pub actual_tail_start_line: u64,
+    pub analysis_fingerprint: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadRolloutStats {
+    pub total_lines: u64,
+    pub total_bytes: u64,
+    pub parse_errors: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadRolloutTrimPreview {
+    pub protected_head_end_line: u64,
+    pub requested_tail_lines: u32,
+    pub requested_tail_start_line: u64,
+    pub actual_tail_start_line: u64,
+    pub preserved_tail_lines: u64,
+    #[ts(optional = nullable)]
+    pub removed_middle_start_line: Option<u64>,
+    #[ts(optional = nullable)]
+    pub removed_middle_end_line: Option<u64>,
+    pub removed_middle_lines: u64,
+    pub estimated_removed_bytes: u64,
+    #[ts(optional = nullable)]
+    pub compaction_anchor_line: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadRolloutAnalyzeResponse {
+    pub thread_id: String,
+    #[ts(optional = nullable)]
+    pub thread_name: Option<String>,
+    #[ts(optional = nullable)]
+    pub rollout_path: Option<PathBuf>,
+    pub archived: bool,
+    #[ts(optional = nullable)]
+    pub source: Option<SessionSource>,
+    #[ts(optional = nullable)]
+    pub forked_from_id: Option<String>,
+    pub is_subagent: bool,
+    pub loaded: bool,
+    pub eligible: bool,
+    pub blockers: Vec<String>,
+    pub warnings: Vec<String>,
+    #[ts(optional = nullable)]
+    pub stats: Option<ThreadRolloutStats>,
+    #[ts(optional = nullable)]
+    pub trim: Option<ThreadRolloutTrimPreview>,
+    #[ts(optional = nullable)]
+    pub analysis_fingerprint: Option<String>,
+    #[ts(optional = nullable)]
+    pub backup: Option<ThreadRolloutBackupInfo>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadRolloutTrimResponse {
+    pub thread_id: String,
+    pub backup: ThreadRolloutBackupInfo,
+    pub analysis: ThreadRolloutAnalyzeResponse,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadRolloutBackupRestoreResponse {
+    pub thread_id: String,
+    pub backup: ThreadRolloutBackupInfo,
+    pub analysis: ThreadRolloutAnalyzeResponse,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadRolloutBackupDeleteResponse {
+    pub thread_id: String,
+    pub deleted: bool,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]

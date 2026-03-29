@@ -29,6 +29,7 @@ mod thread_metadata_update;
 mod thread_read;
 mod thread_resume;
 mod thread_rollback;
+mod thread_rollout_trim;
 mod thread_start;
 mod thread_status;
 mod thread_unarchive;

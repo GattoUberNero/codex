@@ -12,6 +12,11 @@ use crate::outgoing_message::ConnectionRequestId;
 use crate::outgoing_message::OutgoingMessageSender;
 use crate::outgoing_message::OutgoingNotification;
 use crate::outgoing_message::ThreadScopedOutgoingMessageSender;
+use crate::thread_rollout_trim::RolloutLocation;
+use crate::thread_rollout_trim::analyze_rollout;
+use crate::thread_rollout_trim::delete_rollout_backup;
+use crate::thread_rollout_trim::restore_rollout_backup;
+use crate::thread_rollout_trim::trim_rollout;
 use crate::thread_status::ThreadWatchManager;
 use crate::thread_status::resolve_thread_status;
 use chrono::DateTime;
@@ -129,6 +134,14 @@ use codex_app_server_protocol::ThreadRealtimeStopResponse;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadRollbackParams;
+use codex_app_server_protocol::ThreadRolloutAnalyzeParams;
+use codex_app_server_protocol::ThreadRolloutAnalyzeResponse;
+use codex_app_server_protocol::ThreadRolloutBackupDeleteParams;
+use codex_app_server_protocol::ThreadRolloutBackupDeleteResponse;
+use codex_app_server_protocol::ThreadRolloutBackupRestoreParams;
+use codex_app_server_protocol::ThreadRolloutBackupRestoreResponse;
+use codex_app_server_protocol::ThreadRolloutTrimParams;
+use codex_app_server_protocol::ThreadRolloutTrimResponse;
 use codex_app_server_protocol::ThreadSetNameParams;
 use codex_app_server_protocol::ThreadSetNameResponse;
 use codex_app_server_protocol::ThreadSortKey;
@@ -640,6 +653,22 @@ impl CodexMessageProcessor {
             }
             ClientRequest::ThreadRead { request_id, params } => {
                 self.thread_read(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::ThreadRolloutAnalyze { request_id, params } => {
+                self.thread_rollout_analyze(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::ThreadRolloutTrim { request_id, params } => {
+                self.thread_rollout_trim(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::ThreadRolloutBackupRestore { request_id, params } => {
+                self.thread_rollout_backup_restore(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::ThreadRolloutBackupDelete { request_id, params } => {
+                self.thread_rollout_backup_delete(to_connection_request_id(request_id), params)
                     .await;
             }
             ClientRequest::SkillsList { request_id, params } => {
@@ -2823,6 +2852,238 @@ impl CodexMessageProcessor {
         );
         let response = ThreadReadResponse { thread };
         self.outgoing.send_response(request_id, response).await;
+    }
+
+    async fn thread_rollout_analyze(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadRolloutAnalyzeParams,
+    ) {
+        let ThreadRolloutAnalyzeParams {
+            thread_id,
+            keep_tail_lines,
+        } = params;
+        if keep_tail_lines == 0 {
+            self.send_invalid_request_error(request_id, "keepTailLines must be >= 1".to_string())
+                .await;
+            return;
+        }
+        let thread_uuid = match ThreadId::from_string(&thread_id) {
+            Ok(id) => id,
+            Err(err) => {
+                self.send_invalid_request_error(request_id, format!("invalid thread id: {err}"))
+                    .await;
+                return;
+            }
+        };
+        let loaded = self.thread_manager.get_thread(thread_uuid).await.is_ok();
+        let thread_name = match find_thread_name_by_id(&self.config.codex_home, &thread_uuid).await
+        {
+            Ok(name) => name,
+            Err(err) => {
+                warn!(
+                    "Failed to read thread name for rollout analysis {}: {err}",
+                    thread_uuid
+                );
+                None
+            }
+        };
+        let location =
+            match locate_thread_rollout_path(&self.config.codex_home, &thread_uuid.to_string())
+                .await
+            {
+                Ok(location) => location,
+                Err(err) => {
+                    self.send_internal_error(
+                        request_id,
+                        format!("failed to locate rollout for thread {thread_uuid}: {err}"),
+                    )
+                    .await;
+                    return;
+                }
+            };
+        match analyze_rollout(
+            &self.config.codex_home,
+            &thread_uuid.to_string(),
+            thread_name,
+            location,
+            keep_tail_lines,
+            loaded,
+        ) {
+            Ok(response) => {
+                self.outgoing
+                    .send_response::<ThreadRolloutAnalyzeResponse>(request_id, response)
+                    .await;
+            }
+            Err(err) => {
+                self.send_internal_error(request_id, format!("failed to analyze rollout: {err}"))
+                    .await;
+            }
+        }
+    }
+
+    async fn thread_rollout_trim(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadRolloutTrimParams,
+    ) {
+        let ThreadRolloutTrimParams {
+            thread_id,
+            keep_tail_lines,
+            analysis_fingerprint,
+        } = params;
+        if keep_tail_lines == 0 {
+            self.send_invalid_request_error(request_id, "keepTailLines must be >= 1".to_string())
+                .await;
+            return;
+        }
+        let thread_uuid = match ThreadId::from_string(&thread_id) {
+            Ok(id) => id,
+            Err(err) => {
+                self.send_invalid_request_error(request_id, format!("invalid thread id: {err}"))
+                    .await;
+                return;
+            }
+        };
+        let loaded = self.thread_manager.get_thread(thread_uuid).await.is_ok();
+        let Some(location) =
+            (match locate_thread_rollout_path(&self.config.codex_home, &thread_uuid.to_string())
+                .await
+            {
+                Ok(location) => location,
+                Err(err) => {
+                    self.send_internal_error(
+                        request_id,
+                        format!("failed to locate rollout for thread {thread_uuid}: {err}"),
+                    )
+                    .await;
+                    return;
+                }
+            })
+        else {
+            self.send_invalid_request_error(
+                request_id,
+                format!("no persisted rollout found for thread {thread_uuid}"),
+            )
+            .await;
+            return;
+        };
+        let thread_name = match find_thread_name_by_id(&self.config.codex_home, &thread_uuid).await
+        {
+            Ok(name) => name,
+            Err(err) => {
+                warn!(
+                    "Failed to read thread name for rollout trim {}: {err}",
+                    thread_uuid
+                );
+                None
+            }
+        };
+        match trim_rollout(
+            &self.config.codex_home,
+            &thread_uuid.to_string(),
+            thread_name,
+            location,
+            keep_tail_lines,
+            &analysis_fingerprint,
+            loaded,
+        ) {
+            Ok(response) => {
+                self.outgoing
+                    .send_response::<ThreadRolloutTrimResponse>(request_id, response)
+                    .await;
+            }
+            Err(err) => {
+                self.send_invalid_request_error(request_id, err.to_string())
+                    .await;
+            }
+        }
+    }
+
+    async fn thread_rollout_backup_restore(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadRolloutBackupRestoreParams,
+    ) {
+        let ThreadRolloutBackupRestoreParams { thread_id } = params;
+        let thread_uuid = match ThreadId::from_string(&thread_id) {
+            Ok(id) => id,
+            Err(err) => {
+                self.send_invalid_request_error(request_id, format!("invalid thread id: {err}"))
+                    .await;
+                return;
+            }
+        };
+        let loaded = self.thread_manager.get_thread(thread_uuid).await.is_ok();
+        let thread_name = match find_thread_name_by_id(&self.config.codex_home, &thread_uuid).await
+        {
+            Ok(name) => name,
+            Err(err) => {
+                warn!(
+                    "Failed to read thread name for rollout backup restore {}: {err}",
+                    thread_uuid
+                );
+                None
+            }
+        };
+        let location =
+            match locate_thread_rollout_path(&self.config.codex_home, &thread_uuid.to_string())
+                .await
+            {
+                Ok(location) => location,
+                Err(err) => {
+                    self.send_internal_error(
+                        request_id,
+                        format!("failed to locate rollout path for thread {thread_id}: {err}"),
+                    )
+                    .await;
+                    return;
+                }
+            };
+        match restore_rollout_backup(
+            &self.config.codex_home,
+            &thread_uuid.to_string(),
+            thread_name,
+            location,
+            loaded,
+        ) {
+            Ok(response) => {
+                self.outgoing
+                    .send_response::<ThreadRolloutBackupRestoreResponse>(request_id, response)
+                    .await;
+            }
+            Err(err) => {
+                self.send_invalid_request_error(request_id, err.to_string())
+                    .await;
+            }
+        }
+    }
+
+    async fn thread_rollout_backup_delete(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadRolloutBackupDeleteParams,
+    ) {
+        let ThreadRolloutBackupDeleteParams { thread_id } = params;
+        let thread_uuid = match ThreadId::from_string(&thread_id) {
+            Ok(id) => id,
+            Err(err) => {
+                self.send_invalid_request_error(request_id, format!("invalid thread id: {err}"))
+                    .await;
+                return;
+            }
+        };
+        match delete_rollout_backup(&self.config.codex_home, &thread_uuid.to_string()) {
+            Ok(response) => {
+                self.outgoing
+                    .send_response::<ThreadRolloutBackupDeleteResponse>(request_id, response)
+                    .await;
+            }
+            Err(err) => {
+                self.send_invalid_request_error(request_id, err.to_string())
+                    .await;
+            }
+        }
     }
 
     pub(crate) fn thread_created_receiver(&self) -> broadcast::Receiver<ThreadId> {
@@ -7016,6 +7277,25 @@ pub(crate) async fn read_rollout_items_from_rollout(
     Ok(items)
 }
 
+async fn locate_thread_rollout_path(
+    codex_home: &Path,
+    thread_id: &str,
+) -> std::io::Result<Option<RolloutLocation>> {
+    if let Some(path) = find_thread_path_by_id_str(codex_home, thread_id).await? {
+        return Ok(Some(RolloutLocation {
+            path,
+            archived: false,
+        }));
+    }
+    if let Some(path) = find_archived_thread_path_by_id_str(codex_home, thread_id).await? {
+        return Ok(Some(RolloutLocation {
+            path,
+            archived: true,
+        }));
+    }
+    Ok(None)
+}
+
 fn extract_conversation_summary(
     path: PathBuf,
     head: &[serde_json::Value],
@@ -7297,6 +7577,7 @@ mod tests {
             reasoning_effort: None,
             personality: None,
             session_source: SessionSource::Cli,
+            nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
         };
 
         assert_eq!(

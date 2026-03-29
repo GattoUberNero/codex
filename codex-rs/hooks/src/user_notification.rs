@@ -37,7 +37,8 @@ fn legacy_notify_stdin_write_timeout(payload_bytes: usize) -> Duration {
     // Writing large payloads to stdin can block when the child consumes input
     // slower than pipe buffering; scale timeout with payload size.
     const PIPE_CHUNK_BYTES: usize = 64 * 1024;
-    let chunks = payload_bytes.saturating_add(PIPE_CHUNK_BYTES.saturating_sub(1)) / PIPE_CHUNK_BYTES;
+    let chunks =
+        payload_bytes.saturating_add(PIPE_CHUNK_BYTES.saturating_sub(1)) / PIPE_CHUNK_BYTES;
     let extra_ms = chunks
         .saturating_sub(1)
         .saturating_mul(LEGACY_NOTIFY_STDIN_WRITE_PER_64KB_TIMEOUT_MS as usize);
@@ -260,8 +261,7 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                 if let Some(mut stdin) = child.stdin.take() {
                     if let Some(notify_payload) = notify_payload {
                         let payload_bytes = notify_payload.len();
-                        let stdin_write_timeout =
-                            legacy_notify_stdin_write_timeout(payload_bytes);
+                        let stdin_write_timeout = legacy_notify_stdin_write_timeout(payload_bytes);
                         let stdin_payload_authoritative = using_stdin_only_payload;
                         match tokio::time::timeout(
                             stdin_write_timeout,
@@ -871,10 +871,7 @@ mod tests {
                 let io_err = io_err.expect("downcast io::Error");
                 assert_eq!(io_err.kind(), std::io::ErrorKind::BrokenPipe);
                 let detail = io_err.to_string();
-                assert!(
-                    detail.contains("stdin-only fallback"),
-                    "{detail}"
-                );
+                assert!(detail.contains("stdin-only fallback"), "{detail}");
             }
             other => panic!("expected FailedContinue, got {other:?}"),
         }
