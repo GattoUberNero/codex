@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::protocol::Product;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SkillScope;
 use serde::Deserialize;
@@ -71,11 +72,19 @@ impl SkillMetadata {
             },
         }
     }
+
+    pub fn matches_product_restriction(&self, session_source: &SessionSource) -> bool {
+        match &self.policy {
+            Some(policy) => session_source.matches_product_restriction(&policy.products),
+            None => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SkillPolicy {
     pub allow_implicit_invocation: Option<bool>,
+    pub products: Vec<Product>,
     pub agent_filter_mode: Option<SkillAgentFilterMode>,
     pub allow_agent_whitelist: Option<bool>,
     pub allowed_agent_types: Option<Vec<String>>,
@@ -197,7 +206,8 @@ impl SkillLoadOutcome {
 
     pub fn filter_for_session_source(&self, session_source: &SessionSource) -> SkillLoadOutcome {
         let agent_identity = effective_skill_agent_identity(session_source);
-        self.filter_for_agent_identity(agent_identity.as_str())
+        filter_skill_load_outcome_for_session_source(self.clone(), session_source)
+            .filter_for_agent_identity(agent_identity.as_str())
     }
 
     pub fn filter_for_agent_identity(&self, agent_identity: &str) -> SkillLoadOutcome {
@@ -304,12 +314,14 @@ mod tests {
             dependencies: None,
             policy: Some(SkillPolicy {
                 allow_implicit_invocation: Some(true),
+                products: vec![],
                 agent_filter_mode,
                 allow_agent_whitelist,
                 allowed_agent_types: allowed_agent_types
                     .map(|types| types.into_iter().map(str::to_ascii_lowercase).collect()),
             }),
             permission_profile: None,
+            managed_network_override: None,
             path_to_skills_md: PathBuf::from(path),
             scope: SkillScope::User,
         }
@@ -450,6 +462,7 @@ mod tests {
             dependencies: None,
             policy: None,
             permission_profile: None,
+            managed_network_override: None,
             path_to_skills_md: PathBuf::from("/tmp/no-policy/SKILL.md"),
             scope: SkillScope::User,
         };
@@ -509,6 +522,7 @@ mod tests {
             dependencies: None,
             policy: None,
             permission_profile: None,
+            managed_network_override: None,
             path_to_skills_md: PathBuf::from("/tmp/global/SKILL.md"),
             scope: SkillScope::User,
         };
@@ -520,6 +534,7 @@ mod tests {
             dependencies: None,
             policy: None,
             permission_profile: None,
+            managed_network_override: None,
             path_to_skills_md: PathBuf::from("/tmp/local/SKILL.md"),
             scope: SkillScope::Repo,
         };
@@ -531,6 +546,7 @@ mod tests {
             dependencies: None,
             policy: None,
             permission_profile: None,
+            managed_network_override: None,
             path_to_skills_md: PathBuf::from("/tmp/explicit/SKILL.md"),
             scope: SkillScope::User,
         };
@@ -569,6 +585,7 @@ mod tests {
             dependencies: None,
             policy: None,
             permission_profile: None,
+            managed_network_override: None,
             path_to_skills_md: PathBuf::from("/tmp/local/SKILL.md"),
             scope: SkillScope::Repo,
         };
@@ -589,4 +606,51 @@ mod tests {
         let filtered = outcome.filter_for_agent_identity("architect");
         assert_eq!(filtered.skills.len(), 1);
     }
+}
+
+pub fn filter_skill_load_outcome_for_session_source(
+    mut outcome: SkillLoadOutcome,
+    session_source: &SessionSource,
+) -> SkillLoadOutcome {
+    outcome
+        .skills
+        .retain(|skill| skill.matches_product_restriction(session_source));
+    let kept_paths: HashSet<PathBuf> = outcome
+        .skills
+        .iter()
+        .map(|skill| skill.path_to_skills_md.clone())
+        .collect();
+    outcome
+        .disabled_paths
+        .retain(|path| kept_paths.contains(path));
+    outcome
+        .explicit_skill_paths
+        .retain(|path| kept_paths.contains(path));
+    outcome.implicit_skills_by_scripts_dir = Arc::new(
+        outcome
+            .implicit_skills_by_scripts_dir
+            .iter()
+            .filter(|(_, skill)| skill.matches_product_restriction(session_source))
+            .map(|(path, skill)| (path.clone(), skill.clone()))
+            .collect(),
+    );
+    outcome.implicit_skills_by_doc_path = Arc::new(
+        outcome
+            .implicit_skills_by_doc_path
+            .iter()
+            .filter(|(_, skill)| skill.matches_product_restriction(session_source))
+            .map(|(path, skill)| (path.clone(), skill.clone()))
+            .collect(),
+    );
+    outcome
+}
+
+pub fn filter_skills_for_session_source(
+    skills: Vec<SkillMetadata>,
+    session_source: &SessionSource,
+) -> Vec<SkillMetadata> {
+    skills
+        .into_iter()
+        .filter(|skill| skill.matches_product_restriction(session_source))
+        .collect()
 }
