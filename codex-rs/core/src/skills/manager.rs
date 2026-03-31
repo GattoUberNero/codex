@@ -30,6 +30,7 @@ use crate::skills::model::SkillAgentFilterDefaults;
 use crate::skills::model::SkillAgentFilterMode;
 use crate::skills::model::SkillMetadata;
 use crate::skills::system::install_system_skills;
+use crate::skills::system::uninstall_system_skills;
 
 const CODEXN_EXPLICIT_SKILL_ROOTS_ENV: &str = "CODEXN_EXPLICIT_SKILL_ROOTS";
 const CODEXN_SKILL_ROOTS_ENV: &str = "CODEXN_SKILL_ROOTS";
@@ -41,16 +42,24 @@ pub struct SkillsManager {
 }
 
 impl SkillsManager {
-    pub fn new(codex_home: PathBuf, plugins_manager: Arc<PluginsManager>) -> Self {
-        if let Err(err) = install_system_skills(&codex_home) {
-            tracing::error!("failed to install system skills: {err}");
-        }
-
-        Self {
+    pub fn new(
+        codex_home: PathBuf,
+        plugins_manager: Arc<PluginsManager>,
+        bundled_skills_enabled: bool,
+    ) -> Self {
+        let manager = Self {
             codex_home,
             plugins_manager,
             cache_by_cwd: RwLock::new(HashMap::new()),
+        };
+        if !bundled_skills_enabled {
+            // The loader caches bundled skills under `skills/.system`. Clearing that directory is
+            // best-effort cleanup; root selection still enforces the config even if removal fails.
+            uninstall_system_skills(&manager.codex_home);
+        } else if let Err(err) = install_system_skills(&manager.codex_home) {
+            tracing::error!("failed to install system skills: {err}");
         }
+        manager
     }
 
     /// Load skills for an already-constructed [`Config`], avoiding any additional config-layer
@@ -90,11 +99,15 @@ impl SkillsManager {
 
     pub(crate) fn skill_roots_for_config(&self, config: &Config) -> Vec<SkillRoot> {
         let loaded_plugins = self.plugins_manager.plugins_for_config(config);
-        skill_roots(
+        let mut roots = skill_roots(
             &config.config_layer_stack,
             &config.cwd,
             loaded_plugins.effective_skill_roots(),
-        )
+        );
+        if !config.bundled_skills_enabled() {
+            roots.retain(|root| root.scope != SkillScope::System);
+        }
+        roots
     }
 
     pub async fn skills_for_cwd(&self, cwd: &Path, force_reload: bool) -> SkillLoadOutcome {
@@ -167,6 +180,9 @@ impl SkillsManager {
             loaded_plugins.effective_skill_roots(),
         );
         let non_explicit_roots: Vec<PathBuf> = roots.iter().map(|root| root.path.clone()).collect();
+        if !bundled_skills_enabled_from_stack(&config_layer_stack) {
+            roots.retain(|root| root.scope != SkillScope::System);
+        }
         roots.extend(
             merged_extra_user_roots
                 .iter()
@@ -213,6 +229,28 @@ impl SkillsManager {
             Err(err) => err.into_inner().get(cwd).cloned(),
         }
     }
+}
+
+pub(crate) fn bundled_skills_enabled_from_stack(
+    config_layer_stack: &crate::config_loader::ConfigLayerStack,
+) -> bool {
+    let effective_config = config_layer_stack.effective_config();
+    let Some(skills_value) = effective_config
+        .as_table()
+        .and_then(|table| table.get("skills"))
+    else {
+        return true;
+    };
+
+    let skills: SkillsConfig = match skills_value.clone().try_into() {
+        Ok(skills) => skills,
+        Err(err) => {
+            warn!("invalid skills config: {err}");
+            return true;
+        }
+    };
+
+    skills.bundled.unwrap_or_default().enabled
 }
 
 fn disabled_paths_from_stack(
@@ -554,6 +592,24 @@ mod tests {
         fs::write(skill_dir.join("SKILL.md"), content).unwrap();
     }
 
+    #[test]
+    fn new_with_disabled_bundled_skills_removes_stale_cached_system_skills() {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        let stale_system_skill_dir = codex_home.path().join("skills/.system/stale-skill");
+        fs::create_dir_all(&stale_system_skill_dir).expect("create stale system skill dir");
+        fs::write(stale_system_skill_dir.join("SKILL.md"), "# stale\n")
+            .expect("write stale system skill");
+
+        let plugins_manager = Arc::new(PluginsManager::new(codex_home.path().to_path_buf()));
+        let _skills_manager =
+            SkillsManager::new(codex_home.path().to_path_buf(), plugins_manager, false);
+
+        assert!(
+            !codex_home.path().join("skills/.system").exists(),
+            "expected disabling system skills to remove stale cached bundled skills"
+        );
+    }
+
     #[tokio::test]
     async fn skills_for_config_seeds_cache_by_cwd() {
         let codex_home = tempfile::tempdir().expect("tempdir");
@@ -570,7 +626,8 @@ mod tests {
             .expect("defaults for test should always succeed");
 
         let plugins_manager = Arc::new(PluginsManager::new(codex_home.path().to_path_buf()));
-        let skills_manager = SkillsManager::new(codex_home.path().to_path_buf(), plugins_manager);
+        let skills_manager =
+            SkillsManager::new(codex_home.path().to_path_buf(), plugins_manager, true);
 
         write_user_skill(&codex_home, "a", "skill-a", "from a");
         let outcome1 = skills_manager.skills_for_config(&cfg);
@@ -604,7 +661,8 @@ mod tests {
             .expect("defaults for test should always succeed");
 
         let plugins_manager = Arc::new(PluginsManager::new(codex_home.path().to_path_buf()));
-        let skills_manager = SkillsManager::new(codex_home.path().to_path_buf(), plugins_manager);
+        let skills_manager =
+            SkillsManager::new(codex_home.path().to_path_buf(), plugins_manager, true);
         let _ = skills_manager.skills_for_config(&config);
 
         write_user_skill(&extra_root, "x", "extra-skill", "from extra root");
@@ -622,12 +680,77 @@ mod tests {
                 .iter()
                 .any(|skill| skill.name == "extra-skill")
         );
+        assert!(
+            outcome_with_extra
+                .skills
+                .iter()
+                .any(|skill| skill.scope == SkillScope::System)
+        );
 
         // The cwd-only API returns the current cached entry for this cwd, even when that entry
         // was produced with extra roots.
         let outcome_without_extra = skills_manager.skills_for_cwd(cwd.path(), false).await;
         assert_eq!(outcome_without_extra.skills, outcome_with_extra.skills);
         assert_eq!(outcome_without_extra.errors, outcome_with_extra.errors);
+    }
+
+    #[tokio::test]
+    async fn skills_for_config_excludes_bundled_skills_when_disabled_in_config() {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let bundled_skill_dir = codex_home.path().join("skills/.system/bundled-skill");
+        fs::create_dir_all(&bundled_skill_dir).expect("create bundled skill dir");
+        fs::write(
+            bundled_skill_dir.join("SKILL.md"),
+            "---\nname: bundled-skill\ndescription: from bundled root\n---\n\n# Body\n",
+        )
+        .expect("write bundled skill");
+
+        fs::write(
+            codex_home.path().join(crate::config::CONFIG_TOML_FILE),
+            "[skills.bundled]\nenabled = false\n",
+        )
+        .expect("write config");
+
+        let config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .harness_overrides(ConfigOverrides {
+                cwd: Some(cwd.path().to_path_buf()),
+                ..Default::default()
+            })
+            .build()
+            .await
+            .expect("load config");
+
+        let plugins_manager = Arc::new(PluginsManager::new(codex_home.path().to_path_buf()));
+        let skills_manager = SkillsManager::new(
+            codex_home.path().to_path_buf(),
+            plugins_manager,
+            config.bundled_skills_enabled(),
+        );
+
+        // Recreate the cached bundled skill after startup cleanup so this assertion exercises
+        // root selection rather than relying on directory removal succeeding.
+        fs::create_dir_all(&bundled_skill_dir).expect("recreate bundled skill dir");
+        fs::write(
+            bundled_skill_dir.join("SKILL.md"),
+            "---\nname: bundled-skill\ndescription: from bundled root\n---\n\n# Body\n",
+        )
+        .expect("rewrite bundled skill");
+
+        let outcome = skills_manager.skills_for_config(&config);
+        assert!(
+            outcome
+                .skills
+                .iter()
+                .all(|skill| skill.name != "bundled-skill")
+        );
+        assert!(
+            outcome
+                .skills
+                .iter()
+                .all(|skill| skill.scope != SkillScope::System)
+        );
     }
 
     #[tokio::test]
@@ -648,7 +771,8 @@ mod tests {
             .expect("defaults for test should always succeed");
 
         let plugins_manager = Arc::new(PluginsManager::new(codex_home.path().to_path_buf()));
-        let skills_manager = SkillsManager::new(codex_home.path().to_path_buf(), plugins_manager);
+        let skills_manager =
+            SkillsManager::new(codex_home.path().to_path_buf(), plugins_manager, true);
         let _ = skills_manager.skills_for_config(&config);
 
         write_user_skill(&extra_root_a, "x", "extra-skill-a", "from extra root a");

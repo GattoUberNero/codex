@@ -123,8 +123,12 @@ use codex_app_server_protocol::ThreadBackgroundTerminalsCleanResponse;
 use codex_app_server_protocol::ThreadClosedNotification;
 use codex_app_server_protocol::ThreadCompactStartParams;
 use codex_app_server_protocol::ThreadCompactStartResponse;
+use codex_app_server_protocol::ThreadDecrementElicitationParams;
+use codex_app_server_protocol::ThreadDecrementElicitationResponse;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
+use codex_app_server_protocol::ThreadIncrementElicitationParams;
+use codex_app_server_protocol::ThreadIncrementElicitationResponse;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadListResponse;
@@ -658,6 +662,14 @@ impl CodexMessageProcessor {
             }
             ClientRequest::ThreadArchive { request_id, params } => {
                 self.thread_archive(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::ThreadIncrementElicitation { request_id, params } => {
+                self.thread_increment_elicitation(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::ThreadDecrementElicitation { request_id, params } => {
+                self.thread_decrement_elicitation(to_connection_request_id(request_id), params)
                     .await;
             }
             ClientRequest::ThreadSetName { request_id, params } => {
@@ -1678,9 +1690,10 @@ impl CodexMessageProcessor {
                 None => ExecExpiration::DefaultTimeout,
             }
         };
+        let sandbox_cwd = self.config.cwd.clone();
         let exec_params = ExecParams {
             command,
-            cwd,
+            cwd: cwd.clone(),
             expiration,
             env,
             network: started_network_proxy
@@ -1701,7 +1714,7 @@ impl CodexMessageProcessor {
             Some(policy) => match self.config.permissions.sandbox_policy.can_set(&policy) {
                 Ok(()) => {
                     let file_system_sandbox_policy =
-                        codex_protocol::permissions::FileSystemSandboxPolicy::from(&policy);
+                        codex_protocol::permissions::FileSystemSandboxPolicy::from_legacy_sandbox_policy(&policy, &sandbox_cwd);
                     let network_sandbox_policy =
                         codex_protocol::permissions::NetworkSandboxPolicy::from(&policy);
                     (policy, file_system_sandbox_policy, network_sandbox_policy)
@@ -1726,7 +1739,6 @@ impl CodexMessageProcessor {
         let codex_linux_sandbox_exe = self.arg0_paths.codex_linux_sandbox_exe.clone();
         let outgoing = self.outgoing.clone();
         let request_for_task = request.clone();
-        let sandbox_cwd = self.config.cwd.clone();
         let started_network_proxy_for_task = started_network_proxy;
         let use_linux_sandbox_bwrap = self.config.features.enabled(Feature::UseLinuxSandboxBwrap);
         let size = match size.map(crate::command_exec::terminal_size_from_protocol) {
@@ -2119,6 +2131,79 @@ impl CodexMessageProcessor {
             }
             Err(err) => {
                 self.outgoing.send_error(request_id, err).await;
+            }
+        }
+    }
+
+    async fn thread_increment_elicitation(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadIncrementElicitationParams,
+    ) {
+        let (_, thread) = match self.load_thread(&params.thread_id).await {
+            Ok(value) => value,
+            Err(error) => {
+                self.outgoing.send_error(request_id, error).await;
+                return;
+            }
+        };
+
+        match thread.increment_out_of_band_elicitation_count().await {
+            Ok(count) => {
+                self.outgoing
+                    .send_response(
+                        request_id,
+                        ThreadIncrementElicitationResponse {
+                            count,
+                            paused: count > 0,
+                        },
+                    )
+                    .await;
+            }
+            Err(err) => {
+                self.send_internal_error(
+                    request_id,
+                    format!("failed to increment out-of-band elicitation counter: {err}"),
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn thread_decrement_elicitation(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadDecrementElicitationParams,
+    ) {
+        let (_, thread) = match self.load_thread(&params.thread_id).await {
+            Ok(value) => value,
+            Err(error) => {
+                self.outgoing.send_error(request_id, error).await;
+                return;
+            }
+        };
+
+        match thread.decrement_out_of_band_elicitation_count().await {
+            Ok(count) => {
+                self.outgoing
+                    .send_response(
+                        request_id,
+                        ThreadDecrementElicitationResponse {
+                            count,
+                            paused: count > 0,
+                        },
+                    )
+                    .await;
+            }
+            Err(CodexErr::InvalidRequest(message)) => {
+                self.send_invalid_request_error(request_id, message).await;
+            }
+            Err(err) => {
+                self.send_internal_error(
+                    request_id,
+                    format!("failed to decrement out-of-band elicitation counter: {err}"),
+                )
+                .await;
             }
         }
     }
@@ -3015,7 +3100,7 @@ impl CodexMessageProcessor {
                 }
             }
         } else {
-            let Some(thread) = loaded_thread else {
+            let Some(thread) = loaded_thread.as_ref() else {
                 self.send_invalid_request_error(
                     request_id,
                     format!("thread not loaded: {thread_uuid}"),
@@ -3069,11 +3154,21 @@ impl CodexMessageProcessor {
             }
         }
 
-        thread.status = resolve_thread_status(
-            self.thread_watch_manager
-                .loaded_status_for_thread(&thread.id)
-                .await,
-            false,
+        let has_live_in_progress_turn = if let Some(loaded_thread) = loaded_thread.as_ref() {
+            matches!(loaded_thread.agent_status().await, AgentStatus::Running)
+        } else {
+            false
+        };
+
+        let thread_status = self
+            .thread_watch_manager
+            .loaded_status_for_thread(&thread.id)
+            .await;
+
+        set_thread_status_and_interrupt_stale_turns(
+            &mut thread,
+            thread_status,
+            has_live_in_progress_turn,
         );
         let response = ThreadReadResponse { thread };
         self.outgoing.send_response(request_id, response).await;
@@ -3513,12 +3608,12 @@ impl CodexMessageProcessor {
                     .upsert_thread(thread.clone())
                     .await;
 
-                thread.status = resolve_thread_status(
-                    self.thread_watch_manager
-                        .loaded_status_for_thread(&thread.id)
-                        .await,
-                    false,
-                );
+                let thread_status = self
+                    .thread_watch_manager
+                    .loaded_status_for_thread(&thread.id)
+                    .await;
+
+                set_thread_status_and_interrupt_stale_turns(&mut thread, thread_status, false);
 
                 let response = ThreadResumeResponse {
                     thread,
@@ -5116,7 +5211,7 @@ impl CodexMessageProcessor {
                 .set_enabled(Feature::Apps, thread.enabled(Feature::Apps));
         }
 
-        if !config.features.enabled(Feature::Apps) {
+        if !config.features.apps_enabled(Some(&self.auth_manager)).await {
             self.outgoing
                 .send_response(
                     request_id,
@@ -5679,7 +5774,7 @@ impl CodexMessageProcessor {
                 };
                 let plugin_apps = load_plugin_apps(result.installed_path.as_path());
                 let apps_needing_auth = if plugin_apps.is_empty()
-                    || !config.features.enabled(Feature::Apps)
+                    || !config.features.apps_enabled(Some(&self.auth_manager)).await
                 {
                     Vec::new()
                 } else {
@@ -6670,6 +6765,7 @@ impl CodexMessageProcessor {
                         };
                         handle_thread_listener_command(
                             conversation_id,
+                            &conversation,
                             codex_home.as_path(),
                             &thread_state_manager,
                             &thread_state,
@@ -6871,6 +6967,13 @@ impl CodexMessageProcessor {
             None => None,
         };
 
+        if let Some(chatgpt_user_id) = self
+            .auth_manager
+            .auth_cached()
+            .and_then(|auth| auth.get_chatgpt_user_id())
+        {
+            tracing::info!(target: "feedback_tags", chatgpt_user_id);
+        }
         let snapshot = self.feedback.snapshot(conversation_id);
         let thread_id = snapshot.thread_id.clone();
         let sqlite_feedback_logs = if include_logs {
@@ -7032,8 +7135,10 @@ impl CodexMessageProcessor {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_thread_listener_command(
     conversation_id: ThreadId,
+    conversation: &Arc<CodexThread>,
     codex_home: &Path,
     thread_state_manager: &ThreadStateManager,
     thread_state: &Arc<Mutex<ThreadState>>,
@@ -7045,6 +7150,7 @@ async fn handle_thread_listener_command(
         ThreadListenerCommand::SendThreadResumeResponse(resume_request) => {
             handle_pending_thread_resume_request(
                 conversation_id,
+                conversation,
                 codex_home,
                 thread_state_manager,
                 thread_state,
@@ -7070,8 +7176,10 @@ async fn handle_thread_listener_command(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_pending_thread_resume_request(
     conversation_id: ThreadId,
+    conversation: &Arc<CodexThread>,
     codex_home: &Path,
     thread_state_manager: &ThreadStateManager,
     thread_state: &Arc<Mutex<ThreadState>>,
@@ -7091,9 +7199,11 @@ async fn handle_pending_thread_resume_request(
         active_turn_status = ?active_turn.as_ref().map(|turn| &turn.status),
         "composing running thread resume response"
     );
-    let mut has_in_progress_turn = active_turn
-        .as_ref()
-        .is_some_and(|turn| matches!(turn.status, TurnStatus::InProgress));
+    let has_live_in_progress_turn =
+        matches!(conversation.agent_status().await, AgentStatus::Running)
+            || active_turn
+                .as_ref()
+                .is_some_and(|turn| matches!(turn.status, TurnStatus::InProgress));
 
     let request_id = pending.request_id;
     let connection_id = request_id.connection_id;
@@ -7118,19 +7228,15 @@ async fn handle_pending_thread_resume_request(
         return;
     }
 
-    has_in_progress_turn = has_in_progress_turn
-        || thread
-            .turns
-            .iter()
-            .any(|turn| matches!(turn.status, TurnStatus::InProgress));
+    let thread_status = thread_watch_manager
+        .loaded_status_for_thread(&thread.id)
+        .await;
 
-    let status = resolve_thread_status(
-        thread_watch_manager
-            .loaded_status_for_thread(&thread.id)
-            .await,
-        has_in_progress_turn,
+    set_thread_status_and_interrupt_stale_turns(
+        &mut thread,
+        thread_status,
+        has_live_in_progress_turn,
     );
-    thread.status = status;
 
     match find_thread_name_by_id(codex_home, &conversation_id).await {
         Ok(thread_name) => thread.name = thread_name,
@@ -7226,6 +7332,22 @@ async fn resolve_pending_server_request(
 fn merge_turn_history_with_active_turn(turns: &mut Vec<Turn>, active_turn: Turn) {
     turns.retain(|turn| turn.id != active_turn.id);
     turns.push(active_turn);
+}
+
+fn set_thread_status_and_interrupt_stale_turns(
+    thread: &mut Thread,
+    loaded_status: ThreadStatus,
+    has_live_in_progress_turn: bool,
+) {
+    let status = resolve_thread_status(loaded_status, has_live_in_progress_turn);
+    if !matches!(status, ThreadStatus::Active { .. }) {
+        for turn in &mut thread.turns {
+            if matches!(turn.status, TurnStatus::InProgress) {
+                turn.status = TurnStatus::Interrupted;
+            }
+        }
+    }
+    thread.status = status;
 }
 
 fn collect_resume_override_mismatches(

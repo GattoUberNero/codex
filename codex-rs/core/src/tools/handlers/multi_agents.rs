@@ -13,8 +13,8 @@ use crate::config::Config;
 use crate::error::CodexErr;
 use crate::features::Feature;
 use crate::function_tool::FunctionCallError;
+use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
-use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::registry::ToolHandler;
@@ -22,7 +22,6 @@ use crate::tools::registry::ToolKind;
 use async_trait::async_trait;
 use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
-use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::protocol::CollabAgentInteractionBeginEvent;
 use codex_protocol::protocol::CollabAgentInteractionEndEvent;
 use codex_protocol::protocol::CollabAgentRef;
@@ -109,6 +108,8 @@ async fn ensure_resume_target_allowed(
 
 #[async_trait]
 impl ToolHandler for MultiAgentHandler {
+    type Output = FunctionToolOutput;
+
     fn kind(&self) -> ToolKind {
         ToolKind::Function
     }
@@ -117,7 +118,7 @@ impl ToolHandler for MultiAgentHandler {
         matches!(payload, ToolPayload::Function { .. })
     }
 
-    async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    async fn handle(&self, invocation: ToolInvocation) -> Result<Self::Output, FunctionCallError> {
         let ToolInvocation {
             session,
             turn,
@@ -179,7 +180,7 @@ mod spawn {
         turn: Arc<TurnContext>,
         call_id: String,
         arguments: String,
-    ) -> Result<ToolOutput, FunctionCallError> {
+    ) -> Result<FunctionToolOutput, FunctionCallError> {
         let args: SpawnAgentArgs = parse_arguments(&arguments)?;
         let role_name = args
             .agent_type
@@ -277,10 +278,7 @@ mod spawn {
             FunctionCallError::Fatal(format!("failed to serialize spawn_agent result: {err}"))
         })?;
 
-        Ok(ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            success: Some(true),
-        })
+        Ok(FunctionToolOutput::from_text(content, Some(true)))
     }
 }
 
@@ -307,7 +305,7 @@ mod send_input {
         turn: Arc<TurnContext>,
         call_id: String,
         arguments: String,
-    ) -> Result<ToolOutput, FunctionCallError> {
+    ) -> Result<FunctionToolOutput, FunctionCallError> {
         let args: SendInputArgs = parse_arguments(&arguments)?;
         let receiver_thread_id = agent_id(&args.id)?;
         ensure_owned_live_or_not_found(session.as_ref(), receiver_thread_id).await?;
@@ -371,10 +369,7 @@ mod send_input {
             FunctionCallError::Fatal(format!("failed to serialize send_input result: {err}"))
         })?;
 
-        Ok(ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            success: Some(true),
-        })
+        Ok(FunctionToolOutput::from_text(content, Some(true)))
     }
 }
 
@@ -398,7 +393,7 @@ mod resume_agent {
         turn: Arc<TurnContext>,
         call_id: String,
         arguments: String,
-    ) -> Result<ToolOutput, FunctionCallError> {
+    ) -> Result<FunctionToolOutput, FunctionCallError> {
         let args: ResumeAgentArgs = parse_arguments(&arguments)?;
         let receiver_thread_id = agent_id(&args.id)?;
         let (receiver_agent_nickname, receiver_agent_role) = session
@@ -486,10 +481,7 @@ mod resume_agent {
             FunctionCallError::Fatal(format!("failed to serialize resume_agent result: {err}"))
         })?;
 
-        Ok(ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            success: Some(true),
-        })
+        Ok(FunctionToolOutput::from_text(content, Some(true)))
     }
 
     async fn try_resume_closed_agent(
@@ -549,7 +541,7 @@ pub(crate) mod wait {
         turn: Arc<TurnContext>,
         call_id: String,
         arguments: String,
-    ) -> Result<ToolOutput, FunctionCallError> {
+    ) -> Result<FunctionToolOutput, FunctionCallError> {
         let args: WaitArgs = parse_arguments(&arguments)?;
         if args.ids.is_empty() {
             return Err(FunctionCallError::RespondToModel(
@@ -702,10 +694,7 @@ pub(crate) mod wait {
             FunctionCallError::Fatal(format!("failed to serialize wait result: {err}"))
         })?;
 
-        Ok(ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            success: None,
-        })
+        Ok(FunctionToolOutput::from_text(content, None))
     }
 
     async fn wait_for_final_status(
@@ -757,7 +746,7 @@ pub mod close_agent {
         turn: Arc<TurnContext>,
         call_id: String,
         arguments: String,
-    ) -> Result<ToolOutput, FunctionCallError> {
+    ) -> Result<FunctionToolOutput, FunctionCallError> {
         let args: CloseAgentArgs = parse_arguments(&arguments)?;
         let agent_id = agent_id(&args.id)?;
         ensure_close_target_allowed(session.as_ref(), agent_id).await?;
@@ -835,10 +824,7 @@ pub mod close_agent {
             FunctionCallError::Fatal(format!("failed to serialize close_agent result: {err}"))
         })?;
 
-        Ok(ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            success: Some(true),
-        })
+        Ok(FunctionToolOutput::from_text(content, Some(true)))
     }
 }
 
@@ -1077,6 +1063,7 @@ mod tests {
     use crate::protocol::SandboxPolicy;
     use crate::protocol::SessionSource;
     use crate::protocol::SubAgentSource;
+    use crate::tools::context::FunctionToolOutput;
     use crate::turn_diff_tracker::TurnDiffTracker;
     use codex_protocol::ThreadId;
     use pretty_assertions::assert_eq;
@@ -1174,6 +1161,14 @@ mod tests {
             )
             .await
             .expect("managed idle child agent should spawn")
+    }
+
+    fn expect_text_output(output: FunctionToolOutput) -> (String, Option<bool>) {
+        (
+            codex_protocol::models::function_call_output_content_items_to_text(&output.body)
+                .unwrap_or_default(),
+            output.success,
+        )
     }
 
     #[tokio::test]
@@ -1298,13 +1293,7 @@ mod tests {
             .handle(invocation)
             .await
             .expect("spawn_agent should succeed");
-        let ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            ..
-        } = output
-        else {
-            panic!("expected function output");
-        };
+        let (content, _) = expect_text_output(output);
         let result: SpawnAgentResult =
             serde_json::from_str(&content).expect("spawn_agent result should be json");
         let agent_id = agent_id(&result.agent_id).expect("agent_id should be valid");
@@ -1397,13 +1386,7 @@ mod tests {
             .handle(invocation)
             .await
             .expect("spawn_agent should succeed");
-        let ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            ..
-        } = output
-        else {
-            panic!("expected function output");
-        };
+        let (content, _) = expect_text_output(output);
         let result: SpawnAgentResult =
             serde_json::from_str(&content).expect("spawn_agent result should be json");
         let agent_id = agent_id(&result.agent_id).expect("agent_id should be valid");
@@ -1487,14 +1470,7 @@ mod tests {
             .handle(invocation)
             .await
             .expect("spawn should succeed within configured depth");
-        let ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            success,
-            ..
-        } = output
-        else {
-            panic!("expected function output");
-        };
+        let (content, success) = expect_text_output(output);
         let result: SpawnAgentResult =
             serde_json::from_str(&content).expect("spawn_agent result should be json");
         assert!(!result.agent_id.is_empty());
@@ -1849,14 +1825,7 @@ mod tests {
             .handle(invocation)
             .await
             .expect("resume_agent should succeed");
-        let ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            success,
-            ..
-        } = output
-        else {
-            panic!("expected function output");
-        };
+        let (content, success) = expect_text_output(output);
         let result: resume_agent::ResumeAgentResult =
             serde_json::from_str(&content).expect("resume_agent result should be json");
         assert_eq!(result.status, status_before);
@@ -1906,14 +1875,7 @@ mod tests {
             .handle(resume_invocation)
             .await
             .expect("resume_agent should succeed");
-        let ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            success,
-            ..
-        } = output
-        else {
-            panic!("expected function output");
-        };
+        let (content, success) = expect_text_output(output);
         let result: resume_agent::ResumeAgentResult =
             serde_json::from_str(&content).expect("resume_agent result should be json");
         assert_ne!(result.status, AgentStatus::NotFound);
@@ -1929,14 +1891,7 @@ mod tests {
             .handle(send_invocation)
             .await
             .expect("send_input should succeed after resume");
-        let ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            success,
-            ..
-        } = output
-        else {
-            panic!("expected function output");
-        };
+        let (content, success) = expect_text_output(output);
         let result: serde_json::Value =
             serde_json::from_str(&content).expect("send_input result should be json");
         let submission_id = result
@@ -2098,14 +2053,7 @@ mod tests {
             .handle(invocation)
             .await
             .expect("wait should succeed");
-        let ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            success,
-            ..
-        } = output
-        else {
-            panic!("expected function output");
-        };
+        let (content, success) = expect_text_output(output);
         let result: wait::WaitResult =
             serde_json::from_str(&content).expect("wait result should be json");
         assert_eq!(
@@ -2140,14 +2088,7 @@ mod tests {
             .handle(invocation)
             .await
             .expect("wait should succeed");
-        let ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            success,
-            ..
-        } = output
-        else {
-            panic!("expected function output");
-        };
+        let (content, success) = expect_text_output(output);
         let result: wait::WaitResult =
             serde_json::from_str(&content).expect("wait result should be json");
         assert_eq!(
@@ -2233,14 +2174,7 @@ mod tests {
             .handle(invocation)
             .await
             .expect("wait should succeed");
-        let ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            success,
-            ..
-        } = output
-        else {
-            panic!("expected function output");
-        };
+        let (content, success) = expect_text_output(output);
         let result: wait::WaitResult =
             serde_json::from_str(&content).expect("wait result should be json");
         let status = result
@@ -2270,14 +2204,7 @@ mod tests {
             .handle(invocation)
             .await
             .expect("close_agent should succeed");
-        let ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            success,
-            ..
-        } = output
-        else {
-            panic!("expected function output");
-        };
+        let (content, success) = expect_text_output(output);
         let result: close_agent::CloseAgentResult =
             serde_json::from_str(&content).expect("close_agent result should be json");
         assert_eq!(result.status, status_before);
