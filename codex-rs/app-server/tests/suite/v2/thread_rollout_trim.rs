@@ -212,6 +212,7 @@ fn write_rollout(home: &Path, source: CoreSessionSource) -> Result<(String, Path
                 source,
                 agent_nickname: None,
                 agent_role: None,
+                agent_path: None,
                 model_provider: Some("mock".to_string()),
                 base_instructions: None,
                 dynamic_tools: None,

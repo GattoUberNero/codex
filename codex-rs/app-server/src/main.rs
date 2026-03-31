@@ -1,5 +1,6 @@
 use clap::Parser;
 use codex_app_server::AppServerTransport;
+use codex_app_server::AppServerWebsocketAuthArgs;
 use codex_app_server::run_main_with_transport;
 use codex_arg0::Arg0DispatchPaths;
 use codex_arg0::arg0_dispatch_or_else;
@@ -23,16 +24,17 @@ struct AppServerArgs {
     )]
     listen: AppServerTransport,
 
-    /// Session source stamped into new threads started by this app-server.
-    ///
-    /// Known values such as `vscode`, `cli`, `exec`, and `mcp` map to built-in
-    /// sources. Any other non-empty value is recorded as a custom source.
+    /// Session source used to derive product restrictions and metadata.
     #[arg(
         long = "session-source",
         value_name = "SOURCE",
-        default_value = "vscode"
+        default_value = "vscode",
+        value_parser = SessionSource::from_startup_arg
     )]
-    session_source: String,
+    session_source: SessionSource,
+
+    #[command(flatten)]
+    auth: AppServerWebsocketAuthArgs,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -44,8 +46,8 @@ fn main() -> anyhow::Result<()> {
             ..Default::default()
         };
         let transport = args.listen;
-        let session_source = SessionSource::from_startup_arg(args.session_source.as_str())
-            .map_err(|err| anyhow::anyhow!("invalid --session-source: {err}"))?;
+        let session_source = args.session_source;
+        let auth = args.auth.try_into_settings()?;
 
         run_main_with_transport(
             arg0_paths,
@@ -54,6 +56,7 @@ fn main() -> anyhow::Result<()> {
             /*default_analytics_enabled*/ false,
             transport,
             session_source,
+            auth,
         )
         .await?;
         Ok(())

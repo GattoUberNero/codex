@@ -31,6 +31,8 @@ use codex_app_server_protocol::FsGetMetadataParams;
 use codex_app_server_protocol::FsReadDirectoryParams;
 use codex_app_server_protocol::FsReadFileParams;
 use codex_app_server_protocol::FsRemoveParams;
+use codex_app_server_protocol::FsUnwatchParams;
+use codex_app_server_protocol::FsWatchParams;
 use codex_app_server_protocol::FsWriteFileParams;
 use codex_app_server_protocol::GetAccountParams;
 use codex_app_server_protocol::GetAuthStatusParams;
@@ -72,6 +74,7 @@ use codex_app_server_protocol::ThreadRolloutBackupDeleteParams;
 use codex_app_server_protocol::ThreadRolloutBackupRestoreParams;
 use codex_app_server_protocol::ThreadRolloutTrimParams;
 use codex_app_server_protocol::ThreadSetNameParams;
+use codex_app_server_protocol::ThreadShellCommandParams;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadUnarchiveParams;
 use codex_app_server_protocol::ThreadUnsubscribeParams;
@@ -118,7 +121,7 @@ impl McpProcess {
         Self::new_with_env_and_args(codex_home, env_overrides, &[]).await
     }
 
-    pub async fn new_with_env_and_args(
+    async fn new_with_env_and_args(
         codex_home: &Path,
         env_overrides: &[(&str, Option<&str>)],
         args: &[&str],
@@ -403,6 +406,15 @@ impl McpProcess {
         self.send_request("thread/compact/start", params).await
     }
 
+    /// Send a `thread/shellCommand` JSON-RPC request.
+    pub async fn send_thread_shell_command_request(
+        &mut self,
+        params: ThreadShellCommandParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("thread/shellCommand", params).await
+    }
+
     /// Send a `thread/rollback` JSON-RPC request.
     pub async fn send_thread_rollback_request(
         &mut self,
@@ -493,6 +505,16 @@ impl McpProcess {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("experimentalFeature/list", params).await
+    }
+
+    /// Send an `experimentalFeature/enablement/set` JSON-RPC request.
+    pub async fn send_experimental_feature_enablement_set_request(
+        &mut self,
+        params: codex_app_server_protocol::ExperimentalFeatureEnablementSetParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("experimentalFeature/enablement/set", params)
+            .await
     }
 
     /// Send an `app/list` JSON-RPC request.
@@ -820,6 +842,19 @@ impl McpProcess {
     pub async fn send_fs_copy_request(&mut self, params: FsCopyParams) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("fs/copy", params).await
+    }
+
+    pub async fn send_fs_watch_request(&mut self, params: FsWatchParams) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("fs/watch", params).await
+    }
+
+    pub async fn send_fs_unwatch_request(
+        &mut self,
+        params: FsUnwatchParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("fs/unwatch", params).await
     }
 
     /// Send an `account/logout` JSON-RPC request.
