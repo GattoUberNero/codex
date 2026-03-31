@@ -63,6 +63,8 @@ use async_channel::Receiver;
 use async_channel::Sender;
 use chrono::Local;
 use chrono::Utc;
+use codex_app_server_protocol::McpServerElicitationRequest;
+use codex_app_server_protocol::McpServerElicitationRequestParams;
 use codex_hooks::HookAction;
 use codex_hooks::HookEvent;
 use codex_hooks::HookEventAfterAgent;
@@ -78,6 +80,8 @@ use codex_otel::current_span_trace_id;
 use codex_otel::current_span_w3c_trace_context;
 use codex_otel::set_parent_from_w3c_trace_context;
 use codex_protocol::ThreadId;
+use codex_protocol::approvals::ElicitationRequestEvent;
+use codex_protocol::approvals::ExecApprovalRequestSkillMetadata;
 use codex_protocol::approvals::ExecPolicyAmendment;
 use codex_protocol::approvals::NetworkPolicyAmendment;
 use codex_protocol::approvals::NetworkPolicyRuleAction;
@@ -94,6 +98,8 @@ use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::format_allow_prefixes;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::HasLegacyEvent;
 use codex_protocol::protocol::ItemCompletedEvent;
@@ -107,6 +113,9 @@ use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnContextNetworkItem;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_protocol::request_permissions::RequestPermissionsArgs;
+use codex_protocol::request_permissions::RequestPermissionsEvent;
+use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputArgs;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_rmcp_client::ElicitationResponse;
@@ -301,13 +310,17 @@ use crate::tools::sandboxing::ApprovalStore;
 use crate::tools::spec::ToolsConfig;
 use crate::tools::spec::ToolsConfigParams;
 use crate::turn_diff_tracker::TurnDiffTracker;
+use crate::turn_timing::TurnTimingState;
+use crate::turn_timing::record_turn_ttfm_metric;
+use crate::turn_timing::record_turn_ttft_metric;
 use crate::unified_exec::UnifiedExecProcessManager;
 use crate::util::backoff;
 use crate::windows_sandbox::WindowsSandboxLevelExt;
 use codex_async_utils::OrCancelExt;
 use codex_hooks::NeroHookMsgMode;
-use codex_otel::OtelManager;
+use codex_otel::SessionTelemetry;
 use codex_otel::TelemetryAuthMode;
+use codex_otel::metrics::names::THREAD_STARTED_METRIC;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
@@ -551,7 +564,7 @@ fn sanitize_auto_decision_meta_for_audit(value: &Value) -> Option<Value> {
             "assistant_stop",
             "backend_unavailable",
         ] {
-            if let Some(raw) = flags.get(key).and_then(|v| v.as_bool()) {
+            if let Some(raw) = flags.get(key).and_then(serde_json::Value::as_bool) {
                 out_flags.insert(key.to_string(), Value::Bool(raw));
             }
         }
@@ -779,9 +792,16 @@ impl Codex {
         )
         .await;
 
-        let exec_policy = ExecPolicyManager::load(&config.config_layer_stack)
-            .await
-            .map_err(|err| CodexErr::Fatal(format!("failed to load rules: {err}")))?;
+        let exec_policy = if crate::guardian::is_guardian_subagent_source(&session_source) {
+            // Guardian review should rely on the built-in shell safety checks,
+            // not on caller-provided exec-policy rules that could shape the
+            // reviewer or silently auto-approve commands.
+            ExecPolicyManager::default()
+        } else {
+            ExecPolicyManager::load(&config.config_layer_stack)
+                .await
+                .map_err(|err| CodexErr::Fatal(format!("failed to load rules: {err}")))?
+        };
 
         let model_fallback_resolution =
             crate::config::resolve_codexn_fork_model_fallback_from_env(&session_source)
@@ -832,9 +852,7 @@ impl Codex {
 
         // Respect thread-start tools. When missing (resumed/forked threads), read from the db
         // first, then fall back to rollout-file tools.
-        let persisted_tools = if dynamic_tools.is_empty()
-            && config.features.enabled(Feature::Sqlite)
-        {
+        let persisted_tools = if dynamic_tools.is_empty() {
             let thread_id = match &conversation_history {
                 InitialHistory::Resumed(resumed) => Some(resumed.conversation_id),
                 InitialHistory::Forked(_) => conversation_history.forked_from_id(),
@@ -842,7 +860,7 @@ impl Codex {
             };
             match thread_id {
                 Some(thread_id) => {
-                    let state_db_ctx = state_db::get_state_db(&config, None).await;
+                    let state_db_ctx = state_db::get_state_db(&config).await;
                     state_db::get_dynamic_tools(state_db_ctx.as_deref(), thread_id, "codex_spawn")
                         .await
                 }
@@ -889,6 +907,8 @@ impl Codex {
             compact_prompt: config.compact_prompt.clone(),
             approval_policy: config.permissions.approval_policy.clone(),
             sandbox_policy: config.permissions.sandbox_policy.clone(),
+            file_system_sandbox_policy: config.permissions.file_system_sandbox_policy.clone(),
+            network_sandbox_policy: config.permissions.network_sandbox_policy,
             windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
             cwd: config.cwd.clone(),
             codex_home: config.codex_home.clone(),
@@ -1092,7 +1112,7 @@ pub(crate) struct TurnContext {
     pub(crate) config: Arc<Config>,
     pub(crate) auth_manager: Option<Arc<AuthManager>>,
     pub(crate) model_info: ModelInfo,
-    pub(crate) otel_manager: OtelManager,
+    pub(crate) session_telemetry: SessionTelemetry,
     pub(crate) provider: ModelProviderInfo,
     pub(crate) reasoning_effort: Option<ReasoningEffortConfig>,
     pub(crate) reasoning_summary: ReasoningSummaryConfig,
@@ -1112,6 +1132,8 @@ pub(crate) struct TurnContext {
     pub(crate) personality: Option<Personality>,
     pub(crate) approval_policy: Constrained<AskForApproval>,
     pub(crate) sandbox_policy: Constrained<SandboxPolicy>,
+    pub(crate) file_system_sandbox_policy: FileSystemSandboxPolicy,
+    pub(crate) network_sandbox_policy: NetworkSandboxPolicy,
     pub(crate) network: Option<NetworkProxy>,
     pub(crate) windows_sandbox_level: WindowsSandboxLevel,
     pub(crate) shell_environment_policy: ShellEnvironmentPolicy,
@@ -1126,6 +1148,7 @@ pub(crate) struct TurnContext {
     pub(crate) dynamic_tools: Vec<DynamicToolSpec>,
     pub(crate) turn_metadata_state: Arc<TurnMetadataState>,
     pub(crate) turn_skills: TurnSkillsContext,
+    pub(crate) turn_timing_state: Arc<TurnTimingState>,
 }
 impl TurnContext {
     pub(crate) fn model_context_window(&self) -> Option<i64> {
@@ -1184,6 +1207,7 @@ impl TurnContext {
             web_search_mode: self.tools_config.web_search_mode,
             session_source: self.session_source.clone(),
         })
+        .with_web_search_config(self.tools_config.web_search_config.clone())
         .with_allow_login_shell(self.tools_config.allow_login_shell)
         .with_agent_roles(config.agent_roles.clone());
 
@@ -1194,8 +1218,8 @@ impl TurnContext {
             config: Arc::new(config),
             auth_manager: self.auth_manager.clone(),
             model_info: model_info.clone(),
-            otel_manager: self
-                .otel_manager
+            session_telemetry: self
+                .session_telemetry
                 .clone()
                 .with_model(model.as_str(), model_info.slug.as_str()),
             provider: self.provider.clone(),
@@ -1214,6 +1238,8 @@ impl TurnContext {
             personality: self.personality,
             approval_policy: self.approval_policy.clone(),
             sandbox_policy: self.sandbox_policy.clone(),
+            file_system_sandbox_policy: self.file_system_sandbox_policy.clone(),
+            network_sandbox_policy: self.network_sandbox_policy,
             network: self.network.clone(),
             windows_sandbox_level: self.windows_sandbox_level,
             shell_environment_policy: self.shell_environment_policy.clone(),
@@ -1228,6 +1254,7 @@ impl TurnContext {
             dynamic_tools: self.dynamic_tools.clone(),
             turn_metadata_state: self.turn_metadata_state.clone(),
             turn_skills: self.turn_skills.clone(),
+            turn_timing_state: Arc::clone(&self.turn_timing_state),
         }
     }
 
@@ -1429,6 +1456,8 @@ pub(crate) struct SessionConfiguration {
     approval_policy: Constrained<AskForApproval>,
     /// How to sandbox commands executed in the system
     sandbox_policy: Constrained<SandboxPolicy>,
+    file_system_sandbox_policy: FileSystemSandboxPolicy,
+    network_sandbox_policy: NetworkSandboxPolicy,
     windows_sandbox_level: WindowsSandboxLevel,
 
     /// Working directory that should be treated as the *root* of the
@@ -1498,6 +1527,10 @@ impl SessionConfiguration {
         }
         if let Some(sandbox_policy) = updates.sandbox_policy.clone() {
             next_configuration.sandbox_policy.set(sandbox_policy)?;
+            next_configuration.file_system_sandbox_policy =
+                FileSystemSandboxPolicy::from(next_configuration.sandbox_policy.get());
+            next_configuration.network_sandbox_policy =
+                NetworkSandboxPolicy::from(next_configuration.sandbox_policy.get());
         }
         if let Some(windows_sandbox_level) = updates.windows_sandbox_level {
             next_configuration.windows_sandbox_level = windows_sandbox_level;
@@ -1582,7 +1615,6 @@ impl Session {
             SessionNetworkProxyRuntime {
                 http_addr: proxy.http_addr().to_string(),
                 socks_addr: proxy.socks_addr().to_string(),
-                admin_addr: proxy.admin_addr().to_string(),
             }
         };
         Ok((network_proxy, session_network_proxy))
@@ -1659,7 +1691,7 @@ impl Session {
     #[allow(clippy::too_many_arguments)]
     fn make_turn_context(
         auth_manager: Option<Arc<AuthManager>>,
-        otel_manager: &OtelManager,
+        session_telemetry: &SessionTelemetry,
         provider: ModelProviderInfo,
         session_configuration: &SessionConfiguration,
         per_turn_config: Config,
@@ -1673,14 +1705,14 @@ impl Session {
         let reasoning_summary = session_configuration
             .model_reasoning_summary
             .unwrap_or(model_info.default_reasoning_summary);
-        let otel_manager = otel_manager.clone().with_model(
+        let session_telemetry = session_telemetry.clone().with_model(
             session_configuration.collaboration_mode.model(),
             model_info.slug.as_str(),
         );
         let session_source = session_configuration.session_source.clone();
         let auth_manager_for_context = auth_manager;
         let provider_for_context = provider;
-        let otel_manager_for_context = otel_manager;
+        let session_telemetry_for_context = session_telemetry;
         let per_turn_config = Arc::new(per_turn_config);
 
         let tools_config = ToolsConfig::new(&ToolsConfigParams {
@@ -1689,6 +1721,7 @@ impl Session {
             web_search_mode: Some(per_turn_config.web_search_mode.value()),
             session_source: session_source.clone(),
         })
+        .with_web_search_config(per_turn_config.web_search_config.clone())
         .with_allow_login_shell(per_turn_config.permissions.allow_login_shell)
         .with_agent_roles(per_turn_config.agent_roles.clone());
 
@@ -1710,7 +1743,7 @@ impl Session {
             config: per_turn_config.clone(),
             auth_manager: auth_manager_for_context,
             model_info: model_info.clone(),
-            otel_manager: otel_manager_for_context,
+            session_telemetry: session_telemetry_for_context,
             provider: provider_for_context,
             reasoning_effort,
             reasoning_summary,
@@ -1727,6 +1760,8 @@ impl Session {
             personality: session_configuration.personality,
             approval_policy: session_configuration.approval_policy.clone(),
             sandbox_policy: session_configuration.sandbox_policy.clone(),
+            file_system_sandbox_policy: session_configuration.file_system_sandbox_policy.clone(),
+            network_sandbox_policy: session_configuration.network_sandbox_policy,
             network,
             windows_sandbox_level: session_configuration.windows_sandbox_level,
             shell_environment_policy: per_turn_config.permissions.shell_environment_policy.clone(),
@@ -1741,6 +1776,7 @@ impl Session {
             dynamic_tools: session_configuration.dynamic_tools.clone(),
             turn_metadata_state,
             turn_skills: TurnSkillsContext::new(skills_outcome),
+            turn_timing_state: Arc::new(TurnTimingState::default()),
         }
     }
 
@@ -1826,7 +1862,7 @@ impl Session {
             if config.ephemeral {
                 Ok::<_, anyhow::Error>((None, None))
             } else {
-                let state_db_ctx = state_db::init_if_enabled(&config, None).await;
+                let state_db_ctx = state_db::init(&config).await;
                 let rollout_recorder = RolloutRecorder::new(
                     &config,
                     rollout_params,
@@ -1926,7 +1962,7 @@ impl Session {
         let originator = crate::default_client::originator().value;
         let terminal_type = terminal::user_agent();
         let session_model = session_configuration.collaboration_mode.model().to_string();
-        let mut otel_manager = OtelManager::new(
+        let mut session_telemetry = SessionTelemetry::new(
             conversation_id,
             session_model.as_str(),
             session_model.as_str(),
@@ -1939,7 +1975,7 @@ impl Session {
             session_configuration.session_source.clone(),
         );
         if let Some(service_name) = session_configuration.metrics_service_name.as_deref() {
-            otel_manager = otel_manager.with_metrics_service_name(service_name);
+            session_telemetry = session_telemetry.with_metrics_service_name(service_name);
         }
         let network_proxy_audit_metadata = NetworkProxyAuditMetadata {
             conversation_id: Some(conversation_id.to_string()),
@@ -1952,9 +1988,9 @@ impl Session {
             model: Some(session_model.clone()),
             slug: Some(session_model),
         };
-        config.features.emit_metrics(&otel_manager);
-        otel_manager.counter(
-            "codex.thread.started",
+        config.features.emit_metrics(&session_telemetry);
+        session_telemetry.counter(
+            THREAD_STARTED_METRIC,
             1,
             &[(
                 "is_git",
@@ -1966,7 +2002,7 @@ impl Session {
             )],
         );
 
-        otel_manager.conversation_starts(
+        session_telemetry.conversation_starts(
             config.model_provider.name.as_str(),
             session_configuration.collaboration_mode.reasoning_effort(),
             config
@@ -2009,7 +2045,7 @@ impl Session {
                     conversation_id,
                     session_configuration.cwd.clone(),
                     &mut default_shell,
-                    otel_manager.clone(),
+                    session_telemetry.clone(),
                 )
             }
         } else {
@@ -2104,7 +2140,7 @@ impl Session {
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
             exec_policy,
             auth_manager: Arc::clone(&auth_manager),
-            otel_manager,
+            session_telemetry,
             models_manager: Arc::clone(&models_manager),
             tool_approvals: Mutex::new(ApprovalStore::default()),
             execve_session_approvals: RwLock::new(HashMap::new()),
@@ -2272,7 +2308,7 @@ impl Session {
         self.services.state_db.clone()
     }
 
-    /// Ensure all rollout writes are durably flushed.
+    /// Ensure rollout file writes are durably flushed.
     pub(crate) async fn flush_rollout(&self) {
         let recorder = {
             let guard = self.services.rollout.lock().await;
@@ -2923,7 +2959,7 @@ impl Session {
             next_cwd.to_path_buf(),
             self.services.user_shell.as_ref().clone(),
             self.services.shell_snapshot_tx.clone(),
-            self.services.otel_manager.clone(),
+            self.services.session_telemetry.clone(),
         );
     }
 
@@ -3161,9 +3197,11 @@ impl Session {
             };
 
             if let Some(step) = candidate {
-                self.services
-                    .otel_manager
-                    .counter("codex.nero.model_fallback.attempt", 1, &[]);
+                self.services.session_telemetry.counter(
+                    "codex.nero.model_fallback.attempt",
+                    1,
+                    &[],
+                );
                 let warning = format!(
                     "Model fallback activated: `{}` -> `{}` ({err}).",
                     current_model, step.model
@@ -3249,8 +3287,7 @@ impl Session {
                 return Ok(ModelFallbackAfterErrorOutcome::Exhausted);
             }
             let warning = format!(
-                "All fallback models are cooling down. Waiting {:?} before retry.",
-                sleep_for
+                "All fallback models are cooling down. Waiting {sleep_for:?} before retry."
             );
             self.send_event(
                 turn_context,
@@ -3278,7 +3315,7 @@ impl Session {
             runtime.sticky_step = None;
         }
         self.services
-            .otel_manager
+            .session_telemetry
             .counter("codex.nero.model_fallback.success", 1, &[]);
     }
 
@@ -3337,7 +3374,7 @@ impl Session {
         );
         let mut turn_context: TurnContext = Self::make_turn_context(
             Some(Arc::clone(&self.services.auth_manager)),
-            &self.services.otel_manager,
+            &self.services.session_telemetry,
             session_configuration.provider.clone(),
             &session_configuration,
             per_turn_config,
@@ -3665,6 +3702,7 @@ impl Session {
         item: TurnItem,
     ) {
         let is_context_compaction = matches!(item, TurnItem::ContextCompaction(_));
+        record_turn_ttfm_metric(turn_context, &item).await;
         self.send_event(
             turn_context,
             EventMsg::ItemCompleted(ItemCompletedEvent {
@@ -3850,8 +3888,9 @@ impl Session {
     /// Emit an exec approval request event and await the user's decision.
     ///
     /// The request is keyed by `call_id` + `approval_id` so matching responses
-    /// are delivered to the correct in-flight turn. If the task is aborted,
-    /// this returns the default `ReviewDecision` (`Denied`).
+    /// are delivered to the correct in-flight turn. If the pending approval is
+    /// cleared before a response arrives, treat it as an abort so interrupted
+    /// turns do not continue on a synthetic denial.
     ///
     /// Note that if `available_decisions` is `None`, then the other fields will
     /// be used to derive the available decisions via
@@ -3868,6 +3907,7 @@ impl Session {
         network_approval_context: Option<NetworkApprovalContext>,
         proposed_execpolicy_amendment: Option<ExecPolicyAmendment>,
         additional_permissions: Option<PermissionProfile>,
+        skill_metadata: Option<ExecApprovalRequestSkillMetadata>,
         available_decisions: Option<Vec<ReviewDecision>>,
     ) -> ReviewDecision {
         //  command-level approvals use `call_id`.
@@ -3921,11 +3961,12 @@ impl Session {
             proposed_execpolicy_amendment,
             proposed_network_policy_amendments,
             additional_permissions,
+            skill_metadata,
             available_decisions: Some(available_decisions),
             parsed_cmd,
         });
         self.send_event(turn_context, event).await;
-        rx_approve.await.unwrap_or_default()
+        rx_approve.await.unwrap_or(ReviewDecision::Abort)
     }
 
     pub async fn request_patch_approval(
@@ -3964,6 +4005,37 @@ impl Session {
         rx_approve
     }
 
+    pub async fn request_permissions(
+        &self,
+        turn_context: &TurnContext,
+        call_id: String,
+        args: RequestPermissionsArgs,
+    ) -> Option<RequestPermissionsResponse> {
+        let (tx_response, rx_response) = oneshot::channel();
+        let prev_entry = {
+            let mut active = self.active_turn.lock().await;
+            match active.as_mut() {
+                Some(at) => {
+                    let mut ts = at.turn_state.lock().await;
+                    ts.insert_pending_request_permissions(call_id.clone(), tx_response)
+                }
+                None => None,
+            }
+        };
+        if prev_entry.is_some() {
+            warn!("Overwriting existing pending request_permissions for call_id: {call_id}");
+        }
+
+        let event = EventMsg::RequestPermissions(RequestPermissionsEvent {
+            call_id,
+            turn_id: turn_context.sub_id.clone(),
+            reason: args.reason,
+            permissions: args.permissions,
+        });
+        self.send_event(turn_context, event).await;
+        rx_response.await.ok()
+    }
+
     pub async fn request_user_input(
         &self,
         turn_context: &TurnContext,
@@ -3996,6 +4068,85 @@ impl Session {
         rx_response.await.ok()
     }
 
+    pub async fn request_mcp_server_elicitation(
+        &self,
+        turn_context: &TurnContext,
+        request_id: RequestId,
+        params: McpServerElicitationRequestParams,
+    ) -> Option<ElicitationResponse> {
+        let server_name = params.server_name.clone();
+        let request = match params.request {
+            McpServerElicitationRequest::Form {
+                meta,
+                message,
+                requested_schema,
+            } => {
+                let requested_schema = match serde_json::to_value(requested_schema) {
+                    Ok(requested_schema) => requested_schema,
+                    Err(err) => {
+                        warn!(
+                            "failed to serialize MCP elicitation schema for server_name: {server_name}, request_id: {request_id}: {err:#}"
+                        );
+                        return None;
+                    }
+                };
+                codex_protocol::approvals::ElicitationRequest::Form {
+                    meta,
+                    message,
+                    requested_schema,
+                }
+            }
+            McpServerElicitationRequest::Url {
+                meta,
+                message,
+                url,
+                elicitation_id,
+            } => codex_protocol::approvals::ElicitationRequest::Url {
+                meta,
+                message,
+                url,
+                elicitation_id,
+            },
+        };
+
+        let (tx_response, rx_response) = oneshot::channel();
+        let prev_entry = {
+            let mut active = self.active_turn.lock().await;
+            match active.as_mut() {
+                Some(at) => {
+                    let mut ts = at.turn_state.lock().await;
+                    ts.insert_pending_elicitation(
+                        server_name.clone(),
+                        request_id.clone(),
+                        tx_response,
+                    )
+                }
+                None => None,
+            }
+        };
+        if prev_entry.is_some() {
+            warn!(
+                "Overwriting existing pending elicitation for server_name: {server_name}, request_id: {request_id}"
+            );
+        }
+        let id = match request_id {
+            rmcp::model::NumberOrString::String(value) => {
+                codex_protocol::mcp::RequestId::String(value.to_string())
+            }
+            rmcp::model::NumberOrString::Number(value) => {
+                codex_protocol::mcp::RequestId::Integer(value)
+            }
+        };
+        let event = EventMsg::ElicitationRequest(ElicitationRequestEvent {
+            turn_id: params.turn_id,
+            server_name,
+            id,
+            request,
+        });
+        self.send_event(turn_context, event).await;
+        rx_response.await.ok()
+    }
+
     pub async fn notify_user_input_response(
         &self,
         sub_id: &str,
@@ -4019,6 +4170,42 @@ impl Session {
                 warn!("No pending user input found for sub_id: {sub_id}");
             }
         }
+    }
+
+    pub async fn notify_request_permissions_response(
+        &self,
+        call_id: &str,
+        response: RequestPermissionsResponse,
+    ) {
+        let entry = {
+            let mut active = self.active_turn.lock().await;
+            match active.as_mut() {
+                Some(at) => {
+                    let mut ts = at.turn_state.lock().await;
+                    let entry = ts.remove_pending_request_permissions(call_id);
+                    if entry.is_some() && !response.permissions.is_empty() {
+                        ts.record_granted_permissions(response.permissions.clone());
+                    }
+                    entry
+                }
+                None => None,
+            }
+        };
+        match entry {
+            Some(tx_response) => {
+                tx_response.send(response).ok();
+            }
+            None => {
+                warn!("No pending request_permissions found for call_id: {call_id}");
+            }
+        }
+    }
+
+    pub(crate) async fn granted_turn_permissions(&self) -> Option<PermissionProfile> {
+        let active = self.active_turn.lock().await;
+        let active = active.as_ref()?;
+        let ts = active.turn_state.lock().await;
+        ts.granted_permissions()
     }
 
     pub async fn notify_dynamic_tool_response(&self, call_id: &str, response: DynamicToolResponse) {
@@ -4069,6 +4256,23 @@ impl Session {
         id: RequestId,
         response: ElicitationResponse,
     ) -> anyhow::Result<()> {
+        let entry = {
+            let mut active = self.active_turn.lock().await;
+            match active.as_mut() {
+                Some(at) => {
+                    let mut ts = at.turn_state.lock().await;
+                    ts.remove_pending_elicitation(&server_name, &id)
+                }
+                None => None,
+            }
+        };
+        if let Some(tx_response) = entry {
+            tx_response
+                .send(response)
+                .map_err(|e| anyhow::anyhow!("failed to send elicitation response: {e:?}"))?;
+            return Ok(());
+        }
+
         self.services
             .mcp_connection_manager
             .read()
@@ -4101,7 +4305,7 @@ impl Session {
 
     pub(crate) async fn record_model_warning(&self, message: impl Into<String>, ctx: &TurnContext) {
         self.services
-            .otel_manager
+            .session_telemetry
             .counter("codex.model_warning", 1, &[]);
         let item = ResponseItem::Message {
             id: None,
@@ -5045,6 +5249,10 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                     handlers::request_user_input_response(&sess, id, response).await;
                     false
                 }
+                Op::RequestPermissionsResponse { id, response } => {
+                    handlers::request_permissions_response(&sess, id, response).await;
+                    false
+                }
                 Op::DynamicToolResponse { id, response } => {
                     handlers::dynamic_tool_response(&sess, id, response).await;
                     false
@@ -5138,6 +5346,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                     request_id,
                     decision,
                     content,
+                    meta,
                 } => {
                     handlers::resolve_elicitation(
                         &sess,
@@ -5145,6 +5354,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                         request_id,
                         decision,
                         content,
+                        meta,
                     )
                     .await;
                     false
@@ -5198,6 +5408,7 @@ mod handlers {
     use crate::mcp::auth::compute_auth_statuses;
     use crate::mcp::collect_mcp_snapshot_from_manager;
     use crate::review_prompts::resolve_review_request;
+    use crate::rollout::RolloutRecorder;
     use crate::rollout::session_index;
     use crate::tasks::CompactTask;
     use crate::tasks::UndoTask;
@@ -5220,11 +5431,13 @@ mod handlers {
     use codex_protocol::protocol::RemoteSkillSummary;
     use codex_protocol::protocol::ReviewDecision;
     use codex_protocol::protocol::ReviewRequest;
+    use codex_protocol::protocol::RolloutItem;
     use codex_protocol::protocol::SkillsListEntry;
     use codex_protocol::protocol::ThreadNameUpdatedEvent;
     use codex_protocol::protocol::ThreadRolledBackEvent;
     use codex_protocol::protocol::TurnAbortReason;
     use codex_protocol::protocol::WarningEvent;
+    use codex_protocol::request_permissions::RequestPermissionsResponse;
     use codex_protocol::request_user_input::RequestUserInputResponse;
 
     use crate::context_manager::is_user_turn_boundary;
@@ -5413,10 +5626,9 @@ mod handlers {
 
     fn build_nero_auto_turn_booster(turn_id: &str, source: &str) -> String {
         format!(
-            "{tag} stage=activation_boost turn_id={turn_id} source={source}]\n\
+            "{NERO_AUTO_TURN_BOOST_TAG_PREFIX} stage=activation_boost turn_id={turn_id} source={source}]\n\
 NERO-HOOK-AUTO bootstrap: auto runtime is enabled for this turn.\n\
-In your final assistant response include the auto protocol JSON block required by runtime hooks.",
-            tag = NERO_AUTO_TURN_BOOST_TAG_PREFIX
+In your final assistant response include the auto protocol JSON block required by runtime hooks."
         )
     }
 
@@ -5476,7 +5688,7 @@ In your final assistant response include the auto protocol JSON block required b
             let detail = response
                 .message
                 .clone()
-                .or(response.error.clone())
+                .or(response.error)
                 .unwrap_or_else(|| "runtime bridge read failed".to_string());
             warn!("runtime bridge read reported failure for auto-turn booster: {detail}");
             return None;
@@ -5486,78 +5698,6 @@ In your final assistant response include the auto protocol JSON block required b
         }
         let source = response.effective.source.trim();
         Some(build_nero_auto_turn_booster(&turn_context.sub_id, source))
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        fn sample_bridge_response(
-            enabled: bool,
-            source: &str,
-            is_subagent: bool,
-            auto_rounds: usize,
-        ) -> NeroAutoBridgeReadResponse {
-            NeroAutoBridgeReadResponse {
-                ok: true,
-                error: None,
-                message: None,
-                is_subagent,
-                effective: NeroAutoBridgeEffective {
-                    enabled,
-                    source: source.to_string(),
-                    auto_rounds,
-                },
-            }
-        }
-
-        #[test]
-        fn developer_instructions_auto_marker_detection_is_stable() {
-            assert!(developer_instructions_have_auto_path(Some(
-                "... NERO_AUTO_V1 ..."
-            )));
-            assert!(developer_instructions_have_auto_path(Some(
-                "... scoring_system ..."
-            )));
-            assert!(!developer_instructions_have_auto_path(Some(
-                "plain instructions"
-            )));
-            assert!(!developer_instructions_have_auto_path(None));
-        }
-
-        #[test]
-        fn turn_booster_tag_contains_machine_parseable_marker() {
-            let text = build_nero_auto_turn_booster("turn-123", "session-override");
-            assert!(text.contains("[nero-hook-auto-boost"));
-            assert!(text.contains("stage=activation_boost"));
-            assert!(text.contains("turn_id=turn-123"));
-            assert!(text.contains("source=session-override"));
-        }
-
-        #[test]
-        fn bridge_response_shapes_for_booster_preconditions_are_explicit() {
-            let enabled = sample_bridge_response(true, "session-override", false, 0);
-            assert!(enabled.effective.enabled);
-            assert_eq!(enabled.effective.source, "session-override");
-            assert_eq!(enabled.effective.auto_rounds, 0);
-            assert!(!enabled.is_subagent);
-
-            let subagent = sample_bridge_response(true, "subagent-forced-off", true, 0);
-            assert!(subagent.is_subagent);
-            assert_eq!(subagent.effective.source, "subagent-forced-off");
-        }
-
-        #[test]
-        fn booster_injection_requires_session_override_boundary() {
-            let boundary = sample_bridge_response(true, "session-override", false, 0);
-            assert!(should_inject_nero_auto_turn_booster(&boundary));
-
-            let later_round = sample_bridge_response(true, "session-override", false, 2);
-            assert!(!should_inject_nero_auto_turn_booster(&later_round));
-
-            let default_source = sample_bridge_response(true, "config-default", false, 0);
-            assert!(!should_inject_nero_auto_turn_booster(&default_source));
-        }
     }
 
     pub async fn interrupt(sess: &Arc<Session>) {
@@ -5647,7 +5787,7 @@ In your final assistant response include the auto protocol JSON block required b
         };
         sess.maybe_emit_unknown_model_warning_for_turn(current_context.as_ref())
             .await;
-        current_context.otel_manager.user_prompt(&items);
+        current_context.session_telemetry.user_prompt(&items);
 
         // Attempt to inject input into current task.
         if let Err(SteerInputError::NoActiveTurn(items)) = sess.steer_input(items, None).await {
@@ -5703,6 +5843,7 @@ In your final assistant response include the auto protocol JSON block required b
         request_id: ProtocolRequestId,
         decision: codex_protocol::approvals::ElicitationAction,
         content: Option<Value>,
+        meta: Option<Value>,
     ) {
         let action = match decision {
             codex_protocol::approvals::ElicitationAction::Accept => ElicitationAction::Accept,
@@ -5714,7 +5855,11 @@ In your final assistant response include the auto protocol JSON block required b
             ElicitationAction::Accept => Some(content.unwrap_or_else(|| serde_json::json!({}))),
             ElicitationAction::Decline | ElicitationAction::Cancel => None,
         };
-        let response = ElicitationResponse { action, content };
+        let response = ElicitationResponse {
+            action,
+            content,
+            meta,
+        };
         let request_id = match request_id {
             ProtocolRequestId::String(value) => {
                 rmcp::model::NumberOrString::String(std::sync::Arc::from(value))
@@ -5791,6 +5936,15 @@ In your final assistant response include the auto protocol JSON block required b
         response: RequestUserInputResponse,
     ) {
         sess.notify_user_input_response(&id, response).await;
+    }
+
+    pub async fn request_permissions_response(
+        sess: &Arc<Session>,
+        id: String,
+        response: RequestPermissionsResponse,
+    ) {
+        sess.notify_request_permissions_response(&id, response)
+            .await;
     }
 
     pub async fn dynamic_tool_response(
@@ -6132,25 +6286,86 @@ In your final assistant response include the auto protocol JSON block required b
         }
 
         let turn_context = sess.new_default_turn_with_sub_id(sub_id).await;
+        let rollout_path = {
+            let recorder = {
+                let guard = sess.services.rollout.lock().await;
+                guard.clone()
+            };
+            let Some(recorder) = recorder else {
+                sess.send_event_raw(Event {
+                    id: turn_context.sub_id.clone(),
+                    msg: EventMsg::Error(ErrorEvent {
+                        message: "thread rollback requires a persisted rollout path".to_string(),
+                        codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
+                    }),
+                })
+                .await;
+                return;
+            };
+            recorder.rollout_path().to_path_buf()
+        };
+        if let Some(recorder) = {
+            let guard = sess.services.rollout.lock().await;
+            guard.clone()
+        } && let Err(err) = recorder.flush().await
+        {
+            sess.send_event_raw(Event {
+                id: turn_context.sub_id.clone(),
+                msg: EventMsg::Error(ErrorEvent {
+                    message: format!(
+                        "failed to flush rollout `{}` for rollback replay: {err}",
+                        rollout_path.display()
+                    ),
+                    codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
+                }),
+            })
+            .await;
+            return;
+        }
 
-        let mut history = sess.clone_history().await;
-        // TODO(ccunningham): Fix rollback/backtracking baseline handling.
-        // We clear `reference_context_item` here, but should restore the
-        // post-rollback baseline from the surviving history/rollout instead.
-        // Truncating history should also invalidate/recompute `previous_turn_settings`
-        // so the next regular turn replays any dropped model/realtime
-        // instructions.
-        history.drop_last_n_user_turns(num_turns);
+        let initial_history =
+            match RolloutRecorder::get_rollout_history(rollout_path.as_path()).await {
+                Ok(history) => history,
+                Err(err) => {
+                    sess.send_event_raw(Event {
+                        id: turn_context.sub_id.clone(),
+                        msg: EventMsg::Error(ErrorEvent {
+                            message: format!(
+                                "failed to load rollout `{}` for rollback replay: {err}",
+                                rollout_path.display()
+                            ),
+                            codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
+                        }),
+                    })
+                    .await;
+                    return;
+                }
+            };
 
-        // Replace with the raw items. We don't want to replace with a normalized
-        // version of the history.
-        sess.replace_history(history.raw_items().to_vec(), None)
+        let rollback_event = ThreadRolledBackEvent { num_turns };
+        let replay_items = initial_history
+            .get_rollout_items()
+            .into_iter()
+            .chain(std::iter::once(RolloutItem::EventMsg(
+                EventMsg::ThreadRolledBack(rollback_event.clone()),
+            )))
+            .collect::<Vec<_>>();
+
+        let reconstructed = sess
+            .reconstruct_history_from_rollout(turn_context.as_ref(), replay_items.as_slice())
+            .await;
+        sess.replace_history(
+            reconstructed.history,
+            reconstructed.reference_context_item.clone(),
+        )
+        .await;
+        sess.set_previous_turn_settings(reconstructed.previous_turn_settings)
             .await;
         sess.recompute_token_usage(turn_context.as_ref()).await;
 
         sess.send_event_raw_flushed(Event {
             id: turn_context.sub_id.clone(),
-            msg: EventMsg::ThreadRolledBack(ThreadRolledBackEvent { num_turns }),
+            msg: EventMsg::ThreadRolledBack(rollback_event),
         })
         .await;
     }
@@ -6235,7 +6450,7 @@ In your final assistant response include the auto protocol JSON block required b
             .iter()
             .filter(|item| is_user_turn_boundary(item))
             .count();
-        sess.services.otel_manager.counter(
+        sess.services.session_telemetry.counter(
             "codex.conversation.turn.count",
             i64::try_from(turn_count).unwrap_or(0),
             &[],
@@ -6302,6 +6517,78 @@ In your final assistant response include the auto protocol JSON block required b
             }
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn sample_bridge_response(
+            enabled: bool,
+            source: &str,
+            is_subagent: bool,
+            auto_rounds: usize,
+        ) -> NeroAutoBridgeReadResponse {
+            NeroAutoBridgeReadResponse {
+                ok: true,
+                error: None,
+                message: None,
+                is_subagent,
+                effective: NeroAutoBridgeEffective {
+                    enabled,
+                    source: source.to_string(),
+                    auto_rounds,
+                },
+            }
+        }
+
+        #[test]
+        fn developer_instructions_auto_marker_detection_is_stable() {
+            assert!(developer_instructions_have_auto_path(Some(
+                "... NERO_AUTO_V1 ..."
+            )));
+            assert!(developer_instructions_have_auto_path(Some(
+                "... scoring_system ..."
+            )));
+            assert!(!developer_instructions_have_auto_path(Some(
+                "plain instructions"
+            )));
+            assert!(!developer_instructions_have_auto_path(None));
+        }
+
+        #[test]
+        fn turn_booster_tag_contains_machine_parseable_marker() {
+            let text = build_nero_auto_turn_booster("turn-123", "session-override");
+            assert!(text.contains("[nero-hook-auto-boost"));
+            assert!(text.contains("stage=activation_boost"));
+            assert!(text.contains("turn_id=turn-123"));
+            assert!(text.contains("source=session-override"));
+        }
+
+        #[test]
+        fn bridge_response_shapes_for_booster_preconditions_are_explicit() {
+            let enabled = sample_bridge_response(true, "session-override", false, 0);
+            assert!(enabled.effective.enabled);
+            assert_eq!(enabled.effective.source, "session-override");
+            assert_eq!(enabled.effective.auto_rounds, 0);
+            assert!(!enabled.is_subagent);
+
+            let subagent = sample_bridge_response(true, "subagent-forced-off", true, 0);
+            assert!(subagent.is_subagent);
+            assert_eq!(subagent.effective.source, "subagent-forced-off");
+        }
+
+        #[test]
+        fn booster_injection_requires_session_override_boundary() {
+            let boundary = sample_bridge_response(true, "session-override", false, 0);
+            assert!(should_inject_nero_auto_turn_booster(&boundary));
+
+            let later_round = sample_bridge_response(true, "session-override", false, 2);
+            assert!(!should_inject_nero_auto_turn_booster(&later_round));
+
+            let default_source = sample_bridge_response(true, "config-default", false, 0);
+            assert!(!should_inject_nero_auto_turn_booster(&default_source));
+        }
+    }
 }
 
 /// Spawn a review thread using the given prompt.
@@ -6332,6 +6619,7 @@ async fn spawn_review_thread(
         web_search_mode: Some(review_web_search_mode),
         session_source: parent_turn_context.session_source.clone(),
     })
+    .with_web_search_config(None)
     .with_allow_login_shell(config.permissions.allow_login_shell)
     .with_agent_roles(config.agent_roles.clone());
 
@@ -6354,13 +6642,13 @@ async fn spawn_review_thread(
         );
     }
 
-    let otel_manager = parent_turn_context
-        .otel_manager
+    let session_telemetry = parent_turn_context
+        .session_telemetry
         .clone()
         .with_model(model.as_str(), review_model_info.slug.as_str());
     let auth_manager_for_context = auth_manager.clone();
     let provider_for_context = provider.clone();
-    let otel_manager_for_context = otel_manager.clone();
+    let session_telemetry_for_context = session_telemetry.clone();
     let reasoning_effort = per_turn_config.model_reasoning_effort;
     let reasoning_summary = per_turn_config
         .model_reasoning_summary
@@ -6386,7 +6674,7 @@ async fn spawn_review_thread(
         config: per_turn_config,
         auth_manager: auth_manager_for_context,
         model_info: model_info.clone(),
-        otel_manager: otel_manager_for_context,
+        session_telemetry: session_telemetry_for_context,
         provider: provider_for_context,
         reasoning_effort,
         reasoning_summary,
@@ -6405,6 +6693,8 @@ async fn spawn_review_thread(
         personality: parent_turn_context.personality,
         approval_policy: parent_turn_context.approval_policy.clone(),
         sandbox_policy: parent_turn_context.sandbox_policy.clone(),
+        file_system_sandbox_policy: parent_turn_context.file_system_sandbox_policy.clone(),
+        network_sandbox_policy: parent_turn_context.network_sandbox_policy,
         network: parent_turn_context.network.clone(),
         windows_sandbox_level: parent_turn_context.windows_sandbox_level,
         shell_environment_policy: parent_turn_context.shell_environment_policy.clone(),
@@ -6417,6 +6707,7 @@ async fn spawn_review_thread(
         truncation_policy: model_info.truncation_policy.into(),
         turn_metadata_state,
         turn_skills: TurnSkillsContext::new(parent_turn_context.turn_skills.outcome.clone()),
+        turn_timing_state: Arc::new(TurnTimingState::default()),
     };
 
     // Seed the child task with the review prompt as the initial user message.
@@ -6549,7 +6840,7 @@ pub(crate) async fn run_turn(
         .services
         .plugins_manager
         .plugins_for_config(&turn_context.config);
-    // Plain-text @plugin mentions are resolved from the current session's
+    // Structured plugin:// mentions are resolved from the current session's
     // enabled plugins, then converted into turn-scoped guidance below.
     let mentioned_plugins =
         collect_explicit_plugin_mentions(&input, loaded_plugins.capability_summaries());
@@ -6612,7 +6903,7 @@ pub(crate) async fn run_turn(
     )
     .await;
 
-    let otel_manager = turn_context.otel_manager.clone();
+    let session_telemetry = turn_context.session_telemetry.clone();
     let thread_id = sess.conversation_id.to_string();
     let tracking = build_track_events_context(
         turn_context.model_info.slug.clone(),
@@ -6624,7 +6915,7 @@ pub(crate) async fn run_turn(
         warnings: skill_warnings,
     } = build_skill_injections(
         &mentioned_skills,
-        Some(&otel_manager),
+        Some(&session_telemetry),
         &sess.services.analytics_events_client,
         tracking.clone(),
     )
@@ -6644,7 +6935,7 @@ pub(crate) async fn run_turn(
         &available_connectors,
         &skill_name_counts_lower,
     ));
-    // Explicit @plugin mentions can make a plugin's enabled apps callable for
+    // Explicit plugin mentions can make a plugin's enabled apps callable for
     // this turn without persisting those connectors as sticky user selections.
     let mut turn_enabled_connectors = explicitly_enabled_connectors.clone();
     turn_enabled_connectors.extend(
@@ -7595,7 +7886,7 @@ pub(crate) async fn run_turn(
                                     "Model fallback exhausted: all configured models are unavailable or cooling down (max_wait_seconds={}). Last provider error: {e}",
                                     model_fallback.max_wait_seconds
                                 );
-                                sess.services.otel_manager.counter(
+                                sess.services.session_telemetry.counter(
                                     "codex.nero.model_fallback.exhausted",
                                     1,
                                     &[],
@@ -7994,8 +8285,10 @@ async fn run_sampling_request(
         // Use the configured provider-specific stream retry budget.
         let max_retries = turn_context.provider.stream_max_retries();
         if retries >= max_retries
-            && client_session
-                .try_switch_fallback_transport(&turn_context.otel_manager, &turn_context.model_info)
+            && client_session.try_switch_fallback_transport(
+                &turn_context.session_telemetry,
+                &turn_context.model_info,
+            )
         {
             sess.send_event(
                 &turn_context,
@@ -8347,6 +8640,7 @@ fn realtime_text_for_event(msg: &EventMsg) -> Option<String> {
         | EventMsg::ImageGenerationBegin(_)
         | EventMsg::ImageGenerationEnd(_)
         | EventMsg::ExecApprovalRequest(_)
+        | EventMsg::RequestPermissions(_)
         | EventMsg::RequestUserInput(_)
         | EventMsg::DynamicToolCallRequest(_)
         | EventMsg::DynamicToolCallResponse(_)
@@ -8626,7 +8920,9 @@ async fn handle_assistant_item_done_in_plan_mode(
     {
         maybe_complete_plan_item_from_message(sess, turn_context, state, item).await;
 
-        if let Some(turn_item) = handle_non_tool_response_item(item, true) {
+        if let Some(turn_item) =
+            handle_non_tool_response_item(item, true, Some(&turn_context.cwd)).await
+        {
             emit_turn_item_in_plan_mode(
                 sess,
                 turn_context,
@@ -8709,7 +9005,7 @@ async fn try_run_sampling_request(
             .stream(
                 prompt,
                 &turn_context.model_info,
-                &turn_context.otel_manager,
+                &turn_context.session_telemetry,
                 turn_context.reasoning_effort,
                 turn_context.reasoning_summary,
                 turn_context.config.service_tier,
@@ -8736,7 +9032,6 @@ async fn try_run_sampling_request(
                 tool_name = field::Empty,
                 from = field::Empty,
             );
-
             let event = match stream
                 .next()
                 .instrument(trace_span!(parent: &handle_responses, "receiving"))
@@ -8772,8 +9067,9 @@ async fn try_run_sampling_request(
             };
 
             sess.services
-                .otel_manager
+                .session_telemetry
                 .record_responses(&handle_responses, &event);
+            record_turn_ttft_metric(&turn_context, &event).await;
 
             match event {
                 ResponseEvent::Created => {}
@@ -8828,7 +9124,10 @@ async fn try_run_sampling_request(
                 }
                 ResponseEvent::OutputItemAdded(item) => {
                     saw_response_output = true;
-                    if let Some(turn_item) = handle_non_tool_response_item(&item, plan_mode) {
+                    if let Some(turn_item) =
+                        handle_non_tool_response_item(&item, plan_mode, Some(&turn_context.cwd))
+                            .await
+                    {
                         let mut turn_item = turn_item;
                         let mut seeded_parsed: Option<ParsedAssistantTextDelta> = None;
                         let mut seeded_item_id: Option<String> = None;
@@ -9018,6 +9317,10 @@ async fn try_run_sampling_request(
         .await;
 
         drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?;
+
+        if cancellation_token.is_cancelled() {
+            return Err(CodexErr::TurnAborted);
+        }
 
         if should_emit_turn_diff {
             let unified_diff = {
@@ -10252,6 +10555,8 @@ mod tests {
             compact_prompt: config.compact_prompt.clone(),
             approval_policy: config.permissions.approval_policy.clone(),
             sandbox_policy: config.permissions.sandbox_policy.clone(),
+            file_system_sandbox_policy: config.permissions.file_system_sandbox_policy.clone(),
+            network_sandbox_policy: config.permissions.network_sandbox_policy,
             windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
             cwd: config.cwd.clone(),
             codex_home: config.codex_home.clone(),
@@ -10348,6 +10653,8 @@ mod tests {
             compact_prompt: config.compact_prompt.clone(),
             approval_policy: config.permissions.approval_policy.clone(),
             sandbox_policy: config.permissions.sandbox_policy.clone(),
+            file_system_sandbox_policy: config.permissions.file_system_sandbox_policy.clone(),
+            network_sandbox_policy: config.permissions.network_sandbox_policy,
             windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
             cwd: config.cwd.clone(),
             codex_home: config.codex_home.clone(),
@@ -10624,13 +10931,13 @@ mod tests {
             .expect("load default test config")
     }
 
-    fn otel_manager(
+    fn session_telemetry(
         conversation_id: ThreadId,
         config: &Config,
         model_info: &ModelInfo,
         session_source: SessionSource,
-    ) -> OtelManager {
-        OtelManager::new(
+    ) -> SessionTelemetry {
+        SessionTelemetry::new(
             conversation_id,
             ModelsManager::get_model_offline_for_tests(config.model.as_deref()).as_str(),
             model_info.slug.as_str(),
@@ -10675,6 +10982,8 @@ mod tests {
             compact_prompt: config.compact_prompt.clone(),
             approval_policy: config.permissions.approval_policy.clone(),
             sandbox_policy: config.permissions.sandbox_policy.clone(),
+            file_system_sandbox_policy: config.permissions.file_system_sandbox_policy.clone(),
+            network_sandbox_policy: config.permissions.network_sandbox_policy,
             windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
             cwd: config.cwd.clone(),
             codex_home: config.codex_home.clone(),
@@ -10788,6 +11097,8 @@ mod tests {
             compact_prompt: config.compact_prompt.clone(),
             approval_policy: config.permissions.approval_policy.clone(),
             sandbox_policy: config.permissions.sandbox_policy.clone(),
+            file_system_sandbox_policy: config.permissions.file_system_sandbox_policy.clone(),
+            network_sandbox_policy: config.permissions.network_sandbox_policy,
             windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
             cwd: config.cwd.clone(),
             codex_home: config.codex_home.clone(),
@@ -10884,6 +11195,8 @@ mod tests {
             compact_prompt: config.compact_prompt.clone(),
             approval_policy: config.permissions.approval_policy.clone(),
             sandbox_policy: config.permissions.sandbox_policy.clone(),
+            file_system_sandbox_policy: config.permissions.file_system_sandbox_policy.clone(),
+            network_sandbox_policy: config.permissions.network_sandbox_policy,
             windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
             cwd: config.cwd.clone(),
             codex_home: config.codex_home.clone(),
@@ -10903,7 +11216,7 @@ mod tests {
             session_configuration.collaboration_mode.model(),
             &per_turn_config,
         );
-        let otel_manager = otel_manager(
+        let session_telemetry = session_telemetry(
             conversation_id,
             config.as_ref(),
             &model_info,
@@ -10945,7 +11258,7 @@ mod tests {
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
             exec_policy,
             auth_manager: auth_manager.clone(),
-            otel_manager: otel_manager.clone(),
+            session_telemetry: session_telemetry.clone(),
             models_manager: Arc::clone(&models_manager),
             tool_approvals: Mutex::new(ApprovalStore::default()),
             execve_session_approvals: RwLock::new(HashMap::new()),
@@ -10982,7 +11295,7 @@ mod tests {
         );
         let turn_context = Session::make_turn_context(
             Some(Arc::clone(&auth_manager)),
-            &otel_manager,
+            &session_telemetry,
             session_configuration.provider.clone(),
             &session_configuration,
             per_turn_config,
@@ -11305,6 +11618,8 @@ mod tests {
             compact_prompt: config.compact_prompt.clone(),
             approval_policy: config.permissions.approval_policy.clone(),
             sandbox_policy: config.permissions.sandbox_policy.clone(),
+            file_system_sandbox_policy: config.permissions.file_system_sandbox_policy.clone(),
+            network_sandbox_policy: config.permissions.network_sandbox_policy,
             windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
             cwd: config.cwd.clone(),
             codex_home: config.codex_home.clone(),
@@ -11324,7 +11639,7 @@ mod tests {
             session_configuration.collaboration_mode.model(),
             &per_turn_config,
         );
-        let otel_manager = otel_manager(
+        let session_telemetry = session_telemetry(
             conversation_id,
             config.as_ref(),
             &model_info,
@@ -11366,7 +11681,7 @@ mod tests {
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
             exec_policy,
             auth_manager: Arc::clone(&auth_manager),
-            otel_manager: otel_manager.clone(),
+            session_telemetry: session_telemetry.clone(),
             models_manager: Arc::clone(&models_manager),
             tool_approvals: Mutex::new(ApprovalStore::default()),
             execve_session_approvals: RwLock::new(HashMap::new()),
@@ -11403,7 +11718,7 @@ mod tests {
         );
         let turn_context = Arc::new(Session::make_turn_context(
             Some(Arc::clone(&auth_manager)),
-            &otel_manager,
+            &session_telemetry,
             session_configuration.provider.clone(),
             &session_configuration,
             per_turn_config,

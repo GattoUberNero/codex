@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "deleted": {
+      "type": "boolean"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "deleted",
+    "threadId"
+  ],
+  "title": "ThreadRolloutBackupDeleteResponse",
+  "type": "object"
+}

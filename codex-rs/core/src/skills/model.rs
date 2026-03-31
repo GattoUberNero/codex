@@ -293,12 +293,8 @@ mod tests {
                 allow_implicit_invocation: Some(true),
                 agent_filter_mode,
                 allow_agent_whitelist,
-                allowed_agent_types: allowed_agent_types.map(|types| {
-                    types
-                        .into_iter()
-                        .map(|value| value.to_ascii_lowercase())
-                        .collect()
-                }),
+                allowed_agent_types: allowed_agent_types
+                    .map(|types| types.into_iter().map(str::to_ascii_lowercase).collect()),
             }),
             permission_profile: None,
             path_to_skills_md: PathBuf::from(path),
@@ -572,7 +568,7 @@ mod tests {
                 local_mode: SkillAgentFilterMode::AllowAll,
                 explicit_mode: SkillAgentFilterMode::DenyAll,
             },
-            explicit_skill_paths: HashSet::from([local_skill.path_to_skills_md.clone()]),
+            explicit_skill_paths: HashSet::from([local_skill.path_to_skills_md]),
             implicit_skills_by_scripts_dir: Arc::new(HashMap::new()),
             implicit_skills_by_doc_path: Arc::new(HashMap::new()),
         };

@@ -1,0 +1,394 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "SessionSource": {
+      "oneOf": [
+        {
+          "enum": [
+            "cli",
+            "vscode",
+            "exec",
+            "appServer",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "subAgent": {
+              "$ref": "#/definitions/SubAgentSource"
+            }
+          },
+          "required": [
+            "subAgent"
+          ],
+          "title": "SubAgentSessionSource",
+          "type": "object"
+        }
+      ]
+    },
+    "SubAgentSource": {
+      "oneOf": [
+        {
+          "enum": [
+            "review",
+            "compact",
+            "memory_consolidation"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "thread_spawn": {
+              "properties": {
+                "agent_nickname": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "agent_role": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "depth": {
+                  "format": "int32",
+                  "type": "integer"
+                },
+                "parent_thread_id": {
+                  "$ref": "#/definitions/ThreadId"
+                }
+              },
+              "required": [
+                "depth",
+                "parent_thread_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "thread_spawn"
+          ],
+          "title": "ThreadSpawnSubAgentSource",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "other": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "other"
+          ],
+          "title": "OtherSubAgentSource",
+          "type": "object"
+        }
+      ]
+    },
+    "ThreadId": {
+      "type": "string"
+    },
+    "ThreadRolloutAnalyzeResponseSchema": {
+      "properties": {
+        "analysisFingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "archived": {
+          "type": "boolean"
+        },
+        "backup": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadRolloutBackupInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "blockers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "eligible": {
+          "type": "boolean"
+        },
+        "forkedFromId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isSubagent": {
+          "type": "boolean"
+        },
+        "loaded": {
+          "type": "boolean"
+        },
+        "rolloutPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stats": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadRolloutStats"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "threadName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trim": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadRolloutTrimPreview"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "archived",
+        "blockers",
+        "eligible",
+        "isSubagent",
+        "loaded",
+        "threadId",
+        "warnings"
+      ],
+      "type": "object"
+    },
+    "ThreadRolloutBackupInfo": {
+      "properties": {
+        "actualTailStartLine": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "analysisFingerprint": {
+          "type": "string"
+        },
+        "backupRolloutPath": {
+          "type": "string"
+        },
+        "backupRoot": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "manifestPath": {
+          "type": "string"
+        },
+        "originalRolloutPath": {
+          "type": "string"
+        },
+        "originalTotalBytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "originalTotalLines": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "protectedHeadEndLine": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "requestedTailLines": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "trimmedTotalBytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "trimmedTotalLines": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "actualTailStartLine",
+        "analysisFingerprint",
+        "backupRolloutPath",
+        "backupRoot",
+        "createdAt",
+        "manifestPath",
+        "originalRolloutPath",
+        "originalTotalBytes",
+        "originalTotalLines",
+        "protectedHeadEndLine",
+        "requestedTailLines",
+        "trimmedTotalBytes",
+        "trimmedTotalLines"
+      ],
+      "type": "object"
+    },
+    "ThreadRolloutStats": {
+      "properties": {
+        "parseErrors": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "totalBytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "totalLines": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "parseErrors",
+        "totalBytes",
+        "totalLines"
+      ],
+      "type": "object"
+    },
+    "ThreadRolloutTrimPreview": {
+      "properties": {
+        "actualTailStartLine": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "compactionAnchorLine": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "estimatedRemovedBytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "preservedTailLines": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "protectedHeadEndLine": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "removedMiddleEndLine": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "removedMiddleLines": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "removedMiddleStartLine": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "requestedTailLines": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "requestedTailStartLine": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "actualTailStartLine",
+        "estimatedRemovedBytes",
+        "preservedTailLines",
+        "protectedHeadEndLine",
+        "removedMiddleLines",
+        "requestedTailLines",
+        "requestedTailStartLine"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "analysis": {
+      "$ref": "#/definitions/ThreadRolloutAnalyzeResponseSchema"
+    },
+    "backup": {
+      "$ref": "#/definitions/ThreadRolloutBackupInfo"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "analysis",
+    "backup",
+    "threadId"
+  ],
+  "title": "ThreadRolloutTrimResponse",
+  "type": "object"
+}

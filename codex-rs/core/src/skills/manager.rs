@@ -154,7 +154,7 @@ impl SkillsManager {
 
         let configured_extra_user_roots =
             configured_extra_user_roots_from_stack(&config_layer_stack);
-        let mut merged_extra_user_roots = configured_extra_user_roots.clone();
+        let mut merged_extra_user_roots = configured_extra_user_roots;
         merged_extra_user_roots.extend(normalized_extra_user_roots);
         let merged_extra_user_roots = normalize_extra_user_roots(&merged_extra_user_roots);
 

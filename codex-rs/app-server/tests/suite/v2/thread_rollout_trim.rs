@@ -1,3 +1,4 @@
+use anyhow::Context;
 use anyhow::Result;
 use app_test_support::McpProcess;
 use app_test_support::create_mock_responses_server_repeating_assistant;
@@ -195,7 +196,10 @@ fn write_rollout(home: &Path, source: CoreSessionSource) -> Result<(String, Path
     let path = home
         .join("sessions/2026/03/29")
         .join(format!("rollout-2026-03-29T12-00-00-{thread_id}.jsonl"));
-    fs::create_dir_all(path.parent().expect("rollout parent"))?;
+    let parent = path
+        .parent()
+        .context("rollout path is missing a parent directory")?;
+    fs::create_dir_all(parent)?;
     let lines = vec![
         serde_json::to_string(&RolloutItem::SessionMeta(SessionMetaLine {
             meta: SessionMeta {

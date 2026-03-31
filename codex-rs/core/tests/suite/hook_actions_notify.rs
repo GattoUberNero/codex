@@ -87,13 +87,12 @@ async fn after_agent_visible_note_emits_warning_and_turn_completes() -> Result<(
     let marker = hook_dir.path().join("visible.marker");
     let marker_str = marker.to_string_lossy().to_string();
     let script = write_notify_script(&format!(
-        "#!/bin/bash\n: > \"{marker}\"\nprintf '%s' '{{\"actions\":[{{\"type\":\"visible_note\",\"message\":\"e2e visible\"}}]}}'\n",
-        marker = marker_str
+        "#!/bin/bash\n: > \"{marker_str}\"\nprintf '%s' '{{\"actions\":[{{\"type\":\"visible_note\",\"message\":\"e2e visible\"}}]}}'\n"
     ))?;
 
     let test = TestCodexHarness::with_builder(
         core_test_support::test_codex::test_codex().with_config(move |cfg| {
-            cfg.notify = Some(vec![script.clone()]);
+            cfg.notify = Some(vec![script]);
         }),
     )
     .await?;
@@ -136,13 +135,12 @@ async fn after_agent_nero_hook_msg_block_status_emits_structured_warning_and_tur
     let marker = hook_dir.path().join("nero_hook_msg_block.marker");
     let marker_str = marker.to_string_lossy().to_string();
     let script = write_notify_script(&format!(
-        "#!/bin/bash\n: > \"{marker}\"\nprintf '%s' '{{\"actions\":[{{\"type\":\"nero_hook_msg\",\"mode\":\"tui-short\",\"show\":{{\"agent\":false,\"tui\":true}},\"format\":\"block\",\"msg\":{{\"full\":\"unused full\",\"short\":\"Structured e2e block\"}},\"status\":{{\"kind\":\"countdown\",\"text\":\"next update in 17s\"}}}}]}}'\n",
-        marker = marker_str
+        "#!/bin/bash\n: > \"{marker_str}\"\nprintf '%s' '{{\"actions\":[{{\"type\":\"nero_hook_msg\",\"mode\":\"tui-short\",\"show\":{{\"agent\":false,\"tui\":true}},\"format\":\"block\",\"msg\":{{\"full\":\"unused full\",\"short\":\"Structured e2e block\"}},\"status\":{{\"kind\":\"countdown\",\"text\":\"next update in 17s\"}}}}]}}'\n"
     ))?;
 
     let test = TestCodexHarness::with_builder(
         core_test_support::test_codex::test_codex().with_config(move |cfg| {
-            cfg.notify = Some(vec![script.clone()]);
+            cfg.notify = Some(vec![script]);
         }),
     )
     .await?;
@@ -189,7 +187,7 @@ printf '%s' 'legacy-notifier-ok'
 
     let test = TestCodexHarness::with_builder(
         core_test_support::test_codex::test_codex().with_config(move |cfg| {
-            cfg.notify = Some(vec![script.clone()]);
+            cfg.notify = Some(vec![script]);
         }),
     )
     .await?;
@@ -233,7 +231,7 @@ printf '%s' '{not-json'
 
     let test = TestCodexHarness::with_builder(
         core_test_support::test_codex::test_codex().with_config(move |cfg| {
-            cfg.notify = Some(vec![script.clone()]);
+            cfg.notify = Some(vec![script]);
         }),
     )
     .await?;
@@ -261,13 +259,12 @@ async fn after_agent_both_actions_can_trigger_follow_up_turn_without_manual_inpu
     let marker = hook_dir.path().join("both.marker");
     let marker_str = marker.to_string_lossy().to_string();
     let script = write_notify_script(&format!(
-        "#!/bin/bash\n: > \"{marker}\"\nprintf '%s' '{{\"actions\":[{{\"type\":\"visible_note\",\"message\":\"e2e both\"}},{{\"type\":\"auto_user_reply\",\"message\":\"continue\"}}]}}'\n",
-        marker = marker_str
+        "#!/bin/bash\n: > \"{marker_str}\"\nprintf '%s' '{{\"actions\":[{{\"type\":\"visible_note\",\"message\":\"e2e both\"}},{{\"type\":\"auto_user_reply\",\"message\":\"continue\"}}]}}'\n"
     ))?;
 
     let test = TestCodexHarness::with_builder(
         core_test_support::test_codex::test_codex().with_config(move |cfg| {
-            cfg.notify = Some(vec![script.clone()]);
+            cfg.notify = Some(vec![script]);
         }),
     )
     .await?;
@@ -324,13 +321,12 @@ async fn after_agent_auto_user_reply_only_can_trigger_follow_up_turn_without_man
     let marker = hook_dir.path().join("auto_only.marker");
     let marker_str = marker.to_string_lossy().to_string();
     let script = write_notify_script(&format!(
-        "#!/bin/bash\n: > \"{marker}\"\nprintf '%s' '{{\"actions\":[{{\"type\":\"auto_user_reply\",\"message\":\"continue\"}}]}}'\n",
-        marker = marker_str
+        "#!/bin/bash\n: > \"{marker_str}\"\nprintf '%s' '{{\"actions\":[{{\"type\":\"auto_user_reply\",\"message\":\"continue\"}}]}}'\n"
     ))?;
 
     let test = TestCodexHarness::with_builder(
         core_test_support::test_codex::test_codex().with_config(move |cfg| {
-            cfg.notify = Some(vec![script.clone()]);
+            cfg.notify = Some(vec![script]);
         }),
     )
     .await?;

@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "keepTailLines": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "keepTailLines",
+    "threadId"
+  ],
+  "title": "ThreadRolloutAnalyzeParams",
+  "type": "object"
+}

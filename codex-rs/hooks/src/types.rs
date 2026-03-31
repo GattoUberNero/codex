@@ -22,9 +22,10 @@ pub struct HookExecution {
     pub actions: Vec<HookAction>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub enum HookResult {
     /// Success: hook completed successfully.
+    #[default]
     Success,
     /// FailedContinue: hook failed, but other subsequent hooks should still execute and the
     /// operation should continue.
@@ -37,12 +38,6 @@ pub enum HookResult {
 impl HookResult {
     pub fn should_abort_operation(&self) -> bool {
         matches!(self, Self::FailedAbort(_))
-    }
-}
-
-impl Default for HookResult {
-    fn default() -> Self {
-        Self::Success
     }
 }
 

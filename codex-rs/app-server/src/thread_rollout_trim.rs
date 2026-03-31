@@ -23,10 +23,10 @@ use std::fs::OpenOptions;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::io::BufWriter;
-use std::io::copy;
 use std::io::Seek;
 use std::io::SeekFrom;
 use std::io::Write;
+use std::io::copy;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -47,10 +47,16 @@ struct BackupManifest {
     thread_id: String,
     original_rollout_path: PathBuf,
     created_at: String,
+    source: Option<SessionSource>,
+    forked_from_id: Option<String>,
+    #[serde(default)]
+    is_subagent: bool,
     original_total_lines: u64,
     original_total_bytes: u64,
+    original_parse_errors: Option<u64>,
     trimmed_total_lines: u64,
     trimmed_total_bytes: u64,
+    trimmed_parse_errors: Option<u64>,
     protected_head_end_line: u64,
     requested_tail_lines: u32,
     actual_tail_start_line: u64,
@@ -452,6 +458,20 @@ fn build_trim_preview(
     }
 }
 
+fn scan_session_identity(scan: &ScanSummary) -> (Option<SessionSource>, Option<String>, bool) {
+    let source = scan
+        .session_meta
+        .as_ref()
+        .map(|meta| SessionSource::from(meta.meta.source.clone()));
+    let forked_from_id = scan
+        .session_meta
+        .as_ref()
+        .and_then(|meta| meta.meta.forked_from_id.as_ref())
+        .map(ToString::to_string);
+    let is_subagent = matches!(source, Some(SessionSource::SubAgent(_)));
+    (source, forked_from_id, is_subagent)
+}
+
 pub(crate) fn analyze_rollout(
     codex_home: &Path,
     thread_id: &str,
@@ -513,16 +533,7 @@ pub(crate) fn analyze_rollout(
     }
 
     let scan = scan_rollout(&location.path)?;
-    let source = scan
-        .session_meta
-        .as_ref()
-        .map(|meta| SessionSource::from(meta.meta.source.clone()));
-    let forked_from_id = scan
-        .session_meta
-        .as_ref()
-        .and_then(|meta| meta.meta.forked_from_id.as_ref())
-        .map(ToString::to_string);
-    let is_subagent = matches!(source, Some(SessionSource::SubAgent(_)));
+    let (source, forked_from_id, is_subagent) = scan_session_identity(&scan);
     if is_subagent {
         blockers.push("subagent_session_not_supported".to_string());
     }
@@ -567,6 +578,7 @@ pub(crate) fn analyze_rollout(
 fn create_backup_manifest(
     original_path: &Path,
     analysis: &ThreadRolloutAnalyzeResponse,
+    trimmed_stats: Option<&ThreadRolloutStats>,
 ) -> Result<BackupManifest> {
     let stats = analysis
         .stats
@@ -580,16 +592,33 @@ fn create_backup_manifest(
         .analysis_fingerprint
         .clone()
         .context("analysis fingerprint missing for backup manifest")?;
+    let (trimmed_total_lines, trimmed_total_bytes, trimmed_parse_errors) = match trimmed_stats {
+        Some(trimmed_stats) => (
+            trimmed_stats.total_lines,
+            trimmed_stats.total_bytes,
+            Some(trimmed_stats.parse_errors),
+        ),
+        None => (
+            stats.total_lines.saturating_sub(trim.removed_middle_lines),
+            stats
+                .total_bytes
+                .saturating_sub(trim.estimated_removed_bytes),
+            None,
+        ),
+    };
     Ok(BackupManifest {
         thread_id: analysis.thread_id.clone(),
         original_rollout_path: original_path.to_path_buf(),
         created_at: timestamp_rfc3339(),
+        source: analysis.source.clone(),
+        forked_from_id: analysis.forked_from_id.clone(),
+        is_subagent: analysis.is_subagent,
         original_total_lines: stats.total_lines,
         original_total_bytes: stats.total_bytes,
-        trimmed_total_lines: stats.total_lines.saturating_sub(trim.removed_middle_lines),
-        trimmed_total_bytes: stats
-            .total_bytes
-            .saturating_sub(trim.estimated_removed_bytes),
+        original_parse_errors: Some(stats.parse_errors),
+        trimmed_total_lines,
+        trimmed_total_bytes,
+        trimmed_parse_errors,
         protected_head_end_line: trim.protected_head_end_line,
         requested_tail_lines: trim.requested_tail_lines,
         actual_tail_start_line: trim.actual_tail_start_line,
@@ -597,11 +626,94 @@ fn create_backup_manifest(
     })
 }
 
+fn write_backup_manifest(manifest_path: &Path, manifest: &BackupManifest) -> Result<()> {
+    fs::write(
+        manifest_path,
+        format!("{}\n", serde_json::to_string_pretty(manifest)?),
+    )
+    .with_context(|| format!("failed to write {}", manifest_path.display()))
+}
+
+fn build_restore_fallback_analysis(
+    thread_id: &str,
+    thread_name: Option<String>,
+    expected_target: PathBuf,
+    archived: bool,
+    loaded: bool,
+    backup: &ThreadRolloutBackupInfo,
+    error: &anyhow::Error,
+) -> ThreadRolloutAnalyzeResponse {
+    let manifest = fs::read_to_string(&backup.manifest_path)
+        .ok()
+        .and_then(|manifest_text| serde_json::from_str::<BackupManifest>(&manifest_text).ok());
+    let manifest_parse_errors = manifest
+        .as_ref()
+        .and_then(|manifest| manifest.original_parse_errors);
+    let fallback_scan = scan_rollout(&expected_target).ok();
+    let (source, forked_from_id, is_subagent) = fallback_scan
+        .as_ref()
+        .map(scan_session_identity)
+        .unwrap_or_else(|| {
+            (
+                manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.source.clone()),
+                manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.forked_from_id.clone()),
+                manifest
+                    .as_ref()
+                    .is_some_and(|manifest| manifest.is_subagent),
+            )
+        });
+    let mut warnings = vec![format!(
+        "restore completed but post-restore analysis failed: {error}"
+    )];
+    if let Some(parse_errors) = fallback_scan
+        .as_ref()
+        .map(|scan| scan.parse_errors)
+        .or(manifest_parse_errors)
+        .filter(|count| *count > 0)
+    {
+        warnings.push(format!("rollout_parse_errors:{parse_errors}"));
+    }
+    ThreadRolloutAnalyzeResponse {
+        thread_id: thread_id.to_string(),
+        thread_name,
+        rollout_path: Some(expected_target),
+        archived,
+        source,
+        forked_from_id,
+        is_subagent,
+        loaded,
+        eligible: false,
+        blockers: vec!["existing_backup_present".to_string()],
+        warnings,
+        stats: fallback_scan
+            .as_ref()
+            .map(|scan| ThreadRolloutStats {
+                total_lines: scan.total_lines,
+                total_bytes: scan.total_bytes,
+                parse_errors: scan.parse_errors,
+            })
+            .or_else(|| {
+                manifest_parse_errors.map(|parse_errors| ThreadRolloutStats {
+                    total_lines: backup.original_total_lines,
+                    total_bytes: backup.original_total_bytes,
+                    parse_errors,
+                })
+            }),
+        trim: None,
+        analysis_fingerprint: None,
+        backup: Some(backup.clone()),
+    }
+}
+
 fn copy_trimmed_rollout_from_reader<R: BufRead>(
     mut reader: R,
     temp_path: &Path,
     trim: &ThreadRolloutTrimPreview,
-) -> Result<()> {
+) -> Result<ThreadRolloutStats> {
     let target = OpenOptions::new()
         .create(true)
         .truncate(true)
@@ -611,17 +723,35 @@ fn copy_trimmed_rollout_from_reader<R: BufRead>(
     let mut writer = BufWriter::new(target);
     let mut buffer = Vec::new();
     let mut line_no = 0u64;
+    let mut kept_stats = ThreadRolloutStats {
+        total_lines: 0,
+        total_bytes: 0,
+        parse_errors: 0,
+    };
 
     loop {
         buffer.clear();
-        let read = reader
-            .read_until(b'\n', &mut buffer)
-            .with_context(|| format!("failed to read rollout stream for {}", temp_path.display()))?;
+        let read = reader.read_until(b'\n', &mut buffer).with_context(|| {
+            format!("failed to read rollout stream for {}", temp_path.display())
+        })?;
         if read == 0 {
             break;
         }
         line_no += 1;
         if line_no <= trim.protected_head_end_line || line_no >= trim.actual_tail_start_line {
+            kept_stats.total_lines += 1;
+            kept_stats.total_bytes += u64::try_from(read).unwrap_or(u64::MAX);
+            let mut parse_slice = buffer.as_slice();
+            while parse_slice
+                .last()
+                .is_some_and(|byte| *byte == b'\n' || *byte == b'\r')
+            {
+                parse_slice = &parse_slice[..parse_slice.len().saturating_sub(1)];
+            }
+            if parse_slice.is_empty() || serde_json::from_slice::<RolloutItem>(parse_slice).is_err()
+            {
+                kept_stats.parse_errors += 1;
+            }
             writer
                 .write_all(&buffer)
                 .with_context(|| format!("failed to write {}", temp_path.display()))?;
@@ -634,7 +764,7 @@ fn copy_trimmed_rollout_from_reader<R: BufRead>(
         .get_ref()
         .sync_all()
         .with_context(|| format!("failed to sync {}", temp_path.display()))?;
-    Ok(())
+    Ok(kept_stats)
 }
 
 pub(crate) fn trim_rollout(
@@ -681,12 +811,8 @@ pub(crate) fn trim_rollout(
         .seek(SeekFrom::Start(0))
         .context("failed to rewind rollout file handle for scan")?;
     let verified_scan = scan_rollout_reader(BufReader::new(scan_file), &location.path)?;
-    let verified_preview = build_trim_preview(
-        thread_id,
-        &location.path,
-        &verified_scan,
-        keep_tail_lines,
-    );
+    let verified_preview =
+        build_trim_preview(thread_id, &location.path, &verified_scan, keep_tail_lines);
     let verified_fingerprint = verified_preview
         .fingerprint
         .clone()
@@ -737,12 +863,8 @@ pub(crate) fn trim_rollout(
             .get_ref()
             .sync_all()
             .with_context(|| format!("failed to sync {}", backup_rollout.display()))?;
-        let manifest = create_backup_manifest(&location.path, &analysis)?;
-        fs::write(
-            &manifest_path,
-            format!("{}\n", serde_json::to_string_pretty(&manifest)?),
-        )
-        .with_context(|| format!("failed to write {}", manifest_path.display()))?;
+        let manifest = create_backup_manifest(&location.path, &analysis, None)?;
+        write_backup_manifest(&manifest_path, &manifest)?;
         fs::rename(&staging_root, &backup_root).with_context(|| {
             format!(
                 "failed to finalize backup {} from staging {}",
@@ -764,8 +886,8 @@ pub(crate) fn trim_rollout(
         std::process::id(),
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
     ));
-    let rewrite_result: Result<()> = (|| {
-        copy_trimmed_rollout_from_reader(
+    let rewrite_result: Result<ThreadRolloutStats> = (|| {
+        let trimmed_stats = copy_trimmed_rollout_from_reader(
             {
                 let mut trim_file = source_file
                     .try_clone()
@@ -802,7 +924,7 @@ pub(crate) fn trim_rollout(
                 temp_path.display()
             )
         })?;
-        Ok(())
+        Ok(trimmed_stats)
     })();
     if let Err(error) = rewrite_result {
         if temp_path.exists() {
@@ -814,16 +936,53 @@ pub(crate) fn trim_rollout(
         return Err(error);
     }
 
-    let backup = read_existing_backup(codex_home, thread_id)?
-        .context("backup missing immediately after trim")?;
-    let analysis = analyze_rollout(
-        codex_home,
-        thread_id,
-        analysis.thread_name.clone(),
-        Some(location),
-        keep_tail_lines,
+    let trimmed_stats = rewrite_result?;
+    let final_manifest = create_backup_manifest(&location.path, &analysis, Some(&trimmed_stats))?;
+    let mut warnings = Vec::new();
+    if trimmed_stats.parse_errors > 0 {
+        warnings.push(format!(
+            "rollout_parse_errors:{}",
+            trimmed_stats.parse_errors
+        ));
+    }
+    let final_manifest_path = backup_manifest_path(codex_home, thread_id);
+    if let Err(error) = write_backup_manifest(&final_manifest_path, &final_manifest) {
+        warnings.push(format!(
+            "trim completed but backup manifest refresh failed: {error}"
+        ));
+    }
+    let backup = ThreadRolloutBackupInfo {
+        backup_root,
+        manifest_path: final_manifest_path,
+        backup_rollout_path: backup_rollout_path(codex_home, thread_id),
+        original_rollout_path: final_manifest.original_rollout_path.clone(),
+        created_at: final_manifest.created_at.clone(),
+        original_total_lines: final_manifest.original_total_lines,
+        original_total_bytes: final_manifest.original_total_bytes,
+        trimmed_total_lines: final_manifest.trimmed_total_lines,
+        trimmed_total_bytes: final_manifest.trimmed_total_bytes,
+        protected_head_end_line: final_manifest.protected_head_end_line,
+        requested_tail_lines: final_manifest.requested_tail_lines,
+        actual_tail_start_line: final_manifest.actual_tail_start_line,
+        analysis_fingerprint: final_manifest.analysis_fingerprint,
+    };
+    let analysis = ThreadRolloutAnalyzeResponse {
+        thread_id: thread_id.to_string(),
+        thread_name: analysis.thread_name.clone(),
+        rollout_path: Some(location.path),
+        archived: location.archived,
+        source: analysis.source.clone(),
+        forked_from_id: analysis.forked_from_id.clone(),
+        is_subagent: analysis.is_subagent,
         loaded,
-    )?;
+        eligible: false,
+        blockers: vec!["existing_backup_present".to_string()],
+        warnings,
+        stats: Some(trimmed_stats),
+        trim: analysis.trim,
+        analysis_fingerprint: None,
+        backup: Some(backup.clone()),
+    };
     Ok(ThreadRolloutTrimResponse {
         thread_id: thread_id.to_string(),
         backup,
@@ -893,22 +1052,32 @@ pub(crate) fn restore_rollout_backup(
             temp_path.display()
         )
     })?;
-    let analysis = analyze_rollout(
+    let archived = expected_location
+        .as_ref()
+        .map(|location| location.archived)
+        .unwrap_or_else(|| requested_path.starts_with(codex_home.join("archived_sessions")));
+    let analysis = match analyze_rollout(
         codex_home,
         thread_id,
-        thread_name,
+        thread_name.clone(),
         Some(RolloutLocation {
-            archived: expected_location
-                .as_ref()
-                .map(|location| location.archived)
-                .unwrap_or_else(|| {
-                    requested_path.starts_with(codex_home.join("archived_sessions"))
-                }),
+            archived,
             path: expected_target.clone(),
         }),
         backup.requested_tail_lines,
         loaded,
-    )?;
+    ) {
+        Ok(analysis) => analysis,
+        Err(error) => build_restore_fallback_analysis(
+            thread_id,
+            thread_name,
+            expected_target,
+            archived,
+            loaded,
+            &backup,
+            &error,
+        ),
+    };
     Ok(ThreadRolloutBackupRestoreResponse {
         thread_id: thread_id.to_string(),
         backup,
@@ -1068,6 +1237,54 @@ mod tests {
         Ok((thread_id, path))
     }
 
+    fn set_rollout_forked_from_id(path: &Path, forked_from_id: &str) -> Result<()> {
+        let text = fs::read_to_string(path)?;
+        let mut lines: Vec<String> = text.lines().map(ToString::to_string).collect();
+        let session_meta: RolloutItem = serde_json::from_str(
+            lines
+                .first()
+                .context("rollout is missing session meta line")?,
+        )?;
+        let RolloutItem::SessionMeta(mut session_meta) = session_meta else {
+            anyhow::bail!("first rollout line is not session meta");
+        };
+        session_meta.meta.forked_from_id = Some(ThreadId::from_string(forked_from_id)?);
+        lines[0] = serde_json::to_string(&RolloutItem::SessionMeta(session_meta))?;
+        fs::write(path, lines.join("\n") + "\n")?;
+        Ok(())
+    }
+
+    fn remove_manifest_identity_fields(manifest_path: &Path) -> Result<()> {
+        let mut manifest_value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(manifest_path)?)?;
+        let manifest_object = manifest_value
+            .as_object_mut()
+            .context("backup manifest should be a JSON object")?;
+        manifest_object.remove("source");
+        manifest_object.remove("forked_from_id");
+        manifest_object.remove("is_subagent");
+        fs::write(
+            manifest_path,
+            format!("{}\n", serde_json::to_string_pretty(&manifest_value)?),
+        )?;
+        Ok(())
+    }
+
+    fn remove_manifest_parse_error_fields(manifest_path: &Path) -> Result<()> {
+        let mut manifest_value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(manifest_path)?)?;
+        let manifest_object = manifest_value
+            .as_object_mut()
+            .context("backup manifest should be a JSON object")?;
+        manifest_object.remove("original_parse_errors");
+        manifest_object.remove("trimmed_parse_errors");
+        fs::write(
+            manifest_path,
+            format!("{}\n", serde_json::to_string_pretty(&manifest_value)?),
+        )?;
+        Ok(())
+    }
+
     #[test]
     fn analyze_detects_head_tail_and_compaction_anchor() -> Result<()> {
         let home = TempDir::new()?;
@@ -1116,7 +1333,6 @@ mod tests {
         )?;
         let fingerprint = analysis
             .analysis_fingerprint
-            .clone()
             .context("fingerprint missing")?;
         let trimmed = trim_rollout(
             home.path(),
@@ -1133,6 +1349,23 @@ mod tests {
         let trimmed_text = fs::read_to_string(&path)?;
         assert!(trimmed_text.len() < original.len());
         assert!(trimmed.backup.backup_rollout_path.exists());
+        assert_eq!(trimmed.analysis.blockers, vec!["existing_backup_present"]);
+        assert!(!trimmed.analysis.eligible);
+        assert_eq!(
+            trimmed.analysis.stats,
+            Some(ThreadRolloutStats {
+                total_lines: trimmed.backup.trimmed_total_lines,
+                total_bytes: trimmed.backup.trimmed_total_bytes,
+                parse_errors: 0,
+            })
+        );
+        let manifest_text = fs::read_to_string(backup_manifest_path(home.path(), &thread_id))?;
+        let manifest: BackupManifest = serde_json::from_str(&manifest_text)?;
+        assert_eq!(manifest.source, Some(SessionSource::Cli));
+        assert_eq!(manifest.forked_from_id, None);
+        assert!(!manifest.is_subagent);
+        assert_eq!(manifest.original_parse_errors, Some(0));
+        assert_eq!(manifest.trimmed_parse_errors, Some(0));
 
         let restored = restore_rollout_backup(
             home.path(),
@@ -1147,6 +1380,8 @@ mod tests {
         let restored_text = fs::read_to_string(&path)?;
         assert_eq!(restored_text, original);
         assert_eq!(restored.backup.original_rollout_path, path);
+        assert_eq!(restored.analysis.blockers, vec!["existing_backup_present"]);
+        assert!(!restored.analysis.eligible);
 
         let deleted = delete_rollout_backup(home.path(), &thread_id)?;
         assert!(deleted.deleted);
@@ -1172,7 +1407,6 @@ mod tests {
         )?;
         let fingerprint = analysis
             .analysis_fingerprint
-            .clone()
             .context("fingerprint missing")?;
 
         let replacement =
@@ -1216,7 +1450,6 @@ mod tests {
         )?;
         let fingerprint = analysis
             .analysis_fingerprint
-            .clone()
             .context("fingerprint missing")?;
 
         let original_text = fs::read_to_string(&path)?;
@@ -1261,7 +1494,6 @@ mod tests {
         )?;
         let fingerprint = analysis
             .analysis_fingerprint
-            .clone()
             .context("fingerprint missing")?;
         trim_rollout(
             home.path(),
@@ -1308,7 +1540,6 @@ mod tests {
         )?;
         let fingerprint = analysis
             .analysis_fingerprint
-            .clone()
             .context("fingerprint missing")?;
         trim_rollout(
             home.path(),
@@ -1370,7 +1601,6 @@ mod tests {
         )?;
         let fingerprint = analysis
             .analysis_fingerprint
-            .clone()
             .context("fingerprint missing")?;
         trim_rollout(
             home.path(),
@@ -1416,6 +1646,231 @@ mod tests {
             error
                 .to_string()
                 .contains("backup restore target does not match the current rollout path")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn backup_manifest_deserializes_without_new_identity_fields() -> Result<()> {
+        let legacy_manifest = serde_json::json!({
+            "thread_id": "thread-1",
+            "original_rollout_path": "/tmp/rollout.jsonl",
+            "created_at": "2026-03-31T00:00:00Z",
+            "original_total_lines": 10,
+            "original_total_bytes": 100,
+            "original_parse_errors": 0,
+            "trimmed_total_lines": 6,
+            "trimmed_total_bytes": 60,
+            "trimmed_parse_errors": 0,
+            "protected_head_end_line": 3,
+            "requested_tail_lines": 3,
+            "actual_tail_start_line": 8,
+            "analysis_fingerprint": "fp-1"
+        });
+
+        let manifest: BackupManifest = serde_json::from_value(legacy_manifest)?;
+
+        assert_eq!(manifest.source, None);
+        assert_eq!(manifest.forked_from_id, None);
+        assert!(!manifest.is_subagent);
+        Ok(())
+    }
+
+    #[test]
+    fn restore_fallback_prefers_rescanned_rollout_identity_for_legacy_manifest() -> Result<()> {
+        let home = TempDir::new()?;
+        let (thread_id, path) = write_rollout(home.path(), CoreSessionSource::Cli)?;
+        let forked_from_id = Uuid::new_v4().to_string();
+        set_rollout_forked_from_id(&path, &forked_from_id)?;
+
+        let analysis = analyze_rollout(
+            home.path(),
+            &thread_id,
+            Some("Test".to_string()),
+            Some(RolloutLocation {
+                path: path.clone(),
+                archived: false,
+            }),
+            3,
+            false,
+        )?;
+        let fingerprint = analysis
+            .analysis_fingerprint
+            .context("fingerprint missing")?;
+        trim_rollout(
+            home.path(),
+            &thread_id,
+            Some("Test".to_string()),
+            RolloutLocation {
+                path: path.clone(),
+                archived: false,
+            },
+            3,
+            &fingerprint,
+            false,
+        )?;
+        let backup = read_existing_backup(home.path(), &thread_id)?
+            .context("backup should exist after trim")?;
+        fs::copy(&backup.backup_rollout_path, &path)?;
+        remove_manifest_identity_fields(&backup.manifest_path)?;
+
+        let response = build_restore_fallback_analysis(
+            &thread_id,
+            Some("Test".to_string()),
+            path,
+            false,
+            false,
+            &backup,
+            &anyhow::anyhow!("simulated analyze failure"),
+        );
+
+        assert_eq!(response.source, Some(SessionSource::Cli));
+        assert_eq!(response.forked_from_id, Some(forked_from_id));
+        assert!(!response.is_subagent);
+        assert_eq!(
+            response.stats,
+            Some(ThreadRolloutStats {
+                total_lines: backup.original_total_lines,
+                total_bytes: backup.original_total_bytes,
+                parse_errors: 0,
+            })
+        );
+        assert_eq!(response.blockers, vec!["existing_backup_present"]);
+        assert!(
+            response
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("simulated analyze failure"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restore_fallback_uses_manifest_identity_when_rescan_unavailable() -> Result<()> {
+        let home = TempDir::new()?;
+        let (thread_id, path) = write_rollout(home.path(), CoreSessionSource::Cli)?;
+        let forked_from_id = Uuid::new_v4().to_string();
+        set_rollout_forked_from_id(&path, &forked_from_id)?;
+
+        let analysis = analyze_rollout(
+            home.path(),
+            &thread_id,
+            Some("Test".to_string()),
+            Some(RolloutLocation {
+                path: path.clone(),
+                archived: false,
+            }),
+            3,
+            false,
+        )?;
+        let fingerprint = analysis
+            .analysis_fingerprint
+            .context("fingerprint missing")?;
+        trim_rollout(
+            home.path(),
+            &thread_id,
+            Some("Test".to_string()),
+            RolloutLocation {
+                path: path.clone(),
+                archived: false,
+            },
+            3,
+            &fingerprint,
+            false,
+        )?;
+        let backup = read_existing_backup(home.path(), &thread_id)?
+            .context("backup should exist after trim")?;
+        fs::remove_file(&path)?;
+
+        let response = build_restore_fallback_analysis(
+            &thread_id,
+            Some("Test".to_string()),
+            path,
+            false,
+            false,
+            &backup,
+            &anyhow::anyhow!("simulated analyze failure"),
+        );
+
+        assert_eq!(response.source, Some(SessionSource::Cli));
+        assert_eq!(response.forked_from_id, Some(forked_from_id));
+        assert!(!response.is_subagent);
+        assert_eq!(
+            response.stats,
+            Some(ThreadRolloutStats {
+                total_lines: backup.original_total_lines,
+                total_bytes: backup.original_total_bytes,
+                parse_errors: 0,
+            })
+        );
+        assert_eq!(response.blockers, vec!["existing_backup_present"]);
+        assert!(
+            response
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("simulated analyze failure"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restore_fallback_handles_legacy_manifest_without_identity_or_parse_stats() -> Result<()> {
+        let home = TempDir::new()?;
+        let (thread_id, path) = write_rollout(home.path(), CoreSessionSource::Cli)?;
+
+        let analysis = analyze_rollout(
+            home.path(),
+            &thread_id,
+            Some("Test".to_string()),
+            Some(RolloutLocation {
+                path: path.clone(),
+                archived: false,
+            }),
+            3,
+            false,
+        )?;
+        let fingerprint = analysis
+            .analysis_fingerprint
+            .context("fingerprint missing")?;
+        trim_rollout(
+            home.path(),
+            &thread_id,
+            Some("Test".to_string()),
+            RolloutLocation {
+                path: path.clone(),
+                archived: false,
+            },
+            3,
+            &fingerprint,
+            false,
+        )?;
+        let backup = read_existing_backup(home.path(), &thread_id)?
+            .context("backup should exist after trim")?;
+        remove_manifest_identity_fields(&backup.manifest_path)?;
+        remove_manifest_parse_error_fields(&backup.manifest_path)?;
+        fs::remove_file(&path)?;
+
+        let response = build_restore_fallback_analysis(
+            &thread_id,
+            Some("Test".to_string()),
+            path,
+            false,
+            false,
+            &backup,
+            &anyhow::anyhow!("simulated analyze failure"),
+        );
+
+        assert_eq!(response.source, None);
+        assert_eq!(response.forked_from_id, None);
+        assert!(!response.is_subagent);
+        assert_eq!(response.stats, None);
+        assert_eq!(response.blockers, vec!["existing_backup_present"]);
+        assert_eq!(response.warnings.len(), 1);
+        assert!(
+            response
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("simulated analyze failure"))
         );
         Ok(())
     }
