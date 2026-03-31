@@ -58,7 +58,6 @@ use codex_core::config::types::ModelAvailabilityNuxConfig;
 use codex_core::config_loader::ConfigLayerStackOrdering;
 use codex_core::features::Feature;
 use codex_core::find_thread_name_by_id;
-use codex_core::models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use codex_core::models_manager::manager::RefreshStrategy;
 use codex_core::models_manager::model_presets::HIDE_GPT_5_1_CODEX_MAX_MIGRATION_PROMPT_CONFIG;
 use codex_core::models_manager::model_presets::HIDE_GPT5_1_MIGRATION_PROMPT_CONFIG;
@@ -1474,6 +1473,7 @@ impl App {
                 service_tier: None,
                 collaboration_mode: None,
                 personality: None,
+                nero_auto_runtime: None,
             };
             let replay_state_op =
                 ThreadEventStore::op_can_change_pending_replay_state(&op).then(|| op.clone());
@@ -6131,6 +6131,7 @@ mod tests {
                 service_tier: None,
                 collaboration_mode: None,
                 personality: None,
+                nero_auto_runtime: None,
             })
         );
         let cell = match app_event_rx.try_recv() {
@@ -6222,6 +6223,7 @@ mod tests {
                 service_tier: None,
                 collaboration_mode: None,
                 personality: None,
+                nero_auto_runtime: None,
             })
         );
         let cell = match app_event_rx.try_recv() {
@@ -6301,6 +6303,7 @@ mod tests {
                 service_tier: None,
                 collaboration_mode: None,
                 personality: None,
+                nero_auto_runtime: None,
             })
         );
 
@@ -6358,6 +6361,7 @@ mod tests {
                 service_tier: None,
                 collaboration_mode: None,
                 personality: None,
+                nero_auto_runtime: None,
             })
         );
         assert!(
@@ -6417,6 +6421,7 @@ mod tests {
                 service_tier: None,
                 collaboration_mode: None,
                 personality: None,
+                nero_auto_runtime: None,
             })
         );
 
@@ -6504,6 +6509,7 @@ guardian_approval = true
                 service_tier: None,
                 collaboration_mode: None,
                 personality: None,
+                nero_auto_runtime: None,
             })
         );
         let cell = match app_event_rx.try_recv() {

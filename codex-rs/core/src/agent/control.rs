@@ -414,14 +414,6 @@ impl AgentControl {
         agents.join("\n")
     }
 
-    pub(crate) fn manages_active_agent(&self, agent_id: ThreadId) -> bool {
-        self.state.has_spawned_thread(agent_id)
-    }
-
-    pub(crate) fn manages_known_agent(&self, agent_id: ThreadId) -> bool {
-        self.state.has_known_thread(agent_id)
-    }
-
     /// Starts a detached watcher for sub-agents spawned from another thread.
     ///
     /// This is only enabled for `SubAgentSource::ThreadSpawn`, where a parent thread exists and

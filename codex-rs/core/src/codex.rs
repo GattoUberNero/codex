@@ -803,7 +803,6 @@ impl Codex {
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
 
-        let loaded_plugins = plugins_manager.plugins_for_config(&config);
         let loaded_skills = skills_manager
             .skills_for_config(&config)
             .filter_for_session_source(&session_source);
@@ -9440,9 +9439,7 @@ async fn try_run_sampling_request(
     );
     let plan_mode = turn_context.collaboration_mode.mode == ModeKind::Plan;
     let receiving_span = trace_span!("receiving_stream");
-    // This budget must span the whole request-retry loop for the turn.
-    // Resetting it on every retry would allow unbounded rotate/retry cycles
-    // when the provider keeps returning pre-output usage-limit failures.
+    // Keep one bounded rotate/retry budget for the whole turn request, not per stream attempt.
     client_session.reset_usage_limit_recovery_budget();
     'request: loop {
         let mut stream = client_session
@@ -9568,9 +9565,13 @@ async fn try_run_sampling_request(
                 }
                 ResponseEvent::OutputItemAdded(item) => {
                     saw_response_output = true;
-                    if let Some(turn_item) =
-                        handle_non_tool_response_item(&item, plan_mode, Some(&turn_context.cwd))
-                            .await
+                    if let Some(turn_item) = handle_non_tool_response_item(
+                        sess.as_ref(),
+                        turn_context.as_ref(),
+                        &item,
+                        plan_mode,
+                    )
+                    .await
                     {
                         let mut turn_item = turn_item;
                         let mut seeded_parsed: Option<ParsedAssistantTextDelta> = None;

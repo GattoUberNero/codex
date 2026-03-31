@@ -122,6 +122,7 @@ pub struct ExternalAuthTokens {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalAuthRefreshReason {
     Unauthorized,
+    UsageLimitReached,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1026,6 +1027,53 @@ impl UnauthorizedRecovery {
     }
 }
 
+/// Recovery flow that asks an external auth owner (parent app) for replacement
+/// tokens for the currently active ChatGPT external-auth session.
+///
+/// This flow is intended for non-401 recovery reasons (for example usage/quota
+/// limit rotation) where Codex should request a fresh token set and retry.
+pub struct ExternalAuthRecovery {
+    manager: Arc<AuthManager>,
+    reason: ExternalAuthRefreshReason,
+    attempted: bool,
+}
+
+impl ExternalAuthRecovery {
+    fn new(manager: Arc<AuthManager>, reason: ExternalAuthRefreshReason) -> Self {
+        Self {
+            manager,
+            reason,
+            attempted: false,
+        }
+    }
+
+    pub fn has_next(&self) -> bool {
+        if self.attempted {
+            return false;
+        }
+        if !self
+            .manager
+            .auth_cached()
+            .as_ref()
+            .is_some_and(CodexAuth::is_external_chatgpt_tokens)
+        {
+            return false;
+        }
+        self.manager.has_external_auth_refresher()
+    }
+
+    pub async fn next(&mut self) -> Result<(), RefreshTokenError> {
+        if !self.has_next() {
+            return Err(RefreshTokenError::Permanent(RefreshTokenFailedError::new(
+                RefreshTokenFailedReason::Other,
+                "No more external-auth recovery steps available.",
+            )));
+        }
+        self.attempted = true;
+        self.manager.refresh_external_auth(self.reason).await
+    }
+}
+
 /// Central manager providing a single source of truth for auth.json derived
 /// authentication data. It loads once (or on preference change) and then
 /// hands out cloned `CodexAuth` values so the rest of the program has a
@@ -1261,6 +1309,13 @@ impl AuthManager {
 
     pub fn unauthorized_recovery(self: &Arc<Self>) -> UnauthorizedRecovery {
         UnauthorizedRecovery::new(Arc::clone(self))
+    }
+
+    pub fn external_auth_recovery(
+        self: &Arc<Self>,
+        reason: ExternalAuthRefreshReason,
+    ) -> ExternalAuthRecovery {
+        ExternalAuthRecovery::new(Arc::clone(self), reason)
     }
 
     /// Attempt to refresh the token by first performing a guarded reload. Auth

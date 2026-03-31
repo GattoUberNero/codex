@@ -4,6 +4,7 @@ use crate::config_loader::default_project_root_markers;
 use crate::config_loader::merge_toml_values;
 use crate::config_loader::project_root_markers_from_config;
 use crate::plugins::plugin_namespace_for_skill_path;
+use crate::skills::model::SkillAgentFilterMode;
 use crate::skills::model::SkillDependencies;
 use crate::skills::model::SkillError;
 use crate::skills::model::SkillInterface;
@@ -114,6 +115,12 @@ struct Dependencies {
 struct Policy {
     #[serde(default)]
     allow_implicit_invocation: Option<bool>,
+    #[serde(default)]
+    agent_filter_mode: Option<SkillAgentFilterMode>,
+    #[serde(default)]
+    allow_agent_whitelist: Option<bool>,
+    #[serde(default)]
+    allowed_agent_types: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -733,6 +740,9 @@ fn resolve_dependencies(dependencies: Option<Dependencies>) -> Option<SkillDepen
 fn resolve_policy(policy: Option<Policy>) -> Option<SkillPolicy> {
     policy.map(|policy| SkillPolicy {
         allow_implicit_invocation: policy.allow_implicit_invocation,
+        agent_filter_mode: policy.agent_filter_mode,
+        allow_agent_whitelist: policy.allow_agent_whitelist,
+        allowed_agent_types: policy.allowed_agent_types,
     })
 }
 

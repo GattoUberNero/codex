@@ -1129,6 +1129,102 @@
             },
             "method": {
               "enum": [
+                "thread/rollout/analyze"
+              ],
+              "title": "Thread/rollout/analyzeRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadRolloutAnalyzeParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/rollout/analyzeRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "thread/rollout/trim"
+              ],
+              "title": "Thread/rollout/trimRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadRolloutTrimParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/rollout/trimRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "thread/rollout/backup/restore"
+              ],
+              "title": "Thread/rollout/backup/restoreRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadRolloutBackupRestoreParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/rollout/backup/restoreRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "thread/rollout/backup/delete"
+              ],
+              "title": "Thread/rollout/backup/deleteRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadRolloutBackupDeleteParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/rollout/backup/deleteRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
                 "skills/list"
               ],
               "title": "Skills/listRequestMethod",
@@ -10889,6 +10985,516 @@
         "thread"
       ],
       "title": "ThreadRollbackResponse",
+      "type": "object"
+    },
+    "ThreadRolloutAnalyzeParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "keepTailLines": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "keepTailLines",
+        "threadId"
+      ],
+      "title": "ThreadRolloutAnalyzeParams",
+      "type": "object"
+    },
+    "ThreadRolloutAnalyzeResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "analysisFingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "archived": {
+          "type": "boolean"
+        },
+        "backup": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadRolloutBackupInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "blockers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "eligible": {
+          "type": "boolean"
+        },
+        "forkedFromId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isSubagent": {
+          "type": "boolean"
+        },
+        "loaded": {
+          "type": "boolean"
+        },
+        "rolloutPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stats": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadRolloutStats"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "threadName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trim": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadRolloutTrimPreview"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "archived",
+        "blockers",
+        "eligible",
+        "isSubagent",
+        "loaded",
+        "threadId",
+        "warnings"
+      ],
+      "title": "ThreadRolloutAnalyzeResponse",
+      "type": "object"
+    },
+    "ThreadRolloutAnalyzeResponseSchema": {
+      "properties": {
+        "analysisFingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "archived": {
+          "type": "boolean"
+        },
+        "backup": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadRolloutBackupInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "blockers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "eligible": {
+          "type": "boolean"
+        },
+        "forkedFromId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isSubagent": {
+          "type": "boolean"
+        },
+        "loaded": {
+          "type": "boolean"
+        },
+        "rolloutPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stats": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadRolloutStats"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "threadName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trim": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadRolloutTrimPreview"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "archived",
+        "blockers",
+        "eligible",
+        "isSubagent",
+        "loaded",
+        "threadId",
+        "warnings"
+      ],
+      "type": "object"
+    },
+    "ThreadRolloutBackupDeleteParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "title": "ThreadRolloutBackupDeleteParams",
+      "type": "object"
+    },
+    "ThreadRolloutBackupDeleteResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "deleted",
+        "threadId"
+      ],
+      "title": "ThreadRolloutBackupDeleteResponse",
+      "type": "object"
+    },
+    "ThreadRolloutBackupInfo": {
+      "properties": {
+        "actualTailStartLine": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "analysisFingerprint": {
+          "type": "string"
+        },
+        "backupRolloutPath": {
+          "type": "string"
+        },
+        "backupRoot": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "manifestPath": {
+          "type": "string"
+        },
+        "originalRolloutPath": {
+          "type": "string"
+        },
+        "originalTotalBytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "originalTotalLines": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "protectedHeadEndLine": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "requestedTailLines": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "trimmedTotalBytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "trimmedTotalLines": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "actualTailStartLine",
+        "analysisFingerprint",
+        "backupRolloutPath",
+        "backupRoot",
+        "createdAt",
+        "manifestPath",
+        "originalRolloutPath",
+        "originalTotalBytes",
+        "originalTotalLines",
+        "protectedHeadEndLine",
+        "requestedTailLines",
+        "trimmedTotalBytes",
+        "trimmedTotalLines"
+      ],
+      "type": "object"
+    },
+    "ThreadRolloutBackupRestoreParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "title": "ThreadRolloutBackupRestoreParams",
+      "type": "object"
+    },
+    "ThreadRolloutBackupRestoreResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "analysis": {
+          "$ref": "#/definitions/ThreadRolloutAnalyzeResponseSchema"
+        },
+        "backup": {
+          "$ref": "#/definitions/ThreadRolloutBackupInfo"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "analysis",
+        "backup",
+        "threadId"
+      ],
+      "title": "ThreadRolloutBackupRestoreResponse",
+      "type": "object"
+    },
+    "ThreadRolloutStats": {
+      "properties": {
+        "parseErrors": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "totalBytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "totalLines": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "parseErrors",
+        "totalBytes",
+        "totalLines"
+      ],
+      "type": "object"
+    },
+    "ThreadRolloutTrimParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "analysisFingerprint": {
+          "type": "string"
+        },
+        "keepTailLines": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "analysisFingerprint",
+        "keepTailLines",
+        "threadId"
+      ],
+      "title": "ThreadRolloutTrimParams",
+      "type": "object"
+    },
+    "ThreadRolloutTrimPreview": {
+      "properties": {
+        "actualTailStartLine": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "compactionAnchorLine": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "estimatedRemovedBytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "preservedTailLines": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "protectedHeadEndLine": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "removedMiddleEndLine": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "removedMiddleLines": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "removedMiddleStartLine": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "requestedTailLines": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "requestedTailStartLine": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "actualTailStartLine",
+        "estimatedRemovedBytes",
+        "preservedTailLines",
+        "protectedHeadEndLine",
+        "removedMiddleLines",
+        "requestedTailLines",
+        "requestedTailStartLine"
+      ],
+      "type": "object"
+    },
+    "ThreadRolloutTrimResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "analysis": {
+          "$ref": "#/definitions/ThreadRolloutAnalyzeResponseSchema"
+        },
+        "backup": {
+          "$ref": "#/definitions/ThreadRolloutBackupInfo"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "analysis",
+        "backup",
+        "threadId"
+      ],
+      "title": "ThreadRolloutTrimResponse",
       "type": "object"
     },
     "ThreadSetNameParams": {

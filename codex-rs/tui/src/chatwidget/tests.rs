@@ -8951,6 +8951,8 @@ async fn permissions_selection_marks_guardian_approvals_current_after_session_co
             initial_messages: None,
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),
+            session_source: SessionSource::default(),
+            nero_auto_runtime: NeroAutoRuntimeConfig::default(),
         }),
     });
 
@@ -9006,6 +9008,8 @@ async fn permissions_selection_marks_guardian_approvals_current_with_custom_work
             initial_messages: None,
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),
+            session_source: SessionSource::default(),
+            nero_auto_runtime: NeroAutoRuntimeConfig::default(),
         }),
     });
 
@@ -9121,6 +9125,7 @@ async fn permissions_selection_sends_approvals_reviewer_in_override_turn_context
             service_tier: None,
             collaboration_mode: None,
             personality: None,
+            nero_auto_runtime: None,
         }
     );
 }
