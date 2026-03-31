@@ -302,6 +302,7 @@ mod tests {
                 model_provider_id: "test-provider".to_string(),
                 service_tier: None,
                 approval_policy: AskForApproval::Never,
+                approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 cwd: PathBuf::from("/home/user/project"),
                 reasoning_effort: Some(ReasoningEffort::default()),
@@ -347,6 +348,7 @@ mod tests {
             model_provider_id: "test-provider".to_string(),
             service_tier: None,
             approval_policy: AskForApproval::Never,
+            approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             cwd: PathBuf::from("/home/user/project"),
             reasoning_effort: Some(ReasoningEffort::default()),
@@ -387,6 +389,7 @@ mod tests {
                 "model": "gpt-4o",
                 "model_provider_id": "test-provider",
                 "approval_policy": "never",
+                "approvals_reviewer": "user",
                 "sandbox_policy": {
                     "type": "read-only"
                 },
@@ -416,6 +419,7 @@ mod tests {
             model_provider_id: "test-provider".to_string(),
             service_tier: None,
             approval_policy: AskForApproval::Never,
+            approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             cwd: PathBuf::from("/home/user/project"),
             reasoning_effort: Some(ReasoningEffort::default()),
@@ -457,6 +461,7 @@ mod tests {
                 "model": "gpt-4o",
                 "model_provider_id": "test-provider",
                 "approval_policy": "never",
+                "approvals_reviewer": "user",
                 "sandbox_policy": {
                     "type": "read-only"
                 },

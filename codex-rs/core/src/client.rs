@@ -33,8 +33,6 @@ use std::sync::atomic::Ordering;
 use crate::api_bridge::CoreAuthProvider;
 use crate::api_bridge::auth_provider_from_auth;
 use crate::api_bridge::map_api_error;
-use crate::auth::ExternalAuthRecovery;
-use crate::auth::ExternalAuthRefreshReason;
 use crate::auth::UnauthorizedRecovery;
 use codex_api::CompactClient as ApiCompactClient;
 use codex_api::CompactionInput as ApiCompactionInput;
@@ -76,18 +74,19 @@ use http::HeaderMap as ApiHeaderMap;
 use http::HeaderValue;
 use http::StatusCode as HttpStatusCode;
 use reqwest::StatusCode;
-use std::ffi::OsString;
 use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
-use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Error;
 use tokio_tungstenite::tungstenite::Message;
+use tracing::instrument;
 use tracing::trace;
 use tracing::warn;
 
 use crate::AuthManager;
+use crate::auth::AuthMode;
 use crate::auth::CodexAuth;
 use crate::auth::RefreshTokenError;
 use crate::client_common::Prompt;
@@ -100,7 +99,14 @@ use crate::error::Result;
 use crate::flags::CODEX_RS_SSE_FIXTURE;
 use crate::model_provider_info::ModelProviderInfo;
 use crate::model_provider_info::WireApi;
+use crate::response_debug_context::extract_response_debug_context;
+use crate::response_debug_context::extract_response_debug_context_from_api_error;
+use crate::response_debug_context::telemetry_api_error_message;
+use crate::response_debug_context::telemetry_transport_error_message;
 use crate::tools::spec::create_tools_json_for_responses_api;
+use crate::util::FeedbackRequestTags;
+use crate::util::emit_feedback_auth_recovery_tags;
+use crate::util::emit_feedback_request_tags;
 
 pub const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 pub const X_CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
@@ -108,12 +114,9 @@ pub const X_CODEX_TURN_METADATA_HEADER: &str = "x-codex-turn-metadata";
 pub const X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER: &str =
     "x-responsesapi-include-timing-metrics";
 const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
-const CODEXN_AUTH_ROTATE_CMD_ENV: &str = "CODEXN_AUTH_ROTATE_CMD";
-const CODEXN_AUTH_ROTATE_CMD_TIMEOUT_MS_ENV: &str = "CODEXN_AUTH_ROTATE_CMD_TIMEOUT_MS";
-const CODEXN_ROTATION_REASON_USAGE_LIMIT: &str = "usage_limit_reached";
-const CODEXN_ROTATION_REASON_QUOTA_EXCEEDED: &str = "quota_exceeded";
-const AUTH_ROTATE_CMD_TIMEOUT_DEFAULT_MS: u64 = 20_000;
-
+const RESPONSES_ENDPOINT: &str = "/responses";
+const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
+const MEMORIES_SUMMARIZE_ENDPOINT: &str = "/memories/trace_summarize";
 pub fn ws_version_from_features(config: &Config) -> bool {
     config
         .features
@@ -150,6 +153,17 @@ struct CurrentClientSetup {
     auth: Option<CodexAuth>,
     api_provider: codex_api::Provider,
     api_auth: CoreAuthProvider,
+}
+
+#[derive(Clone, Copy)]
+struct RequestRouteTelemetry {
+    endpoint: &'static str,
+}
+
+impl RequestRouteTelemetry {
+    fn for_endpoint(endpoint: &'static str) -> Self {
+        Self { endpoint }
+    }
 }
 
 /// A session-scoped client for model-provider API calls.
@@ -196,8 +210,6 @@ pub struct ModelClientSession {
     /// keep sending it unchanged between turn requests (e.g., for retries, incremental
     /// appends, or continuation requests), and must not send it between different turns.
     turn_state: Arc<OnceLock<String>>,
-    usage_limit_recovery: Option<ExternalAuthRecovery>,
-    command_recovery_attempted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +223,23 @@ struct WebsocketSession {
     connection: Option<ApiWebSocketConnection>,
     last_request: Option<ResponsesApiRequest>,
     last_response_rx: Option<oneshot::Receiver<LastResponse>>,
+    connection_reused: StdMutex<bool>,
+}
+
+impl WebsocketSession {
+    fn set_connection_reused(&self, connection_reused: bool) {
+        *self
+            .connection_reused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = connection_reused;
+    }
+
+    fn connection_reused(&self) -> bool {
+        *self
+            .connection_reused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 enum WebsocketStreamOutcome {
@@ -261,10 +290,6 @@ impl ModelClient {
             client: self.clone(),
             websocket_session: self.take_cached_websocket_session(),
             turn_state: Arc::new(OnceLock::new()),
-            usage_limit_recovery: self.state.auth_manager.as_ref().map(|manager| {
-                manager.external_auth_recovery(ExternalAuthRefreshReason::UsageLimitReached)
-            }),
-            command_recovery_attempted: false,
         }
     }
 
@@ -296,61 +321,62 @@ impl ModelClient {
         &self,
         prompt: &Prompt,
         model_info: &ModelInfo,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
         session_telemetry: &SessionTelemetry,
     ) -> Result<Vec<ResponseItem>> {
         if prompt.input.is_empty() {
             return Ok(Vec::new());
         }
-        let auth_manager = self.state.auth_manager.clone();
-        let mut auth_recovery = auth_manager
-            .as_ref()
-            .map(super::auth::AuthManager::unauthorized_recovery);
-        let mut usage_limit_recovery = auth_manager.as_ref().map(|manager| {
-            manager.external_auth_recovery(ExternalAuthRefreshReason::UsageLimitReached)
-        });
-        let mut command_recovery_attempted = false;
+        let client_setup = self.current_client_setup().await?;
+        let transport = ReqwestTransport::new(build_reqwest_client());
+        let request_telemetry = Self::build_request_telemetry(
+            session_telemetry,
+            AuthRequestTelemetryContext::new(
+                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                &client_setup.api_auth,
+                PendingUnauthorizedRetry::default(),
+            ),
+            RequestRouteTelemetry::for_endpoint(RESPONSES_COMPACT_ENDPOINT),
+        );
+        let client =
+            ApiCompactClient::new(transport, client_setup.api_provider, client_setup.api_auth)
+                .with_telemetry(Some(request_telemetry));
 
-        loop {
-            let client_setup = self.current_client_setup().await?;
-            let transport = ReqwestTransport::new(build_reqwest_client());
-            let request_telemetry = Self::build_request_telemetry(session_telemetry);
-            let client =
-                ApiCompactClient::new(transport, client_setup.api_provider, client_setup.api_auth)
-                    .with_telemetry(Some(request_telemetry));
-
-            let instructions = prompt.base_instructions.text.clone();
-            let payload = ApiCompactionInput {
-                model: &model_info.slug,
-                input: &prompt.input,
-                instructions: &instructions,
-            };
-
-            let mut extra_headers = self.build_subagent_headers();
-            extra_headers.extend(build_conversation_headers(Some(
-                self.state.conversation_id.to_string(),
-            )));
-
-            match client.compact_input(&payload, extra_headers).await {
-                Ok(output) => return Ok(output),
-                Err(ApiError::Transport(
-                    unauthorized_transport @ TransportError::Http { status, .. },
-                )) if status == StatusCode::UNAUTHORIZED => {
-                    handle_unauthorized(unauthorized_transport, &mut auth_recovery).await?;
-                    continue;
-                }
-                Err(err) if is_usage_limit_or_quota_error(&err) => {
-                    recover_from_usage_limit_or_quota(
-                        err,
-                        &mut usage_limit_recovery,
-                        auth_manager.as_ref(),
-                        &mut command_recovery_attempted,
-                    )
-                    .await?;
-                    continue;
-                }
-                Err(err) => return Err(map_api_error(err)),
+        let instructions = prompt.base_instructions.text.clone();
+        let input = prompt.get_formatted_input();
+        let tools = create_tools_json_for_responses_api(&prompt.tools)?;
+        let reasoning = Self::build_reasoning(model_info, effort, summary);
+        let verbosity = if model_info.support_verbosity {
+            self.state.model_verbosity.or(model_info.default_verbosity)
+        } else {
+            if self.state.model_verbosity.is_some() {
+                warn!(
+                    "model_verbosity is set but ignored as the model does not support verbosity: {}",
+                    model_info.slug
+                );
             }
-        }
+            None
+        };
+        let text = create_text_param_for_request(verbosity, &prompt.output_schema);
+        let payload = ApiCompactionInput {
+            model: &model_info.slug,
+            input: &input,
+            instructions: &instructions,
+            tools,
+            parallel_tool_calls: prompt.parallel_tool_calls,
+            reasoning,
+            text,
+        };
+
+        let mut extra_headers = self.build_subagent_headers();
+        extra_headers.extend(build_conversation_headers(Some(
+            self.state.conversation_id.to_string(),
+        )));
+        client
+            .compact_input(&payload, extra_headers)
+            .await
+            .map_err(map_api_error)
     }
 
     /// Builds memory summaries for each provided normalized raw memory.
@@ -372,7 +398,15 @@ impl ModelClient {
 
         let client_setup = self.current_client_setup().await?;
         let transport = ReqwestTransport::new(build_reqwest_client());
-        let request_telemetry = Self::build_request_telemetry(session_telemetry);
+        let request_telemetry = Self::build_request_telemetry(
+            session_telemetry,
+            AuthRequestTelemetryContext::new(
+                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                &client_setup.api_auth,
+                PendingUnauthorizedRetry::default(),
+            ),
+            RequestRouteTelemetry::for_endpoint(MEMORIES_SUMMARIZE_ENDPOINT),
+        );
         let client =
             ApiMemoriesClient::new(transport, client_setup.api_provider, client_setup.api_auth)
                 .with_telemetry(Some(request_telemetry));
@@ -412,10 +446,37 @@ impl ModelClient {
     }
 
     /// Builds request telemetry for unary API calls (e.g., Compact endpoint).
-    fn build_request_telemetry(session_telemetry: &SessionTelemetry) -> Arc<dyn RequestTelemetry> {
-        let telemetry = Arc::new(ApiTelemetry::new(session_telemetry.clone()));
+    fn build_request_telemetry(
+        session_telemetry: &SessionTelemetry,
+        auth_context: AuthRequestTelemetryContext,
+        request_route_telemetry: RequestRouteTelemetry,
+    ) -> Arc<dyn RequestTelemetry> {
+        let telemetry = Arc::new(ApiTelemetry::new(
+            session_telemetry.clone(),
+            auth_context,
+            request_route_telemetry,
+        ));
         let request_telemetry: Arc<dyn RequestTelemetry> = telemetry;
         request_telemetry
+    }
+
+    fn build_reasoning(
+        model_info: &ModelInfo,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+    ) -> Option<Reasoning> {
+        if model_info.supports_reasoning_summaries {
+            Some(Reasoning {
+                effort: effort.or(model_info.default_reasoning_level),
+                summary: if summary == ReasoningSummaryConfig::None {
+                    None
+                } else {
+                    Some(summary)
+                },
+            })
+        } else {
+            None
+        }
     }
 
     /// Returns whether the Responses-over-WebSocket transport is active for this session.
@@ -460,6 +521,7 @@ impl ModelClient {
     ///
     /// Both startup prewarm and in-turn `needs_new` reconnects call this path so handshake
     /// behavior remains consistent across both flows.
+    #[allow(clippy::too_many_arguments)]
     async fn connect_websocket(
         &self,
         session_telemetry: &SessionTelemetry,
@@ -467,17 +529,69 @@ impl ModelClient {
         api_auth: CoreAuthProvider,
         turn_state: Option<Arc<OnceLock<String>>>,
         turn_metadata_header: Option<&str>,
+        auth_context: AuthRequestTelemetryContext,
+        request_route_telemetry: RequestRouteTelemetry,
     ) -> std::result::Result<ApiWebSocketConnection, ApiError> {
         let headers = self.build_websocket_headers(turn_state.as_ref(), turn_metadata_header);
-        let websocket_telemetry = ModelClientSession::build_websocket_telemetry(session_telemetry);
-        ApiWebSocketResponsesClient::new(api_provider, api_auth)
+        let websocket_telemetry = ModelClientSession::build_websocket_telemetry(
+            session_telemetry,
+            auth_context,
+            request_route_telemetry,
+        );
+        let start = Instant::now();
+        let result = ApiWebSocketResponsesClient::new(api_provider, api_auth)
             .connect(
                 headers,
                 crate::default_client::default_headers(),
                 turn_state,
                 Some(websocket_telemetry),
             )
-            .await
+            .await;
+        let error_message = result.as_ref().err().map(telemetry_api_error_message);
+        let response_debug = result
+            .as_ref()
+            .err()
+            .map(extract_response_debug_context_from_api_error)
+            .unwrap_or_default();
+        let status = result.as_ref().err().and_then(api_error_http_status);
+        session_telemetry.record_websocket_connect(
+            start.elapsed(),
+            status,
+            error_message.as_deref(),
+            auth_context.auth_header_attached,
+            auth_context.auth_header_name,
+            auth_context.retry_after_unauthorized,
+            auth_context.recovery_mode,
+            auth_context.recovery_phase,
+            request_route_telemetry.endpoint,
+            false,
+            response_debug.request_id.as_deref(),
+            response_debug.cf_ray.as_deref(),
+            response_debug.auth_error.as_deref(),
+            response_debug.auth_error_code.as_deref(),
+        );
+        emit_feedback_request_tags(&FeedbackRequestTags {
+            endpoint: request_route_telemetry.endpoint,
+            auth_header_attached: auth_context.auth_header_attached,
+            auth_header_name: auth_context.auth_header_name,
+            auth_mode: auth_context.auth_mode,
+            auth_retry_after_unauthorized: Some(auth_context.retry_after_unauthorized),
+            auth_recovery_mode: auth_context.recovery_mode,
+            auth_recovery_phase: auth_context.recovery_phase,
+            auth_connection_reused: Some(false),
+            auth_request_id: response_debug.request_id.as_deref(),
+            auth_cf_ray: response_debug.cf_ray.as_deref(),
+            auth_error: response_debug.auth_error.as_deref(),
+            auth_error_code: response_debug.auth_error_code.as_deref(),
+            auth_recovery_followup_success: auth_context
+                .retry_after_unauthorized
+                .then_some(result.is_ok()),
+            auth_recovery_followup_status: auth_context
+                .retry_after_unauthorized
+                .then_some(status)
+                .flatten(),
+        });
+        result
     }
 
     /// Builds websocket handshake headers for both prewarm and turn-time reconnect.
@@ -490,14 +604,16 @@ impl ModelClient {
         turn_metadata_header: Option<&str>,
     ) -> ApiHeaderMap {
         let turn_metadata_header = parse_turn_metadata_header(turn_metadata_header);
+        let conversation_id = self.state.conversation_id.to_string();
         let mut headers = build_responses_headers(
             self.state.beta_features_header.as_deref(),
             turn_state,
             turn_metadata_header.as_ref(),
         );
-        headers.extend(build_conversation_headers(Some(
-            self.state.conversation_id.to_string(),
-        )));
+        if let Ok(header_value) = HeaderValue::from_str(&conversation_id) {
+            headers.insert("x-client-request-id", header_value);
+        }
+        headers.extend(build_conversation_headers(Some(conversation_id)));
         headers.insert(
             OPENAI_BETA_HEADER,
             HeaderValue::from_static(RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE),
@@ -718,7 +834,11 @@ impl ModelClientSession {
                 "failed to build websocket prewarm client setup: {err}"
             ))
         })?;
-
+        let auth_context = AuthRequestTelemetryContext::new(
+            client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+            &client_setup.api_auth,
+            PendingUnauthorizedRetry::default(),
+        );
         let connection = self
             .client
             .connect_websocket(
@@ -727,27 +847,40 @@ impl ModelClientSession {
                 client_setup.api_auth,
                 Some(Arc::clone(&self.turn_state)),
                 None,
+                auth_context,
+                RequestRouteTelemetry::for_endpoint(RESPONSES_ENDPOINT),
             )
             .await?;
         self.websocket_session.connection = Some(connection);
+        self.websocket_session.set_connection_reused(false);
         Ok(())
     }
-
-    fn reset_websocket_session(&mut self) {
-        self.websocket_session.connection = None;
-        self.websocket_session.last_request = None;
-        self.websocket_session.last_response_rx = None;
-    }
-
     /// Returns a websocket connection for this turn.
+    #[instrument(
+        name = "model_client.websocket_connection",
+        level = "info",
+        skip_all,
+        fields(
+            provider = %self.client.state.provider.name,
+            wire_api = %self.client.state.provider.wire_api,
+            transport = "responses_websocket",
+            api.path = "responses",
+            turn.has_metadata_header = params.turn_metadata_header.is_some()
+        )
+    )]
     async fn websocket_connection(
         &mut self,
-        session_telemetry: &SessionTelemetry,
-        api_provider: codex_api::Provider,
-        api_auth: CoreAuthProvider,
-        turn_metadata_header: Option<&str>,
-        options: &ApiResponsesOptions,
+        params: WebsocketConnectParams<'_>,
     ) -> std::result::Result<&ApiWebSocketConnection, ApiError> {
+        let WebsocketConnectParams {
+            session_telemetry,
+            api_provider,
+            api_auth,
+            turn_metadata_header,
+            options,
+            auth_context,
+            request_route_telemetry,
+        } = params;
         let needs_new = match self.websocket_session.connection.as_ref() {
             Some(conn) => conn.is_closed().await,
             None => true,
@@ -768,9 +901,14 @@ impl ModelClientSession {
                     api_auth,
                     Some(turn_state),
                     turn_metadata_header,
+                    auth_context,
+                    request_route_telemetry,
                 )
                 .await?;
             self.websocket_session.connection = Some(new_conn);
+            self.websocket_session.set_connection_reused(false);
+        } else {
+            self.websocket_session.set_connection_reused(true);
         }
 
         self.websocket_session
@@ -779,33 +917,6 @@ impl ModelClientSession {
             .ok_or(ApiError::Stream(
                 "websocket connection is unavailable".to_string(),
             ))
-    }
-
-    pub(crate) async fn try_recover_stream_usage_limit_or_quota(
-        &mut self,
-        err: &CodexErr,
-    ) -> Result<bool> {
-        let rotation_reason = match err {
-            CodexErr::UsageLimitReached(_) => CODEXN_ROTATION_REASON_USAGE_LIMIT,
-            CodexErr::QuotaExceeded => CODEXN_ROTATION_REASON_QUOTA_EXCEEDED,
-            _ => return Ok(false),
-        };
-
-        self.reset_websocket_session();
-        try_recover_usage_limit_or_quota(
-            &mut self.usage_limit_recovery,
-            self.client.state.auth_manager.as_ref(),
-            &mut self.command_recovery_attempted,
-            rotation_reason,
-        )
-        .await
-    }
-
-    pub(crate) fn reset_usage_limit_recovery_budget(&mut self) {
-        self.usage_limit_recovery = self.client.state.auth_manager.as_ref().map(|manager| {
-            manager.external_auth_recovery(ExternalAuthRefreshReason::UsageLimitReached)
-        });
-        self.command_recovery_attempted = false;
     }
 
     fn responses_request_compression(&self, auth: Option<&crate::auth::CodexAuth>) -> Compression {
@@ -824,8 +935,21 @@ impl ModelClientSession {
     /// Handles SSE fixtures, reasoning summaries, verbosity, and the
     /// `text` controls used for output schemas.
     #[allow(clippy::too_many_arguments)]
+    #[instrument(
+        name = "model_client.stream_responses_api",
+        level = "info",
+        skip_all,
+        fields(
+            model = %model_info.slug,
+            wire_api = %self.client.state.provider.wire_api,
+            transport = "responses_http",
+            http.method = "POST",
+            api.path = "responses",
+            turn.has_metadata_header = turn_metadata_header.is_some()
+        )
+    )]
     async fn stream_responses_api(
-        &mut self,
+        &self,
         prompt: &Prompt,
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
@@ -849,11 +973,20 @@ impl ModelClientSession {
         let mut auth_recovery = auth_manager
             .as_ref()
             .map(super::auth::AuthManager::unauthorized_recovery);
+        let mut pending_retry = PendingUnauthorizedRetry::default();
         loop {
             let client_setup = self.client.current_client_setup().await?;
             let transport = ReqwestTransport::new(build_reqwest_client());
-            let (request_telemetry, sse_telemetry) =
-                Self::build_streaming_telemetry(session_telemetry);
+            let request_auth_context = AuthRequestTelemetryContext::new(
+                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                &client_setup.api_auth,
+                pending_retry,
+            );
+            let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(
+                session_telemetry,
+                request_auth_context,
+                RequestRouteTelemetry::for_endpoint(RESPONSES_ENDPOINT),
+            );
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
             let options = self.build_responses_options(turn_metadata_header, compression);
 
@@ -881,17 +1014,14 @@ impl ModelClientSession {
                 Err(ApiError::Transport(
                     unauthorized_transport @ TransportError::Http { status, .. },
                 )) if status == StatusCode::UNAUTHORIZED => {
-                    handle_unauthorized(unauthorized_transport, &mut auth_recovery).await?;
-                    continue;
-                }
-                Err(err) if is_usage_limit_or_quota_error(&err) => {
-                    recover_from_usage_limit_or_quota(
-                        err,
-                        &mut self.usage_limit_recovery,
-                        auth_manager.as_ref(),
-                        &mut self.command_recovery_attempted,
-                    )
-                    .await?;
+                    pending_retry = PendingUnauthorizedRetry::from_recovery(
+                        handle_unauthorized(
+                            unauthorized_transport,
+                            &mut auth_recovery,
+                            session_telemetry,
+                        )
+                        .await?,
+                    );
                     continue;
                 }
                 Err(err) => return Err(map_api_error(err)),
@@ -901,6 +1031,19 @@ impl ModelClientSession {
 
     /// Streams a turn via the Responses API over WebSocket transport.
     #[allow(clippy::too_many_arguments)]
+    #[instrument(
+        name = "model_client.stream_responses_websocket",
+        level = "info",
+        skip_all,
+        fields(
+            model = %model_info.slug,
+            wire_api = %self.client.state.provider.wire_api,
+            transport = "responses_websocket",
+            api.path = "responses",
+            turn.has_metadata_header = turn_metadata_header.is_some(),
+            websocket.warmup = warmup
+        )
+    )]
     async fn stream_responses_websocket(
         &mut self,
         prompt: &Prompt,
@@ -917,8 +1060,14 @@ impl ModelClientSession {
         let mut auth_recovery = auth_manager
             .as_ref()
             .map(super::auth::AuthManager::unauthorized_recovery);
+        let mut pending_retry = PendingUnauthorizedRetry::default();
         loop {
             let client_setup = self.client.current_client_setup().await?;
+            let request_auth_context = AuthRequestTelemetryContext::new(
+                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                &client_setup.api_auth,
+                pending_retry,
+            );
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
 
             let options = self.build_responses_options(turn_metadata_header, compression);
@@ -939,13 +1088,17 @@ impl ModelClientSession {
             }
 
             match self
-                .websocket_connection(
+                .websocket_connection(WebsocketConnectParams {
                     session_telemetry,
-                    client_setup.api_provider,
-                    client_setup.api_auth,
+                    api_provider: client_setup.api_provider,
+                    api_auth: client_setup.api_auth,
                     turn_metadata_header,
-                    &options,
-                )
+                    options: &options,
+                    auth_context: request_auth_context,
+                    request_route_telemetry: RequestRouteTelemetry::for_endpoint(
+                        RESPONSES_ENDPOINT,
+                    ),
+                })
                 .await
             {
                 Ok(_) => {}
@@ -957,19 +1110,14 @@ impl ModelClientSession {
                 Err(ApiError::Transport(
                     unauthorized_transport @ TransportError::Http { status, .. },
                 )) if status == StatusCode::UNAUTHORIZED => {
-                    self.reset_websocket_session();
-                    handle_unauthorized(unauthorized_transport, &mut auth_recovery).await?;
-                    continue;
-                }
-                Err(err) if is_usage_limit_or_quota_error(&err) => {
-                    self.reset_websocket_session();
-                    recover_from_usage_limit_or_quota(
-                        err,
-                        &mut self.usage_limit_recovery,
-                        auth_manager.as_ref(),
-                        &mut self.command_recovery_attempted,
-                    )
-                    .await?;
+                    pending_retry = PendingUnauthorizedRetry::from_recovery(
+                        handle_unauthorized(
+                            unauthorized_transport,
+                            &mut auth_recovery,
+                            session_telemetry,
+                        )
+                        .await?,
+                    );
                     continue;
                 }
                 Err(err) => return Err(map_api_error(err)),
@@ -986,30 +1134,9 @@ impl ModelClientSession {
                         "websocket connection is unavailable".to_string(),
                     ))
                 })?
-                .stream_request(ws_request)
-                .await;
-            let stream_result = match stream_result {
-                Ok(stream) => stream,
-                Err(ApiError::Transport(
-                    unauthorized_transport @ TransportError::Http { status, .. },
-                )) if status == StatusCode::UNAUTHORIZED => {
-                    self.reset_websocket_session();
-                    handle_unauthorized(unauthorized_transport, &mut auth_recovery).await?;
-                    continue;
-                }
-                Err(err) if is_usage_limit_or_quota_error(&err) => {
-                    self.reset_websocket_session();
-                    recover_from_usage_limit_or_quota(
-                        err,
-                        &mut self.usage_limit_recovery,
-                        auth_manager.as_ref(),
-                        &mut self.command_recovery_attempted,
-                    )
-                    .await?;
-                    continue;
-                }
-                Err(err) => return Err(map_api_error(err)),
-            };
+                .stream_request(ws_request, self.websocket_session.connection_reused())
+                .await
+                .map_err(map_api_error)?;
             let (stream, last_request_rx) =
                 map_response_stream(stream_result, session_telemetry.clone());
             self.websocket_session.last_response_rx = Some(last_request_rx);
@@ -1020,8 +1147,14 @@ impl ModelClientSession {
     /// Builds request and SSE telemetry for streaming API calls.
     fn build_streaming_telemetry(
         session_telemetry: &SessionTelemetry,
+        auth_context: AuthRequestTelemetryContext,
+        request_route_telemetry: RequestRouteTelemetry,
     ) -> (Arc<dyn RequestTelemetry>, Arc<dyn SseTelemetry>) {
-        let telemetry = Arc::new(ApiTelemetry::new(session_telemetry.clone()));
+        let telemetry = Arc::new(ApiTelemetry::new(
+            session_telemetry.clone(),
+            auth_context,
+            request_route_telemetry,
+        ));
         let request_telemetry: Arc<dyn RequestTelemetry> = telemetry.clone();
         let sse_telemetry: Arc<dyn SseTelemetry> = telemetry;
         (request_telemetry, sse_telemetry)
@@ -1030,8 +1163,14 @@ impl ModelClientSession {
     /// Builds telemetry for the Responses API WebSocket transport.
     fn build_websocket_telemetry(
         session_telemetry: &SessionTelemetry,
+        auth_context: AuthRequestTelemetryContext,
+        request_route_telemetry: RequestRouteTelemetry,
     ) -> Arc<dyn WebsocketTelemetry> {
-        let telemetry = Arc::new(ApiTelemetry::new(session_telemetry.clone()));
+        let telemetry = Arc::new(ApiTelemetry::new(
+            session_telemetry.clone(),
+            auth_context,
+            request_route_telemetry,
+        ));
         let websocket_telemetry: Arc<dyn WebsocketTelemetry> = telemetry;
         websocket_telemetry
     }
@@ -1162,7 +1301,10 @@ impl ModelClientSession {
                 &[("from_wire_api", "responses_websocket")],
             );
 
-            self.reset_websocket_session();
+            self.websocket_session.connection = None;
+            self.websocket_session.last_request = None;
+            self.websocket_session.last_response_rx = None;
+            self.websocket_session.set_connection_reused(false);
         }
         activated
     }
@@ -1301,249 +1443,209 @@ where
 ///
 /// When refresh succeeds, the caller should retry the API call; otherwise
 /// the mapped `CodexErr` is returned to the caller.
+#[derive(Clone, Copy, Debug)]
+struct UnauthorizedRecoveryExecution {
+    mode: &'static str,
+    phase: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PendingUnauthorizedRetry {
+    retry_after_unauthorized: bool,
+    recovery_mode: Option<&'static str>,
+    recovery_phase: Option<&'static str>,
+}
+
+impl PendingUnauthorizedRetry {
+    fn from_recovery(recovery: UnauthorizedRecoveryExecution) -> Self {
+        Self {
+            retry_after_unauthorized: true,
+            recovery_mode: Some(recovery.mode),
+            recovery_phase: Some(recovery.phase),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct AuthRequestTelemetryContext {
+    auth_mode: Option<&'static str>,
+    auth_header_attached: bool,
+    auth_header_name: Option<&'static str>,
+    retry_after_unauthorized: bool,
+    recovery_mode: Option<&'static str>,
+    recovery_phase: Option<&'static str>,
+}
+
+impl AuthRequestTelemetryContext {
+    fn new(
+        auth_mode: Option<AuthMode>,
+        api_auth: &CoreAuthProvider,
+        retry: PendingUnauthorizedRetry,
+    ) -> Self {
+        Self {
+            auth_mode: auth_mode.map(|mode| match mode {
+                AuthMode::ApiKey => "ApiKey",
+                AuthMode::Chatgpt => "Chatgpt",
+            }),
+            auth_header_attached: api_auth.auth_header_attached(),
+            auth_header_name: api_auth.auth_header_name(),
+            retry_after_unauthorized: retry.retry_after_unauthorized,
+            recovery_mode: retry.recovery_mode,
+            recovery_phase: retry.recovery_phase,
+        }
+    }
+}
+
+struct WebsocketConnectParams<'a> {
+    session_telemetry: &'a SessionTelemetry,
+    api_provider: codex_api::Provider,
+    api_auth: CoreAuthProvider,
+    turn_metadata_header: Option<&'a str>,
+    options: &'a ApiResponsesOptions,
+    auth_context: AuthRequestTelemetryContext,
+    request_route_telemetry: RequestRouteTelemetry,
+}
+
 async fn handle_unauthorized(
     transport: TransportError,
     auth_recovery: &mut Option<UnauthorizedRecovery>,
-) -> Result<()> {
+    session_telemetry: &SessionTelemetry,
+) -> Result<UnauthorizedRecoveryExecution> {
+    let debug = extract_response_debug_context(&transport);
     if let Some(recovery) = auth_recovery
         && recovery.has_next()
     {
+        let mode = recovery.mode_name();
+        let phase = recovery.step_name();
         return match recovery.next().await {
-            Ok(_) => Ok(()),
-            Err(RefreshTokenError::Permanent(failed)) => Err(CodexErr::RefreshTokenFailed(failed)),
-            Err(RefreshTokenError::Transient(other)) => Err(CodexErr::Io(other)),
-        };
-    }
-
-    Err(map_api_error(ApiError::Transport(transport)))
-}
-
-fn is_usage_limit_or_quota_error(err: &ApiError) -> bool {
-    match err {
-        ApiError::QuotaExceeded => true,
-        ApiError::Transport(transport) => {
-            is_usage_limit_reached_transport(transport) || is_quota_exceeded_transport(transport)
-        }
-        _ => false,
-    }
-}
-
-fn rotation_reason_for_error(err: &ApiError) -> &'static str {
-    match err {
-        ApiError::QuotaExceeded => CODEXN_ROTATION_REASON_QUOTA_EXCEEDED,
-        ApiError::Transport(transport) if is_quota_exceeded_transport(transport) => {
-            CODEXN_ROTATION_REASON_QUOTA_EXCEEDED
-        }
-        ApiError::Transport(transport) if is_usage_limit_reached_transport(transport) => {
-            CODEXN_ROTATION_REASON_USAGE_LIMIT
-        }
-        _ => CODEXN_ROTATION_REASON_USAGE_LIMIT,
-    }
-}
-
-fn is_usage_limit_reached_transport(transport: &TransportError) -> bool {
-    match transport {
-        TransportError::Http { status, body, .. } if *status == StatusCode::TOO_MANY_REQUESTS => {
-            body.as_deref().is_some_and(is_usage_limit_reached_body)
-        }
-        _ => false,
-    }
-}
-
-fn is_quota_exceeded_transport(transport: &TransportError) -> bool {
-    match transport {
-        TransportError::Http { status, body, .. } if *status == StatusCode::TOO_MANY_REQUESTS => {
-            body.as_deref().is_some_and(is_quota_exceeded_body)
-        }
-        _ => false,
-    }
-}
-
-fn is_usage_limit_reached_body(body: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|json| {
-            json.get("error")
-                .and_then(|error| error.get("type"))
-                .and_then(serde_json::Value::as_str)
-                .map(|error_type| error_type == "usage_limit_reached")
-        })
-        .unwrap_or_else(|| body.contains("usage_limit_reached"))
-}
-
-fn is_quota_exceeded_body(body: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|json| {
-            json.get("error").and_then(|error| {
-                let code = error.get("code").and_then(serde_json::Value::as_str);
-                let error_type = error.get("type").and_then(serde_json::Value::as_str);
-                if code == Some("insufficient_quota")
-                    || error_type == Some("insufficient_quota")
-                    || error_type == Some("quota_exceeded")
-                {
-                    Some(true)
-                } else {
-                    None
-                }
-            })
-        })
-        .unwrap_or_else(|| body.contains("insufficient_quota") || body.contains("quota_exceeded"))
-}
-
-/// Handles usage/quota failures by asking the external auth owner for a fresh
-/// token set once, then allowing the caller to retry the request.
-async fn recover_from_usage_limit_or_quota(
-    err: ApiError,
-    usage_limit_recovery: &mut Option<ExternalAuthRecovery>,
-    auth_manager: Option<&Arc<AuthManager>>,
-    command_recovery_attempted: &mut bool,
-) -> Result<()> {
-    let rotation_reason = rotation_reason_for_error(&err);
-    if try_recover_usage_limit_or_quota(
-        usage_limit_recovery,
-        auth_manager,
-        command_recovery_attempted,
-        rotation_reason,
-    )
-    .await?
-    {
-        return Ok(());
-    }
-
-    Err(map_api_error(err))
-}
-
-async fn try_recover_usage_limit_or_quota(
-    usage_limit_recovery: &mut Option<ExternalAuthRecovery>,
-    auth_manager: Option<&Arc<AuthManager>>,
-    command_recovery_attempted: &mut bool,
-    rotation_reason: &str,
-) -> Result<bool> {
-    if let Some(recovery) = usage_limit_recovery
-        && recovery.has_next()
-    {
-        let external_result = recovery.next().await;
-        return match external_result {
-            Ok(_) => Ok(true),
-            Err(RefreshTokenError::Permanent(failed)) => Err(CodexErr::RefreshTokenFailed(failed)),
+            Ok(step_result) => {
+                session_telemetry.record_auth_recovery(
+                    mode,
+                    phase,
+                    "recovery_succeeded",
+                    debug.request_id.as_deref(),
+                    debug.cf_ray.as_deref(),
+                    debug.auth_error.as_deref(),
+                    debug.auth_error_code.as_deref(),
+                    None,
+                    step_result.auth_state_changed(),
+                );
+                emit_feedback_auth_recovery_tags(
+                    mode,
+                    phase,
+                    "recovery_succeeded",
+                    debug.request_id.as_deref(),
+                    debug.cf_ray.as_deref(),
+                    debug.auth_error.as_deref(),
+                    debug.auth_error_code.as_deref(),
+                );
+                Ok(UnauthorizedRecoveryExecution { mode, phase })
+            }
+            Err(RefreshTokenError::Permanent(failed)) => {
+                session_telemetry.record_auth_recovery(
+                    mode,
+                    phase,
+                    "recovery_failed_permanent",
+                    debug.request_id.as_deref(),
+                    debug.cf_ray.as_deref(),
+                    debug.auth_error.as_deref(),
+                    debug.auth_error_code.as_deref(),
+                    None,
+                    None,
+                );
+                emit_feedback_auth_recovery_tags(
+                    mode,
+                    phase,
+                    "recovery_failed_permanent",
+                    debug.request_id.as_deref(),
+                    debug.cf_ray.as_deref(),
+                    debug.auth_error.as_deref(),
+                    debug.auth_error_code.as_deref(),
+                );
+                Err(CodexErr::RefreshTokenFailed(failed))
+            }
             Err(RefreshTokenError::Transient(other)) => {
-                if try_recover_with_auth_rotate_command(
-                    auth_manager,
-                    command_recovery_attempted,
-                    rotation_reason,
-                )
-                .await?
-                {
-                    Ok(true)
-                } else {
-                    Err(CodexErr::Io(other))
-                }
+                session_telemetry.record_auth_recovery(
+                    mode,
+                    phase,
+                    "recovery_failed_transient",
+                    debug.request_id.as_deref(),
+                    debug.cf_ray.as_deref(),
+                    debug.auth_error.as_deref(),
+                    debug.auth_error_code.as_deref(),
+                    None,
+                    None,
+                );
+                emit_feedback_auth_recovery_tags(
+                    mode,
+                    phase,
+                    "recovery_failed_transient",
+                    debug.request_id.as_deref(),
+                    debug.cf_ray.as_deref(),
+                    debug.auth_error.as_deref(),
+                    debug.auth_error_code.as_deref(),
+                );
+                Err(CodexErr::Io(other))
             }
         };
     }
 
-    try_recover_with_auth_rotate_command(auth_manager, command_recovery_attempted, rotation_reason)
-        .await
-}
-
-async fn try_recover_with_auth_rotate_command(
-    auth_manager: Option<&Arc<AuthManager>>,
-    command_recovery_attempted: &mut bool,
-    rotation_reason: &str,
-) -> Result<bool> {
-    if *command_recovery_attempted {
-        return Ok(false);
-    }
-
-    let rotate_cmd = std::env::var(CODEXN_AUTH_ROTATE_CMD_ENV)
-        .ok()
-        .map(|cmd| cmd.trim().to_string())
-        .filter(|cmd| !cmd.is_empty());
-    let Some(rotate_cmd) = rotate_cmd else {
-        return Ok(false);
+    let (mode, phase, recovery_reason) = match auth_recovery.as_ref() {
+        Some(recovery) => (
+            recovery.mode_name(),
+            recovery.step_name(),
+            Some(recovery.unavailable_reason()),
+        ),
+        None => ("none", "none", Some("auth_manager_missing")),
     };
+    session_telemetry.record_auth_recovery(
+        mode,
+        phase,
+        "recovery_not_run",
+        debug.request_id.as_deref(),
+        debug.cf_ray.as_deref(),
+        debug.auth_error.as_deref(),
+        debug.auth_error_code.as_deref(),
+        recovery_reason,
+        None,
+    );
+    emit_feedback_auth_recovery_tags(
+        mode,
+        phase,
+        "recovery_not_run",
+        debug.request_id.as_deref(),
+        debug.cf_ray.as_deref(),
+        debug.auth_error.as_deref(),
+        debug.auth_error_code.as_deref(),
+    );
 
-    *command_recovery_attempted = true;
-    warn!("attempting auth rotation via command fallback");
-
-    let (program, args) = parse_auth_rotate_command(&rotate_cmd)?;
-    let mut command = tokio::process::Command::new(program);
-    command.args(args);
-    command.env("CODEXN_ROTATION_REASON", rotation_reason);
-    command.stderr(std::process::Stdio::piped());
-    command.stdout(std::process::Stdio::null());
-
-    let command_timeout = auth_rotate_command_timeout();
-    let output = timeout(command_timeout, command.output())
-        .await
-        .map_err(|_| {
-            CodexErr::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!(
-                    "auth rotation command timed out after {}ms",
-                    command_timeout.as_millis()
-                ),
-            ))
-        })?
-        .map_err(CodexErr::Io)?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let message = if stderr.is_empty() {
-            format!("auth rotation command failed with status {}", output.status)
-        } else {
-            format!(
-                "auth rotation command failed with status {}: {}",
-                output.status, stderr
-            )
-        };
-        return Err(CodexErr::Io(std::io::Error::other(message)));
-    }
-
-    if let Some(auth_manager) = auth_manager {
-        auth_manager.reload();
-    }
-    Ok(true)
+    Err(map_api_error(ApiError::Transport(transport)))
 }
 
-fn auth_rotate_command_timeout() -> Duration {
-    let timeout_ms = std::env::var(CODEXN_AUTH_ROTATE_CMD_TIMEOUT_MS_ENV)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(AUTH_ROTATE_CMD_TIMEOUT_DEFAULT_MS);
-    Duration::from_millis(timeout_ms)
-}
-
-fn parse_auth_rotate_command(raw: &str) -> Result<(OsString, Vec<OsString>)> {
-    let parts = shlex::split(raw).ok_or_else(|| {
-        CodexErr::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "invalid auth rotation command quoting",
-        ))
-    })?;
-
-    let mut iter = parts.into_iter();
-    let program = iter.next().ok_or_else(|| {
-        CodexErr::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "auth rotation command is empty",
-        ))
-    })?;
-    let args = iter.map(OsString::from).collect::<Vec<_>>();
-    Ok((OsString::from(program), args))
+fn api_error_http_status(error: &ApiError) -> Option<u16> {
+    match error {
+        ApiError::Transport(TransportError::Http { status, .. }) => Some(status.as_u16()),
+        _ => None,
+    }
 }
 
 struct ApiTelemetry {
     session_telemetry: SessionTelemetry,
+    auth_context: AuthRequestTelemetryContext,
+    request_route_telemetry: RequestRouteTelemetry,
 }
 
 impl ApiTelemetry {
-    fn new(session_telemetry: SessionTelemetry) -> Self {
-        Self { session_telemetry }
+    fn new(
+        session_telemetry: SessionTelemetry,
+        auth_context: AuthRequestTelemetryContext,
+        request_route_telemetry: RequestRouteTelemetry,
+    ) -> Self {
+        Self {
+            session_telemetry,
+            auth_context,
+            request_route_telemetry,
+        }
     }
 }
 
@@ -1555,13 +1657,50 @@ impl RequestTelemetry for ApiTelemetry {
         error: Option<&TransportError>,
         duration: Duration,
     ) {
-        let error_message = error.map(std::string::ToString::to_string);
+        let error_message = error.map(telemetry_transport_error_message);
+        let status = status.map(|s| s.as_u16());
+        let debug = error
+            .map(extract_response_debug_context)
+            .unwrap_or_default();
         self.session_telemetry.record_api_request(
             attempt,
-            status.map(|s| s.as_u16()),
+            status,
             error_message.as_deref(),
             duration,
+            self.auth_context.auth_header_attached,
+            self.auth_context.auth_header_name,
+            self.auth_context.retry_after_unauthorized,
+            self.auth_context.recovery_mode,
+            self.auth_context.recovery_phase,
+            self.request_route_telemetry.endpoint,
+            debug.request_id.as_deref(),
+            debug.cf_ray.as_deref(),
+            debug.auth_error.as_deref(),
+            debug.auth_error_code.as_deref(),
         );
+        emit_feedback_request_tags(&FeedbackRequestTags {
+            endpoint: self.request_route_telemetry.endpoint,
+            auth_header_attached: self.auth_context.auth_header_attached,
+            auth_header_name: self.auth_context.auth_header_name,
+            auth_mode: self.auth_context.auth_mode,
+            auth_retry_after_unauthorized: Some(self.auth_context.retry_after_unauthorized),
+            auth_recovery_mode: self.auth_context.recovery_mode,
+            auth_recovery_phase: self.auth_context.recovery_phase,
+            auth_connection_reused: None,
+            auth_request_id: debug.request_id.as_deref(),
+            auth_cf_ray: debug.cf_ray.as_deref(),
+            auth_error: debug.auth_error.as_deref(),
+            auth_error_code: debug.auth_error_code.as_deref(),
+            auth_recovery_followup_success: self
+                .auth_context
+                .retry_after_unauthorized
+                .then_some(error.is_none()),
+            auth_recovery_followup_status: self
+                .auth_context
+                .retry_after_unauthorized
+                .then_some(status)
+                .flatten(),
+        });
     }
 }
 
@@ -1579,10 +1718,40 @@ impl SseTelemetry for ApiTelemetry {
 }
 
 impl WebsocketTelemetry for ApiTelemetry {
-    fn on_ws_request(&self, duration: Duration, error: Option<&ApiError>) {
-        let error_message = error.map(std::string::ToString::to_string);
-        self.session_telemetry
-            .record_websocket_request(duration, error_message.as_deref());
+    fn on_ws_request(&self, duration: Duration, error: Option<&ApiError>, connection_reused: bool) {
+        let error_message = error.map(telemetry_api_error_message);
+        let status = error.and_then(api_error_http_status);
+        let debug = error
+            .map(extract_response_debug_context_from_api_error)
+            .unwrap_or_default();
+        self.session_telemetry.record_websocket_request(
+            duration,
+            error_message.as_deref(),
+            connection_reused,
+        );
+        emit_feedback_request_tags(&FeedbackRequestTags {
+            endpoint: self.request_route_telemetry.endpoint,
+            auth_header_attached: self.auth_context.auth_header_attached,
+            auth_header_name: self.auth_context.auth_header_name,
+            auth_mode: self.auth_context.auth_mode,
+            auth_retry_after_unauthorized: Some(self.auth_context.retry_after_unauthorized),
+            auth_recovery_mode: self.auth_context.recovery_mode,
+            auth_recovery_phase: self.auth_context.recovery_phase,
+            auth_connection_reused: Some(connection_reused),
+            auth_request_id: debug.request_id.as_deref(),
+            auth_cf_ray: debug.cf_ray.as_deref(),
+            auth_error: debug.auth_error.as_deref(),
+            auth_error_code: debug.auth_error_code.as_deref(),
+            auth_recovery_followup_success: self
+                .auth_context
+                .retry_after_unauthorized
+                .then_some(error.is_none()),
+            auth_recovery_followup_status: self
+                .auth_context
+                .retry_after_unauthorized
+                .then_some(status)
+                .flatten(),
+        });
     }
 
     fn on_ws_event(
@@ -1596,356 +1765,5 @@ impl WebsocketTelemetry for ApiTelemetry {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::CODEXN_AUTH_ROTATE_CMD_ENV;
-    use super::CODEXN_AUTH_ROTATE_CMD_TIMEOUT_MS_ENV;
-    use super::CODEXN_ROTATION_REASON_QUOTA_EXCEEDED;
-    use super::CODEXN_ROTATION_REASON_USAGE_LIMIT;
-    use super::ModelClient;
-    use super::is_usage_limit_or_quota_error;
-    use super::parse_auth_rotate_command;
-    use super::rotation_reason_for_error;
-    use super::try_recover_with_auth_rotate_command;
-    use codex_api::TransportError;
-    use codex_api::error::ApiError;
-    use codex_otel::SessionTelemetry;
-    use codex_protocol::ThreadId;
-    use codex_protocol::openai_models::ModelInfo;
-    use codex_protocol::protocol::SessionSource;
-    use codex_protocol::protocol::SubAgentSource;
-    use pretty_assertions::assert_eq;
-    use reqwest::StatusCode;
-    use serde_json::json;
-    use serial_test::serial;
-
-    fn test_model_client(session_source: SessionSource) -> ModelClient {
-        let provider = crate::model_provider_info::create_oss_provider_with_base_url(
-            "https://example.com/v1",
-            crate::model_provider_info::WireApi::Responses,
-        );
-        ModelClient::new(
-            None,
-            ThreadId::new(),
-            provider,
-            session_source,
-            None,
-            false,
-            false,
-            false,
-            None,
-        )
-    }
-
-    fn test_model_info() -> ModelInfo {
-        serde_json::from_value(json!({
-            "slug": "gpt-test",
-            "display_name": "gpt-test",
-            "description": "desc",
-            "default_reasoning_level": "medium",
-            "supported_reasoning_levels": [
-                {"effort": "medium", "description": "medium"}
-            ],
-            "shell_type": "shell_command",
-            "visibility": "list",
-            "supported_in_api": true,
-            "priority": 1,
-            "upgrade": null,
-            "base_instructions": "base instructions",
-            "model_messages": null,
-            "supports_reasoning_summaries": false,
-            "support_verbosity": false,
-            "default_verbosity": null,
-            "apply_patch_tool_type": null,
-            "truncation_policy": {"mode": "bytes", "limit": 10000},
-            "supports_parallel_tool_calls": false,
-            "supports_image_detail_original": false,
-            "context_window": 272000,
-            "auto_compact_token_limit": null,
-            "experimental_supported_tools": []
-        }))
-        .expect("deserialize test model info")
-    }
-
-    fn test_session_telemetry() -> SessionTelemetry {
-        SessionTelemetry::new(
-            ThreadId::new(),
-            "gpt-test",
-            "gpt-test",
-            None,
-            None,
-            None,
-            "test-originator".to_string(),
-            false,
-            "test-terminal".to_string(),
-            SessionSource::Cli,
-        )
-    }
-
-    #[test]
-    fn build_subagent_headers_sets_other_subagent_label() {
-        let client = test_model_client(SessionSource::SubAgent(SubAgentSource::Other(
-            "memory_consolidation".to_string(),
-        )));
-        let headers = client.build_subagent_headers();
-        let value = headers
-            .get("x-openai-subagent")
-            .and_then(|value| value.to_str().ok());
-        assert_eq!(value, Some("memory_consolidation"));
-    }
-
-    #[tokio::test]
-    async fn summarize_memories_returns_empty_for_empty_input() {
-        let client = test_model_client(SessionSource::Cli);
-        let model_info = test_model_info();
-        let session_telemetry = test_session_telemetry();
-
-        let output = client
-            .summarize_memories(Vec::new(), &model_info, None, &session_telemetry)
-            .await
-            .expect("empty summarize request should succeed");
-        assert_eq!(output.len(), 0);
-    }
-
-    #[test]
-    fn usage_limit_or_quota_error_matches_quota_exceeded() {
-        assert!(is_usage_limit_or_quota_error(&ApiError::QuotaExceeded));
-    }
-
-    #[test]
-    fn usage_limit_or_quota_error_matches_usage_limit_transport_error() {
-        let err = ApiError::Transport(TransportError::Http {
-            status: StatusCode::TOO_MANY_REQUESTS,
-            url: Some("https://example.com/v1/responses".to_string()),
-            headers: None,
-            body: Some(
-                serde_json::json!({
-                    "error": { "type": "usage_limit_reached" }
-                })
-                .to_string(),
-            ),
-        });
-        assert!(is_usage_limit_or_quota_error(&err));
-    }
-
-    #[test]
-    fn usage_limit_or_quota_error_matches_transport_quota_error() {
-        let err = ApiError::Transport(TransportError::Http {
-            status: StatusCode::TOO_MANY_REQUESTS,
-            url: Some("https://example.com/v1/responses".to_string()),
-            headers: None,
-            body: Some(
-                serde_json::json!({
-                    "error": {
-                        "code": "insufficient_quota",
-                        "message": "quota exceeded"
-                    }
-                })
-                .to_string(),
-            ),
-        });
-        assert!(is_usage_limit_or_quota_error(&err));
-    }
-
-    #[test]
-    fn rotation_reason_tracks_quota_and_usage_limit_errors() {
-        let quota_error = ApiError::QuotaExceeded;
-        assert_eq!(
-            rotation_reason_for_error(&quota_error),
-            CODEXN_ROTATION_REASON_QUOTA_EXCEEDED
-        );
-
-        let usage_error = ApiError::Transport(TransportError::Http {
-            status: StatusCode::TOO_MANY_REQUESTS,
-            url: Some("https://example.com/v1/responses".to_string()),
-            headers: None,
-            body: Some(
-                serde_json::json!({
-                    "error": { "type": "usage_limit_reached" }
-                })
-                .to_string(),
-            ),
-        });
-        assert_eq!(
-            rotation_reason_for_error(&usage_error),
-            CODEXN_ROTATION_REASON_USAGE_LIMIT
-        );
-
-        let transport_quota_error = ApiError::Transport(TransportError::Http {
-            status: StatusCode::TOO_MANY_REQUESTS,
-            url: Some("https://example.com/v1/responses".to_string()),
-            headers: None,
-            body: Some(
-                serde_json::json!({
-                    "error": {
-                        "code": "insufficient_quota",
-                        "message": "quota exceeded"
-                    }
-                })
-                .to_string(),
-            ),
-        });
-        assert_eq!(
-            rotation_reason_for_error(&transport_quota_error),
-            CODEXN_ROTATION_REASON_QUOTA_EXCEEDED
-        );
-    }
-
-    #[test]
-    fn usage_limit_or_quota_error_ignores_non_usage_429_transport_error() {
-        let err = ApiError::Transport(TransportError::Http {
-            status: StatusCode::TOO_MANY_REQUESTS,
-            url: Some("https://example.com/v1/responses".to_string()),
-            headers: None,
-            body: Some(
-                serde_json::json!({
-                    "error": { "type": "slow_down" }
-                })
-                .to_string(),
-            ),
-        });
-        assert!(!is_usage_limit_or_quota_error(&err));
-    }
-
-    struct EnvVarGuard {
-        key: &'static str,
-        original: Option<String>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let original = std::env::var(key).ok();
-            unsafe { std::env::set_var(key, value) };
-            Self { key, original }
-        }
-
-        fn remove(key: &'static str) -> Self {
-            let original = std::env::var(key).ok();
-            unsafe { std::env::remove_var(key) };
-            Self { key, original }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            match &self.original {
-                Some(value) => unsafe { std::env::set_var(self.key, value) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn auth_rotate_command_recovery_returns_false_when_unconfigured() {
-        let _guard = EnvVarGuard::remove(CODEXN_AUTH_ROTATE_CMD_ENV);
-        let mut attempted = false;
-        let recovered = try_recover_with_auth_rotate_command(
-            None,
-            &mut attempted,
-            CODEXN_ROTATION_REASON_USAGE_LIMIT,
-        )
-        .await
-        .expect("missing command should not error");
-        assert!(!recovered);
-        assert!(!attempted);
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn auth_rotate_command_recovery_succeeds_without_auth_manager() {
-        let _guard = EnvVarGuard::set(CODEXN_AUTH_ROTATE_CMD_ENV, "true");
-        let mut attempted = false;
-        let recovered = try_recover_with_auth_rotate_command(
-            None,
-            &mut attempted,
-            CODEXN_ROTATION_REASON_USAGE_LIMIT,
-        )
-        .await
-        .expect("configured command should succeed");
-        assert!(recovered);
-        assert!(attempted);
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn auth_rotate_command_recovery_surfaces_command_failure() {
-        let _guard = EnvVarGuard::set(CODEXN_AUTH_ROTATE_CMD_ENV, "false");
-        let mut attempted = false;
-        let err = try_recover_with_auth_rotate_command(
-            None,
-            &mut attempted,
-            CODEXN_ROTATION_REASON_USAGE_LIMIT,
-        )
-        .await
-        .expect_err("failing command should return error");
-        assert!(attempted);
-        let rendered = err.to_string();
-        assert!(rendered.contains("auth rotation command failed"));
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    #[tokio::test]
-    #[serial]
-    async fn auth_rotate_command_recovery_surfaces_timeout() {
-        let _command_guard = EnvVarGuard::set(CODEXN_AUTH_ROTATE_CMD_ENV, "sh -c 'sleep 1'");
-        let _timeout_guard = EnvVarGuard::set(CODEXN_AUTH_ROTATE_CMD_TIMEOUT_MS_ENV, "5");
-        let mut attempted = false;
-        let err = try_recover_with_auth_rotate_command(
-            None,
-            &mut attempted,
-            CODEXN_ROTATION_REASON_USAGE_LIMIT,
-        )
-        .await
-        .expect_err("long-running command should time out");
-
-        assert!(attempted);
-        let rendered = err.to_string();
-        assert!(rendered.contains("timed out"));
-        assert!(rendered.contains("5ms"));
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn auth_rotate_command_recovery_sets_rotation_reason_env() {
-        let _guard = EnvVarGuard::set(
-            CODEXN_AUTH_ROTATE_CMD_ENV,
-            r#"sh -c 'test "$CODEXN_ROTATION_REASON" = quota_exceeded'"#,
-        );
-        let mut attempted = false;
-        let recovered = try_recover_with_auth_rotate_command(
-            None,
-            &mut attempted,
-            CODEXN_ROTATION_REASON_QUOTA_EXCEEDED,
-        )
-        .await
-        .expect("rotation reason should be exported to command env");
-        assert!(recovered);
-        assert!(attempted);
-    }
-
-    #[test]
-    fn parse_auth_rotate_command_supports_quoted_args() {
-        let (program, args) = parse_auth_rotate_command(
-            r#"codex-auth-rotate --reason "usage limit reached" --quiet"#,
-        )
-        .expect("parse valid command");
-
-        assert_eq!(program.to_string_lossy(), "codex-auth-rotate");
-        assert_eq!(
-            args.iter()
-                .map(|arg| arg.to_string_lossy().to_string())
-                .collect::<Vec<_>>(),
-            vec![
-                "--reason".to_string(),
-                "usage limit reached".to_string(),
-                "--quiet".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn parse_auth_rotate_command_rejects_empty_command() {
-        let err = parse_auth_rotate_command("   ").expect_err("empty command should fail");
-        assert!(err.to_string().contains("empty"));
-    }
-}
+#[path = "client_tests.rs"]
+mod tests;

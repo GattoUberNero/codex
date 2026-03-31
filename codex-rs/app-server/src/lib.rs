@@ -65,6 +65,7 @@ mod dynamic_tools;
 mod error_code;
 mod external_agent_config_api;
 mod filters;
+mod fs_api;
 mod fuzzy_file_search;
 pub mod in_process;
 mod message_processor;
@@ -104,6 +105,8 @@ enum OutboundControlEvent {
     Opened {
         connection_id: ConnectionId,
         writer: mpsc::Sender<crate::outgoing_message::OutgoingMessage>,
+        // Allow codex/event/* notifications to be emitted.
+        allow_legacy_notifications: bool,
         disconnect_sender: Option<CancellationToken>,
         initialized: Arc<AtomicBool>,
         experimental_api_enabled: Arc<AtomicBool>,
@@ -467,6 +470,14 @@ pub async fn run_main_with_transport(
     if let Some(warning) = project_config_warning(&config) {
         config_warnings.push(warning);
     }
+    for warning in &config.startup_warnings {
+        config_warnings.push(ConfigWarningNotification {
+            summary: warning.clone(),
+            details: None,
+            path: None,
+            range: None,
+        });
+    }
 
     let feedback = CodexFeedback::new();
 
@@ -514,7 +525,6 @@ pub async fn run_main_with_transport(
         .map(|layer| layer.with_filter(Targets::new().with_default(Level::TRACE)));
     let otel_logger_layer = otel.as_ref().and_then(|o| o.logger_layer());
     let otel_tracing_layer = otel.as_ref().and_then(|o| o.tracing_layer());
-
     let _ = tracing_subscriber::registry()
         .with(stderr_fmt)
         .with(feedback_layer)
@@ -543,6 +553,7 @@ pub async fn run_main_with_transport(
                             OutboundControlEvent::Opened {
                                 connection_id,
                                 writer,
+                                allow_legacy_notifications,
                                 disconnect_sender,
                                 initialized,
                                 experimental_api_enabled,
@@ -555,6 +566,7 @@ pub async fn run_main_with_transport(
                                         initialized,
                                         experimental_api_enabled,
                                         opted_out_notification_methods,
+                                        allow_legacy_notifications,
                                         disconnect_sender,
                                     ),
                                 );
@@ -597,6 +609,8 @@ pub async fn run_main_with_transport(
             cli_overrides,
             loader_overrides,
             cloud_requirements: cloud_requirements.clone(),
+            auth_manager: None,
+            thread_manager: None,
             feedback: feedback.clone(),
             log_db,
             config_warnings,
@@ -652,6 +666,7 @@ pub async fn run_main_with_transport(
                             TransportEvent::ConnectionOpened {
                                 connection_id,
                                 writer,
+                                allow_legacy_notifications,
                                 disconnect_sender,
                             } => {
                                 let outbound_initialized = Arc::new(AtomicBool::new(false));
@@ -663,6 +678,7 @@ pub async fn run_main_with_transport(
                                     .send(OutboundControlEvent::Opened {
                                         connection_id,
                                         writer,
+                                        allow_legacy_notifications,
                                         disconnect_sender,
                                         initialized: Arc::clone(&outbound_initialized),
                                         experimental_api_enabled: Arc::clone(
@@ -805,6 +821,10 @@ pub async fn run_main_with_transport(
                 }
             }
 
+            if !shutdown_state.forced() {
+                processor.drain_background_tasks().await;
+                processor.shutdown_threads().await;
+            }
             info!("processor task exited (channel closed)");
         }
     });
@@ -825,6 +845,10 @@ pub async fn run_main_with_transport(
 
     for handle in stdio_handles {
         let _ = handle.await;
+    }
+
+    if let Some(otel) = otel {
+        otel.shutdown();
     }
 
     Ok(())
