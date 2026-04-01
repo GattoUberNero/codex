@@ -1,0 +1,60 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "NeroAutoRuntimeConfig": {
+      "properties": {
+        "autonomy_level": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "max_auto_rounds": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "autonomy_level",
+        "enabled",
+        "max_auto_rounds"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "autonomyStepPerRound": {
+      "format": "double",
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "doneStopScope": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "expectedVersion": {
+      "type": "string"
+    },
+    "resetCounter": {
+      "type": "boolean"
+    },
+    "runtime": {
+      "$ref": "#/definitions/NeroAutoRuntimeConfig"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "expectedVersion",
+    "runtime",
+    "threadId"
+  ],
+  "title": "ThreadSessionAutoUpdateParams",
+  "type": "object"
+}

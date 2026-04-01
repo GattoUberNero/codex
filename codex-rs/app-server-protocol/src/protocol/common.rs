@@ -317,6 +317,14 @@ client_request_definitions! {
         params: v2::ThreadReadParams,
         response: v2::ThreadReadResponse,
     },
+    ThreadSessionAutoRead => "thread/sessionAuto/read" {
+        params: v2::ThreadSessionAutoReadParams,
+        response: v2::ThreadSessionAutoReadResponse,
+    },
+    ThreadSessionAutoUpdate => "thread/sessionAuto/update" {
+        params: v2::ThreadSessionAutoUpdateParams,
+        response: v2::ThreadSessionAutoUpdateResponse,
+    },
     ThreadRolloutAnalyze => "thread/rollout/analyze" {
         params: v2::ThreadRolloutAnalyzeParams,
         response: v2::ThreadRolloutAnalyzeResponse,

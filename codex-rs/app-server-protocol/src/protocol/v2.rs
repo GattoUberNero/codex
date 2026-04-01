@@ -60,6 +60,7 @@ use codex_protocol::protocol::HookRunStatus as CoreHookRunStatus;
 use codex_protocol::protocol::HookRunSummary as CoreHookRunSummary;
 use codex_protocol::protocol::HookScope as CoreHookScope;
 use codex_protocol::protocol::ModelRerouteReason as CoreModelRerouteReason;
+use codex_protocol::protocol::NeroAutoRuntimeConfig;
 use codex_protocol::protocol::NetworkAccess as CoreNetworkAccess;
 use codex_protocol::protocol::NonSteerableTurnKind as CoreNonSteerableTurnKind;
 use codex_protocol::protocol::PatchApplyStatus as CorePatchApplyStatus;
@@ -3149,6 +3150,105 @@ pub struct ThreadReadParams {
 #[ts(export_to = "v2/")]
 pub struct ThreadReadResponse {
     pub thread: Thread,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSessionAutoReadParams {
+    pub thread_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSessionAutoUpdateParams {
+    pub thread_id: String,
+    pub expected_version: String,
+    pub runtime: NeroAutoRuntimeConfig,
+    #[ts(optional = nullable)]
+    pub autonomy_step_per_round: Option<f64>,
+    #[ts(optional = nullable)]
+    pub done_stop_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reset_counter: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum ThreadSessionAutoAuthorityMode {
+    BridgeProxy,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSessionAutoDefaults {
+    pub runtime: NeroAutoRuntimeConfig,
+    pub autonomy_step_per_round: f64,
+    pub done_stop_scope: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSessionAutoApplied {
+    pub enabled: Option<bool>,
+    pub autonomy_level: Option<i64>,
+    pub autonomy_step_per_round: Option<f64>,
+    pub max_auto_rounds: Option<i64>,
+    pub done_stop_scope: Option<String>,
+    pub auto_rounds: i64,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSessionAutoEffective {
+    pub runtime: NeroAutoRuntimeConfig,
+    pub autonomy_step_per_round: f64,
+    pub done_stop_scope: String,
+    pub auto_rounds: i64,
+    pub source: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSessionAutoState {
+    pub thread_name: Option<String>,
+    pub session_source: SessionSource,
+    pub loaded: bool,
+    pub config_path: PathBuf,
+    pub state_path: PathBuf,
+    pub version: String,
+    pub is_subagent: bool,
+    pub defaults: ThreadSessionAutoDefaults,
+    pub applied: ThreadSessionAutoApplied,
+    pub effective: ThreadSessionAutoEffective,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSessionAutoReadResponse {
+    pub thread_id: String,
+    pub authority: ThreadSessionAutoAuthorityMode,
+    pub state: ThreadSessionAutoState,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSessionAutoUpdateResponse {
+    pub thread_id: String,
+    pub authority: ThreadSessionAutoAuthorityMode,
+    pub applied: bool,
+    pub conflict: bool,
+    pub message: Option<String>,
+    pub state: Option<ThreadSessionAutoState>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

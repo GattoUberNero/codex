@@ -77,6 +77,7 @@ mod models;
 mod outgoing_message;
 mod server_request_error;
 mod thread_rollout_trim;
+mod thread_session_auto;
 mod thread_state;
 mod thread_status;
 mod transport;

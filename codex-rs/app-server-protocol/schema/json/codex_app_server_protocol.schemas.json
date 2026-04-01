@@ -592,6 +592,54 @@
             },
             "method": {
               "enum": [
+                "thread/sessionAuto/read"
+              ],
+              "title": "Thread/sessionAuto/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadSessionAutoReadParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/sessionAuto/readRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "thread/sessionAuto/update"
+              ],
+              "title": "Thread/sessionAuto/updateRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadSessionAutoUpdateParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/sessionAuto/updateRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "thread/rollout/analyze"
               ],
               "title": "Thread/rollout/analyzeRequestMethod",
@@ -9346,6 +9394,27 @@
         ],
         "type": "object"
       },
+      "NeroAutoRuntimeConfig": {
+        "properties": {
+          "autonomy_level": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "max_auto_rounds": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "autonomy_level",
+          "enabled",
+          "max_auto_rounds"
+        ],
+        "type": "object"
+      },
       "NetworkAccess": {
         "enum": [
           "restricted",
@@ -14196,6 +14265,273 @@
           "threadId"
         ],
         "title": "ThreadRolloutTrimResponse",
+        "type": "object"
+      },
+      "ThreadSessionAutoApplied": {
+        "properties": {
+          "autoRounds": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "autonomyLevel": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "autonomyStepPerRound": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "doneStopScope": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "maxAutoRounds": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "updatedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "autoRounds"
+        ],
+        "type": "object"
+      },
+      "ThreadSessionAutoAuthorityMode": {
+        "enum": [
+          "bridgeProxy"
+        ],
+        "type": "string"
+      },
+      "ThreadSessionAutoDefaults": {
+        "properties": {
+          "autonomyStepPerRound": {
+            "format": "double",
+            "type": "number"
+          },
+          "doneStopScope": {
+            "type": "string"
+          },
+          "runtime": {
+            "$ref": "#/definitions/v2/NeroAutoRuntimeConfig"
+          }
+        },
+        "required": [
+          "autonomyStepPerRound",
+          "doneStopScope",
+          "runtime"
+        ],
+        "type": "object"
+      },
+      "ThreadSessionAutoEffective": {
+        "properties": {
+          "autoRounds": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "autonomyStepPerRound": {
+            "format": "double",
+            "type": "number"
+          },
+          "doneStopScope": {
+            "type": "string"
+          },
+          "runtime": {
+            "$ref": "#/definitions/v2/NeroAutoRuntimeConfig"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "autoRounds",
+          "autonomyStepPerRound",
+          "doneStopScope",
+          "runtime",
+          "source"
+        ],
+        "type": "object"
+      },
+      "ThreadSessionAutoReadParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "threadId"
+        ],
+        "title": "ThreadSessionAutoReadParams",
+        "type": "object"
+      },
+      "ThreadSessionAutoReadResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "authority": {
+            "$ref": "#/definitions/v2/ThreadSessionAutoAuthorityMode"
+          },
+          "state": {
+            "$ref": "#/definitions/v2/ThreadSessionAutoState"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authority",
+          "state",
+          "threadId"
+        ],
+        "title": "ThreadSessionAutoReadResponse",
+        "type": "object"
+      },
+      "ThreadSessionAutoState": {
+        "properties": {
+          "applied": {
+            "$ref": "#/definitions/v2/ThreadSessionAutoApplied"
+          },
+          "configPath": {
+            "type": "string"
+          },
+          "defaults": {
+            "$ref": "#/definitions/v2/ThreadSessionAutoDefaults"
+          },
+          "effective": {
+            "$ref": "#/definitions/v2/ThreadSessionAutoEffective"
+          },
+          "isSubagent": {
+            "type": "boolean"
+          },
+          "loaded": {
+            "type": "boolean"
+          },
+          "sessionSource": {
+            "$ref": "#/definitions/v2/SessionSource"
+          },
+          "statePath": {
+            "type": "string"
+          },
+          "threadName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "applied",
+          "configPath",
+          "defaults",
+          "effective",
+          "isSubagent",
+          "loaded",
+          "sessionSource",
+          "statePath",
+          "version"
+        ],
+        "type": "object"
+      },
+      "ThreadSessionAutoUpdateParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "autonomyStepPerRound": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "doneStopScope": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expectedVersion": {
+            "type": "string"
+          },
+          "resetCounter": {
+            "type": "boolean"
+          },
+          "runtime": {
+            "$ref": "#/definitions/v2/NeroAutoRuntimeConfig"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "expectedVersion",
+          "runtime",
+          "threadId"
+        ],
+        "title": "ThreadSessionAutoUpdateParams",
+        "type": "object"
+      },
+      "ThreadSessionAutoUpdateResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "applied": {
+            "type": "boolean"
+          },
+          "authority": {
+            "$ref": "#/definitions/v2/ThreadSessionAutoAuthorityMode"
+          },
+          "conflict": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadSessionAutoState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "applied",
+          "authority",
+          "conflict",
+          "threadId"
+        ],
+        "title": "ThreadSessionAutoUpdateResponse",
         "type": "object"
       },
       "ThreadSetNameParams": {

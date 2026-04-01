@@ -43,6 +43,7 @@ export type { LocalShellExecAction } from "./LocalShellExecAction";
 export type { LocalShellStatus } from "./LocalShellStatus";
 export type { MessagePhase } from "./MessagePhase";
 export type { ModeKind } from "./ModeKind";
+export type { NeroAutoRuntimeConfig } from "./NeroAutoRuntimeConfig";
 export type { NetworkPolicyAmendment } from "./NetworkPolicyAmendment";
 export type { NetworkPolicyRuleAction } from "./NetworkPolicyRuleAction";
 export type { ParsedCommand } from "./ParsedCommand";

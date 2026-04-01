@@ -20,6 +20,9 @@ use crate::thread_rollout_trim::analyze_rollout;
 use crate::thread_rollout_trim::delete_rollout_backup;
 use crate::thread_rollout_trim::restore_rollout_backup;
 use crate::thread_rollout_trim::trim_rollout;
+use crate::thread_session_auto::ThreadSessionAutoContext;
+use crate::thread_session_auto::read_thread_session_auto;
+use crate::thread_session_auto::update_thread_session_auto;
 use crate::thread_status::ThreadWatchManager;
 use crate::thread_status::resolve_thread_status;
 use chrono::DateTime;
@@ -108,6 +111,7 @@ use codex_app_server_protocol::ReviewTarget as ApiReviewTarget;
 use codex_app_server_protocol::SandboxMode;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequestResolvedNotification;
+use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::SkillSummary;
 use codex_app_server_protocol::SkillsConfigWriteParams;
 use codex_app_server_protocol::SkillsConfigWriteResponse;
@@ -158,6 +162,10 @@ use codex_app_server_protocol::ThreadRolloutBackupRestoreParams;
 use codex_app_server_protocol::ThreadRolloutBackupRestoreResponse;
 use codex_app_server_protocol::ThreadRolloutTrimParams;
 use codex_app_server_protocol::ThreadRolloutTrimResponse;
+use codex_app_server_protocol::ThreadSessionAutoReadParams;
+use codex_app_server_protocol::ThreadSessionAutoReadResponse;
+use codex_app_server_protocol::ThreadSessionAutoUpdateParams;
+use codex_app_server_protocol::ThreadSessionAutoUpdateResponse;
 use codex_app_server_protocol::ThreadSetNameParams;
 use codex_app_server_protocol::ThreadSetNameResponse;
 use codex_app_server_protocol::ThreadShellCommandParams;
@@ -774,6 +782,14 @@ impl CodexMessageProcessor {
             }
             ClientRequest::ThreadRead { request_id, params } => {
                 self.thread_read(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::ThreadSessionAutoRead { request_id, params } => {
+                self.thread_session_auto_read(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::ThreadSessionAutoUpdate { request_id, params } => {
+                self.thread_session_auto_update(to_connection_request_id(request_id), params)
                     .await;
             }
             ClientRequest::ThreadRolloutAnalyze { request_id, params } => {
@@ -3580,6 +3596,155 @@ impl CodexMessageProcessor {
         );
         let response = ThreadReadResponse { thread };
         self.outgoing.send_response(request_id, response).await;
+    }
+
+    async fn resolve_thread_session_auto_context(
+        &self,
+        thread_uuid: ThreadId,
+    ) -> Result<ThreadSessionAutoContext, String> {
+        let loaded_thread = self.thread_manager.get_thread(thread_uuid).await.ok();
+        let thread_name = match find_thread_name_by_id(&self.config.codex_home, &thread_uuid).await
+        {
+            Ok(name) => name,
+            Err(err) => {
+                warn!(
+                    "Failed to read thread name for session-auto {}: {err}",
+                    thread_uuid
+                );
+                None
+            }
+        };
+        if let Some(thread) = loaded_thread {
+            let config_snapshot = thread.config_snapshot().await;
+            return Ok(ThreadSessionAutoContext {
+                thread_id: thread_uuid.to_string(),
+                thread_name,
+                session_source: config_snapshot.session_source.into(),
+                cwd: config_snapshot.cwd,
+                loaded: true,
+            });
+        }
+
+        let thread = if let Some(summary) =
+            read_summary_from_state_db_by_thread_id(&self.config, thread_uuid).await
+        {
+            summary_to_thread(summary)
+        } else {
+            let Some(rollout_path) =
+                find_thread_path_by_id_str(&self.config.codex_home, &thread_uuid.to_string())
+                    .await
+                    .map_err(|err| {
+                        format!("failed to locate rollout for thread {thread_uuid}: {err}")
+                    })?
+            else {
+                return Err(format!("thread not found: {thread_uuid}"));
+            };
+            let fallback_provider = self.config.model_provider_id.as_str();
+            let summary = read_summary_from_rollout(&rollout_path, fallback_provider)
+                .await
+                .map_err(|err| {
+                    format!(
+                        "failed to load rollout `{}` for thread {thread_uuid}: {err}",
+                        rollout_path.display()
+                    )
+                })?;
+            summary_to_thread(summary)
+        };
+
+        Ok(ThreadSessionAutoContext {
+            thread_id: thread_uuid.to_string(),
+            thread_name,
+            session_source: thread.source,
+            cwd: thread.cwd,
+            loaded: false,
+        })
+    }
+
+    async fn thread_session_auto_read(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadSessionAutoReadParams,
+    ) {
+        let ThreadSessionAutoReadParams { thread_id } = params;
+        let thread_uuid = match ThreadId::from_string(&thread_id) {
+            Ok(id) => id,
+            Err(err) => {
+                self.send_invalid_request_error(request_id, format!("invalid thread id: {err}"))
+                    .await;
+                return;
+            }
+        };
+        let context = match self.resolve_thread_session_auto_context(thread_uuid).await {
+            Ok(context) => context,
+            Err(err) => {
+                self.send_invalid_request_error(request_id, err).await;
+                return;
+            }
+        };
+        match read_thread_session_auto(&self.config.codex_home, &context).await {
+            Ok(response) => {
+                self.outgoing
+                    .send_response::<ThreadSessionAutoReadResponse>(request_id, response)
+                    .await;
+            }
+            Err(err) => {
+                self.send_internal_error(
+                    request_id,
+                    format!("failed to read thread/sessionAuto state: {err}"),
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn thread_session_auto_update(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadSessionAutoUpdateParams,
+    ) {
+        let ThreadSessionAutoUpdateParams { thread_id, .. } = &params;
+        let thread_uuid = match ThreadId::from_string(thread_id) {
+            Ok(id) => id,
+            Err(err) => {
+                self.send_invalid_request_error(request_id, format!("invalid thread id: {err}"))
+                    .await;
+                return;
+            }
+        };
+        let context = match self.resolve_thread_session_auto_context(thread_uuid).await {
+            Ok(context) => context,
+            Err(err) => {
+                self.send_invalid_request_error(request_id, err).await;
+                return;
+            }
+        };
+        if matches!(context.session_source, SessionSource::SubAgent(_)) {
+            self.send_invalid_request_error(
+                request_id,
+                "session-auto updates are unsupported for subagent sessions".to_string(),
+            )
+            .await;
+            return;
+        }
+        if params.expected_version.trim().is_empty() {
+            self.send_invalid_request_error(request_id, "expectedVersion is required".to_string())
+                .await;
+            return;
+        }
+        match update_thread_session_auto(&self.config.codex_home, &context, &params).await {
+            Ok(response) => {
+                self.outgoing
+                    .send_response::<ThreadSessionAutoUpdateResponse>(request_id, response)
+                    .await;
+            }
+            Err(err) => {
+                self.send_internal_error(
+                    request_id,
+                    format!("failed to update thread/sessionAuto state: {err}"),
+                )
+                .await;
+            }
+        }
     }
 
     async fn thread_rollout_analyze(

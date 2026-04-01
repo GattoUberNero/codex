@@ -138,6 +138,8 @@ Example with notification opt-out:
 - `thread/list` — page through stored rollouts; supports cursor-based pagination and optional `modelProviders`, `sourceKinds`, `archived`, `cwd`, and `searchTerm` filters. Each returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded.
 - `thread/loaded/list` — list the thread ids currently loaded in memory.
 - `thread/read` — read a stored thread by id without resuming it; optionally include turns via `includeTurns`. The returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded.
+- `thread/sessionAuto/read` — read the bridge-backed runtime `session-auto` state for a thread through app-server v2, including CAS `version`, effective/default/applied values, and the current authority mode.
+- `thread/sessionAuto/update` — update the bridge-backed runtime `session-auto` state for a thread via app-server v2 using `expectedVersion` compare-and-swap semantics; returns the refreshed state on success and the current state on conflicts when available.
 - `thread/metadata/update` — patch stored thread metadata in sqlite; currently supports updating persisted `gitInfo` fields and returns the refreshed `thread`.
 - `thread/status/changed` — notification emitted when a loaded thread’s status changes (`threadId` + new `status`).
 - `thread/archive` — move a thread’s rollout file into the archived directory; returns `{}` on success and emits `thread/archived`.
@@ -390,6 +392,60 @@ Use `thread/metadata/update` to patch sqlite-backed metadata for a thread withou
     }
 } }
 ```
+
+### Example: Read and update thread session-auto runtime state
+
+Use `thread/sessionAuto/read` to fetch the current bridge-backed runtime control state for a thread without talking to Nero-specific side channels directly. The response carries a compare-and-swap `version` plus the current authority mode so clients know which writer path owns the state.
+
+```json
+{ "method": "thread/sessionAuto/read", "id": 26, "params": { "threadId": "thr_123" } }
+{ "id": 26, "result": {
+    "threadId": "thr_123",
+    "authority": "bridgeProxy",
+    "state": {
+        "version": "sha256:...",
+        "loaded": true,
+        "sessionSource": "cli",
+        "effective": {
+            "runtime": { "enabled": false, "autonomyLevel": 5, "maxAutoRounds": 7 },
+            "source": "config-default",
+            "autoRounds": 0
+        }
+    }
+} }
+```
+
+Use `thread/sessionAuto/update` with the last observed `expectedVersion` to preserve single-writer CAS semantics while clients migrate to the native app-server channel.
+
+```json
+{ "method": "thread/sessionAuto/update", "id": 27, "params": {
+    "threadId": "thr_123",
+    "expectedVersion": "sha256:...",
+    "runtime": { "enabled": true, "autonomyLevel": 8, "maxAutoRounds": 12 },
+    "autonomyStepPerRound": 0.75,
+    "doneStopScope": "task",
+    "resetCounter": true
+} }
+{ "id": 27, "result": {
+    "threadId": "thr_123",
+    "authority": "bridgeProxy",
+    "applied": true,
+    "conflict": false,
+    "message": null,
+    "state": {
+        "version": "sha256:next",
+        "effective": {
+            "runtime": { "enabled": true, "autonomyLevel": 8, "maxAutoRounds": 12 },
+            "autonomyStepPerRound": 0.75,
+            "doneStopScope": "task",
+            "source": "session-override",
+            "autoRounds": 0
+        }
+    }
+} }
+```
+
+The v2 `thread/sessionAuto/update` surface is bridge-proxied in this migration phase, so it preserves the existing compare-and-swap writer semantics while removing direct client coupling to the Python runtime bridge. Updates are rejected for subagent sessions because this cut intentionally keeps a single writable authority boundary for main-session runtime control.
 
 ### Example: Archive a thread
 

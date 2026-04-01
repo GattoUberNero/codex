@@ -1297,6 +1297,27 @@
       },
       "type": "object"
     },
+    "NeroAutoRuntimeConfig": {
+      "properties": {
+        "autonomy_level": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "max_auto_rounds": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "autonomy_level",
+        "enabled",
+        "max_auto_rounds"
+      ],
+      "type": "object"
+    },
     "NetworkAccess": {
       "enum": [
         "restricted",
@@ -3001,6 +3022,52 @@
       ],
       "type": "object"
     },
+    "ThreadSessionAutoReadParams": {
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadSessionAutoUpdateParams": {
+      "properties": {
+        "autonomyStepPerRound": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "doneStopScope": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedVersion": {
+          "type": "string"
+        },
+        "resetCounter": {
+          "type": "boolean"
+        },
+        "runtime": {
+          "$ref": "#/definitions/NeroAutoRuntimeConfig"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedVersion",
+        "runtime",
+        "threadId"
+      ],
+      "type": "object"
+    },
     "ThreadSetNameParams": {
       "properties": {
         "name": {
@@ -3855,6 +3922,54 @@
         "params"
       ],
       "title": "Thread/readRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "thread/sessionAuto/read"
+          ],
+          "title": "Thread/sessionAuto/readRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadSessionAutoReadParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/sessionAuto/readRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "thread/sessionAuto/update"
+          ],
+          "title": "Thread/sessionAuto/updateRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadSessionAutoUpdateParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/sessionAuto/updateRequest",
       "type": "object"
     },
     {
