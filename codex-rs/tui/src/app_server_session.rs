@@ -48,6 +48,10 @@ use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadRollbackParams;
 use codex_app_server_protocol::ThreadRollbackResponse;
+use codex_app_server_protocol::ThreadSessionAutoReadParams;
+use codex_app_server_protocol::ThreadSessionAutoReadResponse;
+use codex_app_server_protocol::ThreadSessionAutoUpdateParams;
+use codex_app_server_protocol::ThreadSessionAutoUpdateResponse;
 use codex_app_server_protocol::ThreadSetNameParams;
 use codex_app_server_protocol::ThreadSetNameResponse;
 use codex_app_server_protocol::ThreadShellCommandParams;
@@ -393,6 +397,33 @@ impl AppServerSession {
             .await
             .wrap_err("thread/read failed during TUI session lookup")?;
         Ok(response.thread)
+    }
+
+    pub(crate) async fn thread_session_auto_read(
+        &mut self,
+        thread_id: ThreadId,
+    ) -> Result<ThreadSessionAutoReadResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::ThreadSessionAutoRead {
+                request_id,
+                params: ThreadSessionAutoReadParams {
+                    thread_id: thread_id.to_string(),
+                },
+            })
+            .await
+            .wrap_err("thread/sessionAuto/read failed in TUI")
+    }
+
+    pub(crate) async fn thread_session_auto_update(
+        &mut self,
+        params: ThreadSessionAutoUpdateParams,
+    ) -> Result<ThreadSessionAutoUpdateResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::ThreadSessionAutoUpdate { request_id, params })
+            .await
+            .wrap_err("thread/sessionAuto/update failed in TUI")
     }
 
     #[allow(clippy::too_many_arguments)]
