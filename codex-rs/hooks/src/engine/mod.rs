@@ -55,6 +55,7 @@ impl ConfiguredHandler {
             codex_protocol::protocol::HookEventName::SessionStart => "session-start",
             codex_protocol::protocol::HookEventName::UserPromptSubmit => "user-prompt-submit",
             codex_protocol::protocol::HookEventName::Stop => "stop",
+            codex_protocol::protocol::HookEventName::AfterAgent => "after-agent",
         }
     }
 }

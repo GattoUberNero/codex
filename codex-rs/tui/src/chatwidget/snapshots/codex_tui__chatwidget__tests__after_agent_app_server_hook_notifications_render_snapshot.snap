@@ -1,0 +1,7 @@
+---
+source: tui/src/chatwidget/tests.rs
+assertion_line: 13759
+expression: combined
+---
+AfterAgent hook (completed)
+  runtime status: NERO HOOK SYSTEM [state: healthy]

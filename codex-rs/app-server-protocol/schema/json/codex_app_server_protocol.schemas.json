@@ -8228,7 +8228,8 @@
           "postToolUse",
           "sessionStart",
           "userPromptSubmit",
-          "stop"
+          "stop",
+          "afterAgent"
         ],
         "type": "string"
       },

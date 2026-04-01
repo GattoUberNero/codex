@@ -36,7 +36,9 @@ pub(crate) fn select_handlers(
             | HookEventName::SessionStart => {
                 matches_matcher(handler.matcher.as_deref(), matcher_input)
             }
-            HookEventName::UserPromptSubmit | HookEventName::Stop => true,
+            HookEventName::UserPromptSubmit | HookEventName::Stop | HookEventName::AfterAgent => {
+                true
+            }
         })
         .cloned()
         .collect()
@@ -111,7 +113,8 @@ fn scope_for_event(event_name: HookEventName) -> HookScope {
         HookEventName::PreToolUse
         | HookEventName::PostToolUse
         | HookEventName::UserPromptSubmit
-        | HookEventName::Stop => HookScope::Turn,
+        | HookEventName::Stop
+        | HookEventName::AfterAgent => HookScope::Turn,
     }
 }
 

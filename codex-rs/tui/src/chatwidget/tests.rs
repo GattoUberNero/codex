@@ -2279,7 +2279,7 @@ async fn handle_thread_session_resets_nero_auto_runtime_and_session_source() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        sandbox_policy: SandboxPolicy::default(),
+        sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: test_project_path(),
         reasoning_effort: None,
         history_log_id: 7,
@@ -13717,6 +13717,47 @@ async fn user_prompt_submit_app_server_hook_notifications_render_snapshot() {
         .collect::<String>();
     assert_snapshot!(
         "user_prompt_submit_app_server_hook_notifications_render_snapshot",
+        combined
+    );
+}
+
+#[tokio::test]
+async fn after_agent_app_server_hook_notifications_render_snapshot() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.handle_server_notification(
+        ServerNotification::HookCompleted(AppServerHookCompletedNotification {
+            thread_id: ThreadId::new().to_string(),
+            turn_id: Some("turn-1".to_string()),
+            run: AppServerHookRunSummary {
+                id: "after-agent:nero-hook-runtime:turn-1".to_string(),
+                event_name: AppServerHookEventName::AfterAgent,
+                handler_type: AppServerHookHandlerType::Agent,
+                execution_mode: AppServerHookExecutionMode::Sync,
+                scope: AppServerHookScope::Turn,
+                source_path: PathBuf::from("legacy://after_agent/nero-hook-runtime"),
+                display_order: 0,
+                status: AppServerHookRunStatus::Completed,
+                status_message: Some("legacy after_agent runtime status".to_string()),
+                started_at: 1,
+                completed_at: Some(1),
+                duration_ms: Some(0),
+                entries: vec![AppServerHookOutputEntry {
+                    kind: AppServerHookOutputEntryKind::Context,
+                    text: "NERO HOOK SYSTEM [state: healthy]".to_string(),
+                }],
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    let combined = cells
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert_snapshot!(
+        "after_agent_app_server_hook_notifications_render_snapshot",
         combined
     );
 }

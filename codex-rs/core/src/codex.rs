@@ -560,6 +560,37 @@ fn is_runtime_delivery_status_kind(status_kind: Option<&str>) -> bool {
     !matches!(status_kind, Some("state") | Some("auto"))
 }
 
+enum LegacyNeroHookTuiDelivery {
+    Warning(String),
+    AfterAgentSummary(codex_protocol::protocol::HookOutputEntry),
+}
+
+fn legacy_nero_hook_tui_delivery(
+    tui_body: &str,
+    format: NeroHookMsgFormat,
+    show_agent: bool,
+    status: Option<&codex_hooks::NeroHookMsgStatus>,
+    status_kind_normalized: Option<&str>,
+) -> LegacyNeroHookTuiDelivery {
+    if !show_agent
+        && matches!(status_kind_normalized, Some("state"))
+        && let Some(status_entry) = status
+    {
+        return LegacyNeroHookTuiDelivery::AfterAgentSummary(
+            codex_protocol::protocol::HookOutputEntry {
+                kind: codex_protocol::protocol::HookOutputEntryKind::Context,
+                text: format!("{tui_body} [{}: {}]", status_entry.kind, status_entry.text),
+            },
+        );
+    }
+
+    LegacyNeroHookTuiDelivery::Warning(nero_hook_tui_warning_message(
+        tui_body,
+        format,
+        status.map(|item| (item.kind.as_str(), item.text.as_str())),
+    ))
+}
+
 fn runtime_delivery_contract_satisfied(
     runtime_msg_expected: bool,
     runtime_msg_delivered: bool,
@@ -578,6 +609,36 @@ fn runtime_delivery_contract_status(
     } else {
         "failed-runtime-message-missing"
     }
+}
+
+fn legacy_after_agent_runtime_hook_completed_event(
+    turn_id: &str,
+    hook_name: &str,
+    entries: Vec<codex_protocol::protocol::HookOutputEntry>,
+) -> Option<crate::protocol::HookCompletedEvent> {
+    if entries.is_empty() {
+        return None;
+    }
+
+    let started_at = chrono::Utc::now().timestamp();
+    Some(crate::protocol::HookCompletedEvent {
+        turn_id: Some(turn_id.to_string()),
+        run: codex_protocol::protocol::HookRunSummary {
+            id: format!("after-agent:{hook_name}:{turn_id}"),
+            event_name: codex_protocol::protocol::HookEventName::AfterAgent,
+            handler_type: codex_protocol::protocol::HookHandlerType::Agent,
+            execution_mode: codex_protocol::protocol::HookExecutionMode::Sync,
+            scope: codex_protocol::protocol::HookScope::Turn,
+            source_path: PathBuf::from(format!("legacy://after_agent/{hook_name}")),
+            display_order: 0,
+            status: codex_protocol::protocol::HookRunStatus::Completed,
+            status_message: Some("legacy after_agent runtime status".to_string()),
+            started_at,
+            completed_at: Some(started_at),
+            duration_ms: Some(0),
+            entries,
+        },
+    })
 }
 
 const NERO_HOOK_STATUS_META_MAX_STRING_CHARS: usize = 512;
@@ -7754,6 +7815,8 @@ pub(crate) async fn run_turn(
                             let mut hook_nero_msg_throttled = 0usize;
                             let mut hook_auto_user_replies_pending: Vec<String> = Vec::new();
                             let mut hook_auto_user_replies_blocked = 0usize;
+                            let mut legacy_after_agent_summary_entries =
+                                Vec::<codex_protocol::protocol::HookOutputEntry>::new();
                             for action in actions {
                                 match action {
                                     HookAction::NeroHookMsg {
@@ -7868,18 +7931,26 @@ pub(crate) async fn run_turn(
                                                 NeroHookMsgMode::Synced => msg.full.clone(),
                                                 NeroHookMsgMode::TuiShort => msg.short.clone(),
                                             };
-                                            let message = nero_hook_tui_warning_message(
+                                            match legacy_nero_hook_tui_delivery(
                                                 &tui_body,
                                                 format,
-                                                status
-                                                    .as_ref()
-                                                    .map(|s| (s.kind.as_str(), s.text.as_str())),
-                                            );
-                                            sess.send_event(
-                                                &turn_context,
-                                                EventMsg::Warning(WarningEvent { message }),
-                                            )
-                                            .await;
+                                                show.agent,
+                                                status.as_ref(),
+                                                status_kind_normalized.as_deref(),
+                                            ) {
+                                                LegacyNeroHookTuiDelivery::Warning(message) => {
+                                                    sess.send_event(
+                                                        &turn_context,
+                                                        EventMsg::Warning(WarningEvent { message }),
+                                                    )
+                                                    .await;
+                                                }
+                                                LegacyNeroHookTuiDelivery::AfterAgentSummary(
+                                                    entry,
+                                                ) => {
+                                                    legacy_after_agent_summary_entries.push(entry);
+                                                }
+                                            }
                                             delivered_tui = true;
                                         }
                                         if show.agent {
@@ -8111,6 +8182,14 @@ pub(crate) async fn run_turn(
                                         hook_auto_user_replies_pending.push(message);
                                     }
                                 }
+                            }
+                            if let Some(event) = legacy_after_agent_runtime_hook_completed_event(
+                                &turn_context.sub_id,
+                                &hook_name,
+                                legacy_after_agent_summary_entries,
+                            ) {
+                                sess.send_event(&turn_context, EventMsg::HookCompleted(event))
+                                    .await;
                             }
                             let hook_delivery_contract_satisfied =
                                 runtime_delivery_contract_satisfied(
@@ -9907,6 +9986,8 @@ pub(crate) use tests::make_session_configuration_for_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
     use crate::CodexAuth;
     use crate::config::ConfigBuilder;
     use crate::config::test_config;
@@ -11935,6 +12016,9 @@ mod tests {
             config.js_repl_node_path.clone(),
             config.js_repl_node_module_dirs.clone(),
         ));
+        let (out_of_band_elicitation_paused, _out_of_band_elicitation_paused_rx) =
+            watch::channel(false);
+        let (mailbox, mailbox_rx) = Mailbox::new();
 
         let plugin_outcome = services
             .plugins_manager
@@ -11972,6 +12056,8 @@ mod tests {
             pending_mcp_server_refresh_config: Mutex::new(None),
             conversation: Arc::new(RealtimeConversationManager::new()),
             active_turn: Mutex::new(None),
+            mailbox,
+            mailbox_rx: Mutex::new(mailbox_rx),
             idle_pending_input: Mutex::new(Vec::new()),
             guardian_review_session: GuardianReviewSessionManager::default(),
             services,
@@ -11980,7 +12066,7 @@ mod tests {
             hook_auto_reply_internal_submission_ids: StdMutex::new(HashSet::new()),
             hook_nero_msg_throttle: StdMutex::new(HashMap::new()),
             hook_auto_reply_guard_state: StdMutex::new(HookAutoReplyGuardState::default()),
-            out_of_band_elicitation_paused: watch::channel(false).0,
+            out_of_band_elicitation_paused,
             next_internal_sub_id: AtomicU64::new(0),
         };
 
@@ -12388,6 +12474,9 @@ mod tests {
             config.js_repl_node_path.clone(),
             config.js_repl_node_module_dirs.clone(),
         ));
+        let (out_of_band_elicitation_paused, _out_of_band_elicitation_paused_rx) =
+            watch::channel(false);
+        let (mailbox, mailbox_rx) = Mailbox::new();
 
         let plugin_outcome = services
             .plugins_manager
@@ -12425,6 +12514,8 @@ mod tests {
             pending_mcp_server_refresh_config: Mutex::new(None),
             conversation: Arc::new(RealtimeConversationManager::new()),
             active_turn: Mutex::new(None),
+            mailbox,
+            mailbox_rx: Mutex::new(mailbox_rx),
             idle_pending_input: Mutex::new(Vec::new()),
             guardian_review_session: GuardianReviewSessionManager::default(),
             services,
@@ -12433,7 +12524,7 @@ mod tests {
             hook_auto_reply_internal_submission_ids: StdMutex::new(HashSet::new()),
             hook_nero_msg_throttle: StdMutex::new(HashMap::new()),
             hook_auto_reply_guard_state: StdMutex::new(HookAutoReplyGuardState::default()),
-            out_of_band_elicitation_paused: watch::channel(false).0,
+            out_of_band_elicitation_paused,
             next_internal_sub_id: AtomicU64::new(0),
         });
 
@@ -12558,8 +12649,18 @@ mod tests {
         let mut requirements = config.config_layer_stack.requirements().clone();
         requirements.network = Some(Sourced::new(
             NetworkConstraints {
-                allowed_domains: Some(vec!["api.example.com".to_string()]),
-                denied_domains: Some(vec!["blocked.example.com".to_string()]),
+                domains: Some(codex_config::NetworkDomainPermissionsToml {
+                    entries: BTreeMap::from([
+                        (
+                            "api.example.com".to_string(),
+                            codex_config::NetworkDomainPermissionToml::Allow,
+                        ),
+                        (
+                            "blocked.example.com".to_string(),
+                            codex_config::NetworkDomainPermissionToml::Deny,
+                        ),
+                    ]),
+                }),
                 ..Default::default()
             },
             RequirementSource::CloudRequirements,
@@ -13657,6 +13758,115 @@ mod tests {
         assert!(runtime_delivery_contract_satisfied(false, true));
         assert!(runtime_delivery_contract_satisfied(true, true));
         assert!(!runtime_delivery_contract_satisfied(true, false));
+    }
+
+    #[test]
+    fn normalized_nero_hook_status_kind_marks_state_and_auto_as_non_runtime_delivery() {
+        let state_status = codex_hooks::NeroHookMsgStatus {
+            kind: " State ".to_string(),
+            text: "healthy".to_string(),
+            meta: None,
+        };
+        let auto_status = codex_hooks::NeroHookMsgStatus {
+            kind: "AUTO".to_string(),
+            text: "continue".to_string(),
+            meta: None,
+        };
+        let warning_status = codex_hooks::NeroHookMsgStatus {
+            kind: "warning".to_string(),
+            text: "double-check".to_string(),
+            meta: None,
+        };
+
+        let state_kind = normalized_nero_hook_status_kind(Some(&state_status));
+        let auto_kind = normalized_nero_hook_status_kind(Some(&auto_status));
+        let warning_kind = normalized_nero_hook_status_kind(Some(&warning_status));
+
+        assert_eq!(state_kind.as_deref(), Some("state"));
+        assert_eq!(auto_kind.as_deref(), Some("auto"));
+        assert_eq!(warning_kind.as_deref(), Some("warning"));
+        assert!(!is_runtime_delivery_status_kind(state_kind.as_deref()));
+        assert!(!is_runtime_delivery_status_kind(auto_kind.as_deref()));
+        assert!(is_runtime_delivery_status_kind(warning_kind.as_deref()));
+        assert!(is_runtime_delivery_status_kind(None));
+    }
+
+    #[test]
+    fn legacy_state_nero_hook_tui_delivery_uses_after_agent_summary_instead_of_warning() {
+        let status = codex_hooks::NeroHookMsgStatus {
+            kind: "state".to_string(),
+            text: "healthy".to_string(),
+            meta: None,
+        };
+
+        let delivery = legacy_nero_hook_tui_delivery(
+            "NERO HOOK SYSTEM",
+            NeroHookMsgFormat::Block,
+            false,
+            Some(&status),
+            Some("state"),
+        );
+
+        match delivery {
+            LegacyNeroHookTuiDelivery::AfterAgentSummary(entry) => {
+                assert_eq!(
+                    entry,
+                    codex_protocol::protocol::HookOutputEntry {
+                        kind: codex_protocol::protocol::HookOutputEntryKind::Context,
+                        text: "NERO HOOK SYSTEM [state: healthy]".to_string(),
+                    }
+                );
+            }
+            LegacyNeroHookTuiDelivery::Warning(message) => {
+                panic!("expected AfterAgentSummary, got warning: {message}");
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_after_agent_summary_entries_build_hook_completed_event() {
+        let entries = vec![codex_protocol::protocol::HookOutputEntry {
+            kind: codex_protocol::protocol::HookOutputEntryKind::Context,
+            text: "NERO HOOK SYSTEM [state: healthy]".to_string(),
+        }];
+
+        let event = legacy_after_agent_runtime_hook_completed_event(
+            "turn-1",
+            "nero-hook-runtime",
+            entries.clone(),
+        )
+        .expect("expected hook completed event");
+
+        assert_eq!(event.turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(event.run.id, "after-agent:nero-hook-runtime:turn-1");
+        assert_eq!(
+            event.run.event_name,
+            codex_protocol::protocol::HookEventName::AfterAgent
+        );
+        assert_eq!(
+            event.run.handler_type,
+            codex_protocol::protocol::HookHandlerType::Agent
+        );
+        assert_eq!(
+            event.run.execution_mode,
+            codex_protocol::protocol::HookExecutionMode::Sync
+        );
+        assert_eq!(event.run.scope, codex_protocol::protocol::HookScope::Turn);
+        assert_eq!(
+            event.run.source_path,
+            PathBuf::from("legacy://after_agent/nero-hook-runtime")
+        );
+        assert_eq!(
+            event.run.status,
+            codex_protocol::protocol::HookRunStatus::Completed
+        );
+        assert_eq!(
+            event.run.status_message.as_deref(),
+            Some("legacy after_agent runtime status")
+        );
+        assert_eq!(event.run.entries, entries);
+        assert_eq!(event.run.completed_at, Some(event.run.started_at));
+        assert_eq!(event.run.duration_ms, Some(0));
     }
 
     #[test]

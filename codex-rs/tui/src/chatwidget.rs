@@ -4107,6 +4107,10 @@ impl ChatWidget {
     }
 
     fn on_hook_completed(&mut self, event: codex_protocol::protocol::HookCompletedEvent) {
+        let is_after_agent = matches!(
+            event.run.event_name,
+            codex_protocol::protocol::HookEventName::AfterAgent
+        );
         let status = format!("{:?}", event.run.status).to_lowercase();
         let header = format!("{} hook ({status})", hook_event_label(event.run.event_name));
         let mut lines: Vec<ratatui::text::Line<'static>> = vec![header.into()];
@@ -4115,6 +4119,9 @@ impl ChatWidget {
                 codex_protocol::protocol::HookOutputEntryKind::Warning => "warning: ",
                 codex_protocol::protocol::HookOutputEntryKind::Stop => "stop: ",
                 codex_protocol::protocol::HookOutputEntryKind::Feedback => "feedback: ",
+                codex_protocol::protocol::HookOutputEntryKind::Context if is_after_agent => {
+                    "runtime status: "
+                }
                 codex_protocol::protocol::HookOutputEntryKind::Context => "hook context: ",
                 codex_protocol::protocol::HookOutputEntryKind::Error => "error: ",
             };
@@ -11392,6 +11399,7 @@ fn hook_event_label(event_name: codex_protocol::protocol::HookEventName) -> &'st
         codex_protocol::protocol::HookEventName::SessionStart => "SessionStart",
         codex_protocol::protocol::HookEventName::UserPromptSubmit => "UserPromptSubmit",
         codex_protocol::protocol::HookEventName::Stop => "Stop",
+        codex_protocol::protocol::HookEventName::AfterAgent => "AfterAgent",
     }
 }
 
