@@ -211,6 +211,24 @@ But gradually reduce:
   - selected-session maintenance,
   - truly custom operator/runtime affordances.
 
+## 6.1 Current packaging pilot outcome
+
+The first low-risk packaging pilot is a repo-local plugin:
+
+- `nero-context-pack`
+
+Why this pilot exists:
+
+- it packages read-only Nero context guidance as plugin-bundled skills,
+- it exercises the upstream-native plugin/marketplace shape without moving runtime authority or operator lifecycle into plugin form,
+- it lowers future merge pain for guidance/context behavior that does not need to stay in fork-only execution paths.
+
+Why this is intentionally limited:
+
+- it is a discovery/read-oriented pilot, not an install/auth-heavy rollout,
+- it does not attempt to move multi-account runtime switching, `session-auto` policy authority, rollout trim, or session lifecycle overlays into plugin form,
+- those surfaces remain custom until there is a clearly safer native fit.
+
 ## 7. Decision Rules for Future Changes
 
 When adding a new behavior, ask in this order:

@@ -1,0 +1,20 @@
+{
+  "name": "codex-nero-local",
+  "interface": {
+    "displayName": "Codex Nero Local"
+  },
+  "plugins": [
+    {
+      "name": "nero-context-pack",
+      "source": {
+        "source": "local",
+        "path": "./plugins/nero-context-pack"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

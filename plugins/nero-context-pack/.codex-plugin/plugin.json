@@ -1,0 +1,30 @@
+{
+  "name": "nero-context-pack",
+  "version": "0.1.0",
+  "description": "Read-only Nero campaign and runtime context helpers packaged as a repo-local plugin pilot.",
+  "keywords": [
+    "nero",
+    "campaign",
+    "runtime",
+    "context"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Nero Context Pack",
+    "shortDescription": "Read-only helpers for campaign and runtime context in codex-nero.",
+    "longDescription": "Repo-local plugin pilot that packages Nero context-reading guidance as a plugin skill so future upgrades can move more read-only extension behavior out of fork-only glue.",
+    "developerName": "Purrnet",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Context",
+      "Campaign"
+    ],
+    "defaultPrompt": [
+      "Explain the current Nero campaign and active phase.",
+      "Classify whether this issue belongs to codex-nero, codex-nero-sdk, or nerobar-ui.",
+      "Summarize runtime and session context before implementation."
+    ],
+    "brandColor": "#0F766E"
+  }
+}
