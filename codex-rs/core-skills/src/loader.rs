@@ -15,7 +15,6 @@ use codex_config::default_project_root_markers;
 use codex_config::merge_toml_values;
 use codex_config::project_root_markers_from_config;
 use codex_protocol::models::FileSystemPermissions;
-use codex_protocol::models::MacOsSeatbeltProfileExtensions;
 use codex_protocol::models::NetworkPermissions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::Product;
@@ -79,8 +78,6 @@ struct SkillPermissionProfile {
     network: Option<SkillNetworkPermissions>,
     #[serde(default)]
     file_system: Option<FileSystemPermissions>,
-    #[serde(default)]
-    macos: Option<MacOsSeatbeltProfileExtensions>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq, Eq)]
@@ -685,7 +682,6 @@ fn normalize_permissions(
         file_system: permissions
             .file_system
             .filter(|file_system| !file_system.is_empty()),
-        macos: permissions.macos,
     };
 
     (
