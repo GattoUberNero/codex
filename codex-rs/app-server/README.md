@@ -421,9 +421,12 @@ Use `thread/sessionAuto/update` with the last observed `expectedVersion` to pres
 { "method": "thread/sessionAuto/update", "id": 27, "params": {
     "threadId": "thr_123",
     "expectedVersion": "sha256:...",
-    "runtime": { "enabled": true, "autonomyLevel": 8, "maxAutoRounds": 12 },
+    "enabled": true,
+    "autonomyLevel": 8,
     "autonomyStepPerRound": 0.75,
+    "maxAutoRounds": 12,
     "doneStopScope": "task",
+    "autoRounds": 3,
     "resetCounter": true
 } }
 { "id": 27, "result": {
@@ -439,13 +442,15 @@ Use `thread/sessionAuto/update` with the last observed `expectedVersion` to pres
             "autonomyStepPerRound": 0.75,
             "doneStopScope": "task",
             "source": "session-override",
-            "autoRounds": 0
+            "autoRounds": 3
         }
     }
 } }
 ```
 
 The v2 `thread/sessionAuto/update` surface is bridge-proxied in this migration phase, so it preserves the existing compare-and-swap writer semantics while removing direct client coupling to the Python runtime bridge. Updates are rejected for subagent sessions because this cut intentionally keeps a single writable authority boundary for main-session runtime control.
+
+When a bridge-backed update is rejected without applying, the response can also carry `errorCode` and `reasonCode` so control-plane clients can preserve deterministic HTTP/status mapping without parsing free-form messages.
 
 ### Example: Archive a thread
 

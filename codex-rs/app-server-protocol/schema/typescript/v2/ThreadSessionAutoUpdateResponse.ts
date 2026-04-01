@@ -4,4 +4,4 @@
 import type { ThreadSessionAutoAuthorityMode } from "./ThreadSessionAutoAuthorityMode";
 import type { ThreadSessionAutoState } from "./ThreadSessionAutoState";
 
-export type ThreadSessionAutoUpdateResponse = { threadId: string, authority: ThreadSessionAutoAuthorityMode, applied: boolean, conflict: boolean, message: string | null, state: ThreadSessionAutoState | null, };
+export type ThreadSessionAutoUpdateResponse = { threadId: string, authority: ThreadSessionAutoAuthorityMode, applied: boolean, conflict: boolean, message: string | null, errorCode: string | null, reasonCode: string | null, state: ThreadSessionAutoState | null, };

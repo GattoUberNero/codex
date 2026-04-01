@@ -67,13 +67,13 @@ struct BridgeApplyRequest {
     thread_name: Option<String>,
     cwd: Option<String>,
     has_enabled: bool,
-    enabled: bool,
+    enabled: Option<bool>,
     has_autonomy_level: bool,
-    autonomy_level: i64,
+    autonomy_level: Option<i64>,
     has_autonomy_step: bool,
     autonomy_step_per_round: Option<f64>,
     has_max_rounds: bool,
-    max_auto_rounds: i64,
+    max_auto_rounds: Option<i64>,
     has_done_stop_scope: bool,
     done_stop_scope: Option<String>,
     has_auto_rounds: bool,
@@ -156,6 +156,7 @@ struct BridgeApplyResponse {
     ok: bool,
     error: Option<String>,
     message: Option<String>,
+    reason_code: Option<String>,
     path: Option<String>,
     #[serde(rename = "version")]
     _version: Option<String>,
@@ -381,10 +382,20 @@ fn updated_effective_state(
     current: &ThreadSessionAutoState,
     applied: &ThreadSessionAutoApplied,
 ) -> ThreadSessionAutoEffective {
+    let has_session_override = applied.enabled.is_some()
+        || applied.autonomy_level.is_some()
+        || applied.autonomy_step_per_round.is_some()
+        || applied.max_auto_rounds.is_some()
+        || applied.done_stop_scope.is_some();
     let (enabled, source) = if current.is_subagent {
         (false, "subagent-forced-off".to_string())
     } else if let Some(enabled) = applied.enabled {
         (enabled, "session-override".to_string())
+    } else if has_session_override {
+        (
+            current.defaults.runtime.enabled,
+            "session-override".to_string(),
+        )
     } else {
         (
             current.defaults.runtime.enabled,
@@ -446,6 +457,25 @@ pub(crate) async fn update_thread_session_auto(
     if current.state.is_subagent || matches!(context.session_source, SessionSource::SubAgent(_)) {
         return Err("session-auto updates are unsupported for subagent sessions".to_string());
     }
+    if let Some(expected_session_source) = &params.expected_session_source
+        && current.state.session_source != *expected_session_source
+    {
+        let current_state = current.state;
+        return Ok(ThreadSessionAutoUpdateResponse {
+            thread_id: context.thread_id.clone(),
+            authority: ThreadSessionAutoAuthorityMode::BridgeProxy,
+            applied: false,
+            conflict: true,
+            message: Some(format!(
+                "session-auto sessionSource mismatch: expected={}, current={}",
+                session_source_wire_value(expected_session_source),
+                session_source_wire_value(&current_state.session_source),
+            )),
+            error_code: Some("session_source_mismatch".to_string()),
+            reason_code: None,
+            state: Some(current_state),
+        });
+    }
     if current.state.version != params.expected_version {
         return Ok(ThreadSessionAutoUpdateResponse {
             thread_id: context.thread_id.clone(),
@@ -456,10 +486,11 @@ pub(crate) async fn update_thread_session_auto(
                 "session-auto version conflict: expected={}, current={}",
                 params.expected_version, current.state.version
             )),
+            error_code: None,
+            reason_code: None,
             state: Some(current.state),
         });
     }
-    let runtime = sanitize_runtime(params.runtime);
     let response: BridgeApplyResponse = run_runtime_bridge(
         "apply-session-auto",
         &BridgeApplyRequest {
@@ -470,18 +501,24 @@ pub(crate) async fn update_thread_session_auto(
             session_source: session_source_wire_value(&context.session_source).to_string(),
             thread_name: context.thread_name.clone(),
             cwd: Some(context.cwd.to_string_lossy().to_string()),
-            has_enabled: true,
-            enabled: runtime.enabled,
-            has_autonomy_level: true,
-            autonomy_level: runtime.autonomy_level,
+            has_enabled: params.enabled.is_some(),
+            enabled: params.enabled.flatten(),
+            has_autonomy_level: params.autonomy_level.is_some(),
+            autonomy_level: params
+                .autonomy_level
+                .flatten()
+                .map(|value| value.clamp(1, 10)),
             has_autonomy_step: params.autonomy_step_per_round.is_some(),
-            autonomy_step_per_round: params.autonomy_step_per_round,
-            has_max_rounds: true,
-            max_auto_rounds: runtime.max_auto_rounds,
+            autonomy_step_per_round: params
+                .autonomy_step_per_round
+                .flatten()
+                .map(|value| value.clamp(0.0, 10.0)),
+            has_max_rounds: params.max_auto_rounds.is_some(),
+            max_auto_rounds: params.max_auto_rounds.flatten().map(|value| value.max(0)),
             has_done_stop_scope: params.done_stop_scope.is_some(),
-            done_stop_scope: params.done_stop_scope.clone(),
-            has_auto_rounds: false,
-            auto_rounds: None,
+            done_stop_scope: params.done_stop_scope.clone().flatten(),
+            has_auto_rounds: params.auto_rounds.is_some(),
+            auto_rounds: params.auto_rounds.flatten().map(|value| value.max(0)),
             has_reset_counter: params.reset_counter,
             reset_counter: params.reset_counter,
         },
@@ -531,18 +568,7 @@ pub(crate) async fn update_thread_session_auto(
                 auto_rounds: applied.auto_rounds.max(0),
                 updated_at: applied.updated_at.clone(),
             },
-            effective: ThreadSessionAutoEffective {
-                runtime,
-                autonomy_step_per_round: params
-                    .autonomy_step_per_round
-                    .unwrap_or(current.state.effective.autonomy_step_per_round),
-                done_stop_scope: params
-                    .done_stop_scope
-                    .clone()
-                    .unwrap_or_else(|| current.state.effective.done_stop_scope.clone()),
-                auto_rounds: 0,
-                source: "session-override".to_string(),
-            },
+            effective: current.state.effective.clone(),
         };
         let effective = updated_effective_state(&state, &state.applied);
         let state = ThreadSessionAutoState { effective, ..state };
@@ -552,9 +578,23 @@ pub(crate) async fn update_thread_session_auto(
             applied: true,
             conflict: false,
             message: None,
+            error_code: None,
+            reason_code: None,
             state: Some(state),
         });
     }
+    let error_code = response
+        .error
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let reason_code = response
+        .reason_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let message = bridge_update_failure_detail(&response);
     let state = read_thread_session_auto(codex_home, context)
         .await
@@ -590,6 +630,8 @@ pub(crate) async fn update_thread_session_auto(
         applied: false,
         conflict,
         message: Some(message),
+        error_code,
+        reason_code,
         state,
     })
 }

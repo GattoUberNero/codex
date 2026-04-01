@@ -3165,11 +3165,57 @@ pub struct ThreadSessionAutoReadParams {
 pub struct ThreadSessionAutoUpdateParams {
     pub thread_id: String,
     pub expected_version: String,
-    pub runtime: NeroAutoRuntimeConfig,
     #[ts(optional = nullable)]
-    pub autonomy_step_per_round: Option<f64>,
-    #[ts(optional = nullable)]
-    pub done_stop_scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_session_source: Option<SessionSource>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "super::serde_helpers::serialize_double_option",
+        deserialize_with = "super::serde_helpers::deserialize_double_option"
+    )]
+    #[ts(optional = nullable, type = "boolean | null")]
+    pub enabled: Option<Option<bool>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "super::serde_helpers::serialize_double_option",
+        deserialize_with = "super::serde_helpers::deserialize_double_option"
+    )]
+    #[ts(optional = nullable, type = "number | null")]
+    pub autonomy_level: Option<Option<i64>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "super::serde_helpers::serialize_double_option",
+        deserialize_with = "super::serde_helpers::deserialize_double_option"
+    )]
+    #[ts(optional = nullable, type = "number | null")]
+    pub autonomy_step_per_round: Option<Option<f64>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "super::serde_helpers::serialize_double_option",
+        deserialize_with = "super::serde_helpers::deserialize_double_option"
+    )]
+    #[ts(optional = nullable, type = "number | null")]
+    pub max_auto_rounds: Option<Option<i64>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "super::serde_helpers::serialize_double_option",
+        deserialize_with = "super::serde_helpers::deserialize_double_option"
+    )]
+    #[ts(optional = nullable, type = "string | null")]
+    pub done_stop_scope: Option<Option<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "super::serde_helpers::serialize_double_option",
+        deserialize_with = "super::serde_helpers::deserialize_double_option"
+    )]
+    #[ts(optional = nullable, type = "number | null")]
+    pub auto_rounds: Option<Option<i64>>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reset_counter: bool,
 }
@@ -3248,6 +3294,8 @@ pub struct ThreadSessionAutoUpdateResponse {
     pub applied: bool,
     pub conflict: bool,
     pub message: Option<String>,
+    pub error_code: Option<String>,
+    pub reason_code: Option<String>,
     pub state: Option<ThreadSessionAutoState>,
 }
 

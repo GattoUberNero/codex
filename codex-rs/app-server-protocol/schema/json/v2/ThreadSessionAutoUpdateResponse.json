@@ -310,7 +310,19 @@
     "conflict": {
       "type": "boolean"
     },
+    "errorCode": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "message": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reasonCode": {
       "type": [
         "string",
         "null"

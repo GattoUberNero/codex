@@ -6,6 +6,7 @@ use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SessionSource;
+use codex_app_server_protocol::ThreadSessionAutoApplied;
 use codex_app_server_protocol::ThreadSessionAutoAuthorityMode;
 use codex_app_server_protocol::ThreadSessionAutoReadParams;
 use codex_app_server_protocol::ThreadSessionAutoReadResponse;
@@ -84,14 +85,14 @@ async fn thread_session_auto_read_and_update_proxy_through_bridge() -> Result<()
         .send_thread_session_auto_update_request(ThreadSessionAutoUpdateParams {
             thread_id: thread_id.clone(),
             expected_version: initial.state.version.clone(),
-            runtime: NeroAutoRuntimeConfig {
-                enabled: true,
-                autonomy_level: 9,
-                max_auto_rounds: 12,
-            },
-            autonomy_step_per_round: Some(1.75),
-            done_stop_scope: Some("campaign".to_string()),
-            reset_counter: true,
+            expected_session_source: None,
+            enabled: Some(Some(true)),
+            autonomy_level: Some(Some(9)),
+            autonomy_step_per_round: Some(Some(1.75)),
+            max_auto_rounds: Some(Some(12)),
+            done_stop_scope: Some(Some("campaign".to_string())),
+            auto_rounds: Some(Some(4)),
+            reset_counter: false,
         })
         .await?;
     let update_resp: JSONRPCResponse = timeout(
@@ -122,7 +123,95 @@ async fn thread_session_auto_read_and_update_proxy_through_bridge() -> Result<()
     assert_eq!(updated_state.applied.max_auto_rounds, Some(12));
     assert_eq!(updated_state.effective.autonomy_step_per_round, 1.75);
     assert_eq!(updated_state.effective.done_stop_scope, "campaign");
-    assert_eq!(updated_state.applied.auto_rounds, 0);
+    assert_eq!(updated_state.applied.auto_rounds, 4);
+    assert_eq!(updated_state.effective.auto_rounds, 4);
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_session_auto_update_conflicts_on_session_source_mismatch() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+    let bridge_dir = write_fake_runtime_bridge()?;
+    let record_path = bridge_dir.path().join("apply-record.json");
+    let thread_id = app_test_support::create_fake_rollout_with_source(
+        codex_home.path(),
+        "2026-04-01T12-30-00",
+        "2026-04-01T12:30:00Z",
+        "hello",
+        Some("mock"),
+        None,
+        codex_protocol::protocol::SessionSource::Cli,
+    )?;
+
+    let bridge_cwd = bridge_dir.path().to_string_lossy().to_string();
+    let record_path_text = record_path.to_string_lossy().to_string();
+    let mut mcp = McpProcess::new_with_env(
+        codex_home.path(),
+        &[
+            ("NERO_RUNTIME_STATE_CONTROL_CWD", Some(bridge_cwd.as_str())),
+            (
+                "NERO_RUNTIME_STATE_CONTROL_MODULE",
+                Some("fake_runtime_bridge"),
+            ),
+            (
+                "FAKE_RUNTIME_BRIDGE_RECORD_PATH",
+                Some(record_path_text.as_str()),
+            ),
+        ],
+    )
+    .await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let read_id = mcp
+        .send_thread_session_auto_read_request(ThreadSessionAutoReadParams {
+            thread_id: thread_id.clone(),
+        })
+        .await?;
+    let read_resp: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    let initial: ThreadSessionAutoReadResponse =
+        to_response::<ThreadSessionAutoReadResponse>(read_resp)?;
+
+    let update_id = mcp
+        .send_thread_session_auto_update_request(ThreadSessionAutoUpdateParams {
+            thread_id: thread_id.clone(),
+            expected_version: initial.state.version.clone(),
+            expected_session_source: Some(SessionSource::VsCode),
+            enabled: Some(Some(true)),
+            autonomy_level: Some(Some(9)),
+            autonomy_step_per_round: None,
+            max_auto_rounds: Some(Some(12)),
+            done_stop_scope: None,
+            auto_rounds: None,
+            reset_counter: false,
+        })
+        .await?;
+    let update_resp: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(update_id)),
+    )
+    .await??;
+    let conflict: ThreadSessionAutoUpdateResponse =
+        to_response::<ThreadSessionAutoUpdateResponse>(update_resp)?;
+    assert!(!conflict.applied);
+    assert!(conflict.conflict);
+    assert_eq!(
+        conflict.error_code.as_deref(),
+        Some("session_source_mismatch")
+    );
+    assert_eq!(
+        conflict
+            .state
+            .as_ref()
+            .map(|state| state.session_source.clone()),
+        Some(SessionSource::Cli)
+    );
+    assert!(!record_path.exists());
     Ok(())
 }
 
@@ -173,13 +262,13 @@ async fn thread_session_auto_update_reports_version_conflict_with_current_state(
         .send_thread_session_auto_update_request(ThreadSessionAutoUpdateParams {
             thread_id: thread_id.clone(),
             expected_version: initial.state.version.clone(),
-            runtime: NeroAutoRuntimeConfig {
-                enabled: true,
-                autonomy_level: 7,
-                max_auto_rounds: 10,
-            },
+            expected_session_source: None,
+            enabled: Some(Some(true)),
+            autonomy_level: Some(Some(7)),
             autonomy_step_per_round: None,
+            max_auto_rounds: Some(Some(10)),
             done_stop_scope: None,
+            auto_rounds: None,
             reset_counter: false,
         })
         .await?;
@@ -197,13 +286,13 @@ async fn thread_session_auto_update_reports_version_conflict_with_current_state(
         .send_thread_session_auto_update_request(ThreadSessionAutoUpdateParams {
             thread_id,
             expected_version: stale_version,
-            runtime: NeroAutoRuntimeConfig {
-                enabled: false,
-                autonomy_level: 4,
-                max_auto_rounds: 5,
-            },
+            expected_session_source: None,
+            enabled: Some(Some(false)),
+            autonomy_level: Some(Some(4)),
             autonomy_step_per_round: None,
+            max_auto_rounds: Some(Some(5)),
             done_stop_scope: None,
+            auto_rounds: None,
             reset_counter: false,
         })
         .await?;
@@ -219,6 +308,207 @@ async fn thread_session_auto_update_reports_version_conflict_with_current_state(
     let current_state = second_update.state.expect("current state");
     assert_eq!(current_state.effective.runtime.enabled, true);
     assert_eq!(current_state.effective.runtime.autonomy_level, 7);
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_session_auto_update_supports_null_clear_semantics() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+    let bridge_dir = write_fake_runtime_bridge()?;
+    let thread_id = app_test_support::create_fake_rollout_with_source(
+        codex_home.path(),
+        "2026-04-01T13-15-00",
+        "2026-04-01T13:15:00Z",
+        "hello clear",
+        Some("mock"),
+        None,
+        codex_protocol::protocol::SessionSource::Cli,
+    )?;
+
+    let bridge_cwd = bridge_dir.path().to_string_lossy().to_string();
+    let mut mcp = McpProcess::new_with_env(
+        codex_home.path(),
+        &[
+            ("NERO_RUNTIME_STATE_CONTROL_CWD", Some(bridge_cwd.as_str())),
+            (
+                "NERO_RUNTIME_STATE_CONTROL_MODULE",
+                Some("fake_runtime_bridge"),
+            ),
+        ],
+    )
+    .await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let read_id = mcp
+        .send_thread_session_auto_read_request(ThreadSessionAutoReadParams {
+            thread_id: thread_id.clone(),
+        })
+        .await?;
+    let read_resp: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    let initial: ThreadSessionAutoReadResponse =
+        to_response::<ThreadSessionAutoReadResponse>(read_resp)?;
+
+    let set_id = mcp
+        .send_thread_session_auto_update_request(ThreadSessionAutoUpdateParams {
+            thread_id: thread_id.clone(),
+            expected_version: initial.state.version.clone(),
+            expected_session_source: None,
+            enabled: Some(Some(true)),
+            autonomy_level: Some(Some(9)),
+            autonomy_step_per_round: Some(Some(1.75)),
+            max_auto_rounds: Some(Some(12)),
+            done_stop_scope: Some(Some("campaign".to_string())),
+            auto_rounds: None,
+            reset_counter: false,
+        })
+        .await?;
+    let set_resp: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(set_id)),
+    )
+    .await??;
+    let set_state: ThreadSessionAutoUpdateResponse =
+        to_response::<ThreadSessionAutoUpdateResponse>(set_resp)?;
+    assert!(set_state.applied);
+    let set_version = set_state.state.expect("set state").version;
+
+    let clear_id = mcp
+        .send_thread_session_auto_update_request(ThreadSessionAutoUpdateParams {
+            thread_id,
+            expected_version: set_version,
+            expected_session_source: None,
+            enabled: Some(None),
+            autonomy_level: Some(None),
+            autonomy_step_per_round: Some(None),
+            max_auto_rounds: Some(None),
+            done_stop_scope: Some(None),
+            auto_rounds: None,
+            reset_counter: false,
+        })
+        .await?;
+    let clear_resp: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(clear_id)),
+    )
+    .await??;
+    let cleared: ThreadSessionAutoUpdateResponse =
+        to_response::<ThreadSessionAutoUpdateResponse>(clear_resp)?;
+    assert!(cleared.applied);
+    let cleared_state = cleared.state.expect("cleared state");
+    assert_eq!(
+        cleared_state.applied,
+        ThreadSessionAutoApplied {
+            enabled: None,
+            autonomy_level: None,
+            autonomy_step_per_round: None,
+            max_auto_rounds: None,
+            done_stop_scope: None,
+            auto_rounds: 0,
+            updated_at: Some("2026-04-01T00:00:00Z".to_string()),
+        }
+    );
+    assert_eq!(
+        cleared_state.effective.runtime,
+        NeroAutoRuntimeConfig::default()
+    );
+    assert_eq!(cleared_state.effective.autonomy_step_per_round, 1.0);
+    assert_eq!(cleared_state.effective.done_stop_scope, "active_phase");
+    assert_eq!(cleared_state.effective.source, "config-default");
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_session_auto_update_surfaces_bridge_error_metadata() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+    let bridge_dir = write_fake_runtime_bridge()?;
+    let thread_id = app_test_support::create_fake_rollout_with_source(
+        codex_home.path(),
+        "2026-04-01T13-20-00",
+        "2026-04-01T13:20:00Z",
+        "hello metadata",
+        Some("mock"),
+        None,
+        codex_protocol::protocol::SessionSource::Cli,
+    )?;
+
+    let bridge_cwd = bridge_dir.path().to_string_lossy().to_string();
+    let mut mcp = McpProcess::new_with_env(
+        codex_home.path(),
+        &[
+            ("NERO_RUNTIME_STATE_CONTROL_CWD", Some(bridge_cwd.as_str())),
+            (
+                "NERO_RUNTIME_STATE_CONTROL_MODULE",
+                Some("fake_runtime_bridge"),
+            ),
+            (
+                "FAKE_RUNTIME_BRIDGE_FORCE_ERROR",
+                Some("runtime_msg_unavailable_for_auto"),
+            ),
+            (
+                "FAKE_RUNTIME_BRIDGE_FORCE_REASON_CODE",
+                Some("delivery_contract_missing"),
+            ),
+        ],
+    )
+    .await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let read_id = mcp
+        .send_thread_session_auto_read_request(ThreadSessionAutoReadParams {
+            thread_id: thread_id.clone(),
+        })
+        .await?;
+    let read_resp: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    let initial: ThreadSessionAutoReadResponse =
+        to_response::<ThreadSessionAutoReadResponse>(read_resp)?;
+
+    let update_id = mcp
+        .send_thread_session_auto_update_request(ThreadSessionAutoUpdateParams {
+            thread_id,
+            expected_version: initial.state.version.clone(),
+            expected_session_source: None,
+            enabled: Some(Some(true)),
+            autonomy_level: Some(Some(8)),
+            autonomy_step_per_round: None,
+            max_auto_rounds: Some(Some(11)),
+            done_stop_scope: None,
+            auto_rounds: None,
+            reset_counter: false,
+        })
+        .await?;
+    let update_resp: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(update_id)),
+    )
+    .await??;
+    let failed: ThreadSessionAutoUpdateResponse =
+        to_response::<ThreadSessionAutoUpdateResponse>(update_resp)?;
+    assert!(!failed.applied);
+    assert!(!failed.conflict);
+    assert_eq!(
+        failed.error_code.as_deref(),
+        Some("runtime_msg_unavailable_for_auto")
+    );
+    assert_eq!(
+        failed.reason_code.as_deref(),
+        Some("delivery_contract_missing")
+    );
+    assert_eq!(
+        failed.state.as_ref().map(|state| state.version.clone()),
+        Some(initial.state.version)
+    );
     Ok(())
 }
 
@@ -299,13 +589,13 @@ async fn thread_session_auto_update_uses_loaded_thread_context_and_bridge_ack_ve
         .send_thread_session_auto_update_request(ThreadSessionAutoUpdateParams {
             thread_id: thread_id.clone(),
             expected_version: initial.state.version.clone(),
-            runtime: NeroAutoRuntimeConfig {
-                enabled: true,
-                autonomy_level: 8,
-                max_auto_rounds: 11,
-            },
-            autonomy_step_per_round: Some(2.25),
-            done_stop_scope: Some("campaign".to_string()),
+            expected_session_source: None,
+            enabled: Some(Some(true)),
+            autonomy_level: Some(Some(8)),
+            autonomy_step_per_round: Some(Some(2.25)),
+            max_auto_rounds: Some(Some(11)),
+            done_stop_scope: Some(Some("campaign".to_string())),
+            auto_rounds: Some(Some(5)),
             reset_counter: true,
         })
         .await?;
@@ -346,6 +636,8 @@ async fn thread_session_auto_update_uses_loaded_thread_context_and_bridge_ack_ve
     assert_eq!(recorded["request"]["threadName"], "operator-session");
     assert_eq!(recorded["request"]["hasAutonomyStep"], true);
     assert_eq!(recorded["request"]["hasDoneStopScope"], true);
+    assert_eq!(recorded["request"]["hasAutoRounds"], true);
+    assert_eq!(recorded["request"]["autoRounds"], 5);
 
     let reread_id = mcp
         .send_thread_session_auto_read_request(ThreadSessionAutoReadParams { thread_id })
@@ -397,13 +689,13 @@ async fn thread_session_auto_update_rejects_subagent_threads() -> Result<()> {
         .send_thread_session_auto_update_request(ThreadSessionAutoUpdateParams {
             thread_id,
             expected_version: "sha256:test".to_string(),
-            runtime: NeroAutoRuntimeConfig {
-                enabled: true,
-                autonomy_level: 6,
-                max_auto_rounds: 9,
-            },
+            expected_session_source: None,
+            enabled: Some(Some(true)),
+            autonomy_level: Some(Some(6)),
             autonomy_step_per_round: None,
+            max_auto_rounds: Some(Some(9)),
             done_stop_scope: None,
+            auto_rounds: None,
             reset_counter: false,
         })
         .await?;
@@ -508,9 +800,10 @@ def effective_from_state(data: dict) -> dict:
     d = defaults()
     policy = data.get('policyOverride') or {}
     enabled = data.get('enabled')
+    has_policy = any(value is not None for value in policy.values())
     if not isinstance(enabled, bool):
         enabled = d['enabled']
-        source = 'config-default'
+        source = 'session-override' if has_policy else 'config-default'
     else:
         source = 'session-override'
     return {
@@ -560,19 +853,46 @@ def apply(request: dict) -> dict:
             'conflict': True,
             'current': {'path': str(path), 'version': current_version},
         }
+    forced_error = os.environ.get('FAKE_RUNTIME_BRIDGE_FORCE_ERROR')
+    if forced_error:
+        return {
+            'ok': False,
+            'error': forced_error,
+            'reasonCode': os.environ.get('FAKE_RUNTIME_BRIDGE_FORCE_REASON_CODE'),
+            'message': os.environ.get('FAKE_RUNTIME_BRIDGE_FORCE_MESSAGE') or forced_error,
+        }
     if request.get('hasEnabled'):
-        current['enabled'] = bool(request.get('enabled'))
+        if request.get('enabled') is None:
+            current.pop('enabled', None)
+        else:
+            current['enabled'] = bool(request.get('enabled'))
     policy = dict(current.get('policyOverride') or {})
     if request.get('hasAutonomyLevel'):
-        policy['autonomy_level'] = int(request.get('autonomyLevel'))
+        if request.get('autonomyLevel') is None:
+            policy.pop('autonomy_level', None)
+        else:
+            policy['autonomy_level'] = int(request.get('autonomyLevel'))
     if request.get('hasAutonomyStep'):
-        policy['autonomy_step_per_round'] = float(request.get('autonomyStepPerRound'))
+        if request.get('autonomyStepPerRound') is None:
+            policy.pop('autonomy_step_per_round', None)
+        else:
+            policy['autonomy_step_per_round'] = float(request.get('autonomyStepPerRound'))
     if request.get('hasMaxRounds'):
-        policy['max_auto_rounds'] = int(request.get('maxAutoRounds'))
+        if request.get('maxAutoRounds') is None:
+            policy.pop('max_auto_rounds', None)
+        else:
+            policy['max_auto_rounds'] = int(request.get('maxAutoRounds'))
     if request.get('hasDoneStopScope'):
-        policy['done_stop_scope'] = request.get('doneStopScope')
+        if request.get('doneStopScope') is None:
+            policy.pop('done_stop_scope', None)
+        else:
+            policy['done_stop_scope'] = request.get('doneStopScope')
     if policy:
         current['policyOverride'] = policy
+    else:
+        current.pop('policyOverride', None)
+    if request.get('hasAutoRounds'):
+        current['autoRounds'] = int(request.get('autoRounds') or 0)
     if request.get('hasResetCounter') and request.get('resetCounter'):
         current['autoRounds'] = 0
     current['updatedAt'] = '2026-04-01T00:00:00Z'

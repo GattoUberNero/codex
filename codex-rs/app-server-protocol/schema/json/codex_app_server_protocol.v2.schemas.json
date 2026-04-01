@@ -12298,6 +12298,20 @@
     "ThreadSessionAutoUpdateParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
+        "autoRounds": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "autonomyLevel": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "autonomyStepPerRound": {
           "format": "double",
           "type": [
@@ -12311,14 +12325,34 @@
             "null"
           ]
         },
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "expectedSessionSource": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "expectedVersion": {
           "type": "string"
         },
+        "maxAutoRounds": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "resetCounter": {
           "type": "boolean"
-        },
-        "runtime": {
-          "$ref": "#/definitions/NeroAutoRuntimeConfig"
         },
         "threadId": {
           "type": "string"
@@ -12326,7 +12360,6 @@
       },
       "required": [
         "expectedVersion",
-        "runtime",
         "threadId"
       ],
       "title": "ThreadSessionAutoUpdateParams",
@@ -12344,7 +12377,19 @@
         "conflict": {
           "type": "boolean"
         },
+        "errorCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasonCode": {
           "type": [
             "string",
             "null"

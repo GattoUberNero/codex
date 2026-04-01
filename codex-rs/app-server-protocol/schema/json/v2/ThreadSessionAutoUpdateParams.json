@@ -1,29 +1,144 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
-    "NeroAutoRuntimeConfig": {
-      "properties": {
-        "autonomy_level": {
-          "format": "int64",
-          "type": "integer"
+    "AgentPath": {
+      "type": "string"
+    },
+    "SessionSource": {
+      "oneOf": [
+        {
+          "enum": [
+            "cli",
+            "vscode",
+            "exec",
+            "appServer",
+            "unknown"
+          ],
+          "type": "string"
         },
-        "enabled": {
-          "type": "boolean"
+        {
+          "additionalProperties": false,
+          "properties": {
+            "custom": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "custom"
+          ],
+          "title": "CustomSessionSource",
+          "type": "object"
         },
-        "max_auto_rounds": {
-          "format": "int64",
-          "type": "integer"
+        {
+          "additionalProperties": false,
+          "properties": {
+            "subAgent": {
+              "$ref": "#/definitions/SubAgentSource"
+            }
+          },
+          "required": [
+            "subAgent"
+          ],
+          "title": "SubAgentSessionSource",
+          "type": "object"
         }
-      },
-      "required": [
-        "autonomy_level",
-        "enabled",
-        "max_auto_rounds"
-      ],
-      "type": "object"
+      ]
+    },
+    "SubAgentSource": {
+      "oneOf": [
+        {
+          "enum": [
+            "review",
+            "compact",
+            "memory_consolidation"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "thread_spawn": {
+              "properties": {
+                "agent_nickname": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "agent_path": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/AgentPath"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "agent_role": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "depth": {
+                  "format": "int32",
+                  "type": "integer"
+                },
+                "parent_thread_id": {
+                  "$ref": "#/definitions/ThreadId"
+                }
+              },
+              "required": [
+                "depth",
+                "parent_thread_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "thread_spawn"
+          ],
+          "title": "ThreadSpawnSubAgentSource",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "other": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "other"
+          ],
+          "title": "OtherSubAgentSource",
+          "type": "object"
+        }
+      ]
+    },
+    "ThreadId": {
+      "type": "string"
     }
   },
   "properties": {
+    "autoRounds": {
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "autonomyLevel": {
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
     "autonomyStepPerRound": {
       "format": "double",
       "type": [
@@ -37,14 +152,34 @@
         "null"
       ]
     },
+    "enabled": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "expectedSessionSource": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SessionSource"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "expectedVersion": {
       "type": "string"
     },
+    "maxAutoRounds": {
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
     "resetCounter": {
       "type": "boolean"
-    },
-    "runtime": {
-      "$ref": "#/definitions/NeroAutoRuntimeConfig"
     },
     "threadId": {
       "type": "string"
@@ -52,7 +187,6 @@
   },
   "required": [
     "expectedVersion",
-    "runtime",
     "threadId"
   ],
   "title": "ThreadSessionAutoUpdateParams",
