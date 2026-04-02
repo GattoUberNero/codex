@@ -27,7 +27,8 @@ const NERO_RUNTIME_STATE_CONTROL_TIMEOUT_ENV_COMPAT: &str =
     "NEROBAR_NERO_RUNTIME_CONTROL_TIMEOUT_MS";
 const NERO_RUNTIME_STATE_CONTROL_PYTHON_ENV: &str = "NERO_RUNTIME_PYTHON_BIN";
 const NERO_RUNTIME_STATE_CONTROL_PYTHON_ENV_COMPAT: &str = "NEROBAR_NERO_RUNTIME_PYTHON_BIN";
-const NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE: &str = "nero_hook_runtime.state_runtime_control";
+const NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE: &str = "nero_hook_runtime.session_auto_bridge";
+const NERO_RUNTIME_STATE_CONTROL_RETIRED_MODULE: &str = "nero_hook_runtime.state_runtime_control";
 const NERO_RUNTIME_STATE_CONTROL_DEFAULT_TIMEOUT_MS: u64 = 2_500;
 const NERO_AUTO_RUNTIME_CONFIG_ENV: &str = "CODEXN_CONFIG_NERO_AUTO_PATH";
 
@@ -178,6 +179,13 @@ fn first_non_empty_env(names: &[&str]) -> Option<String> {
     })
 }
 
+fn normalize_runtime_state_control_module(module: String) -> String {
+    if module == NERO_RUNTIME_STATE_CONTROL_RETIRED_MODULE {
+        return NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE.to_string();
+    }
+    module
+}
+
 fn resolve_runtime_bridge_settings() -> RuntimeBridgeSettings {
     let cwd = first_non_empty_env(&[
         NERO_RUNTIME_STATE_CONTROL_CWD_ENV,
@@ -189,6 +197,7 @@ fn resolve_runtime_bridge_settings() -> RuntimeBridgeSettings {
         NERO_RUNTIME_STATE_CONTROL_MODULE_ENV,
         NERO_RUNTIME_STATE_CONTROL_MODULE_ENV_COMPAT,
     ])
+    .map(normalize_runtime_state_control_module)
     .unwrap_or_else(|| NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE.to_string());
     let python_bin = first_non_empty_env(&[
         NERO_RUNTIME_STATE_CONTROL_PYTHON_ENV,
@@ -634,4 +643,32 @@ pub(crate) async fn update_thread_session_auto(
         reason_code,
         state,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE;
+    use super::NERO_RUNTIME_STATE_CONTROL_RETIRED_MODULE;
+    use super::normalize_runtime_state_control_module;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn normalize_runtime_state_control_module_maps_retired_cli_module_to_current_bridge() {
+        assert_eq!(
+            normalize_runtime_state_control_module(
+                NERO_RUNTIME_STATE_CONTROL_RETIRED_MODULE.to_string(),
+            ),
+            NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE.to_string()
+        );
+    }
+
+    #[test]
+    fn normalize_runtime_state_control_module_keeps_current_bridge_module() {
+        assert_eq!(
+            normalize_runtime_state_control_module(
+                NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE.to_string(),
+            ),
+            NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE.to_string()
+        );
+    }
 }

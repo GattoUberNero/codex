@@ -196,6 +196,7 @@ The router is intentionally thin:
 Key areas:
 
 - `nero_hook_runtime/entrypoints.py`
+- `nero_hook_runtime/session_auto_bridge.py`
 - `nero_hook_runtime/state_runtime_control.py`
 
 Structural role:
@@ -203,8 +204,13 @@ Structural role:
 - high-level composition layer for:
   - campaign-aware reminders,
   - auto policy,
-  - runtime note text,
-  - runtime control reads and writes.
+- runtime note text,
+- runtime control reads and writes.
+
+Current boundary note:
+
+- `session_auto_bridge.py` is the active CLI entrypoint for session-auto reads and writes.
+- `state_runtime_control.py` remains the hidden single-writer implementation surface behind that entrypoint.
 
 This is the most replaceable and fastest-moving layer in the whole system.
 
