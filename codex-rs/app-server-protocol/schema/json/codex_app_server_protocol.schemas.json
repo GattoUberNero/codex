@@ -8277,7 +8277,8 @@
           "sessionStart",
           "userPromptSubmit",
           "stop",
-          "afterAgent"
+          "afterAgent",
+          "afterCompaction"
         ],
         "type": "string"
       },

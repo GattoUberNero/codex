@@ -4107,9 +4107,10 @@ impl ChatWidget {
     }
 
     fn on_hook_completed(&mut self, event: codex_protocol::protocol::HookCompletedEvent) {
-        let is_after_agent = matches!(
+        let is_runtime_status_event = matches!(
             event.run.event_name,
             codex_protocol::protocol::HookEventName::AfterAgent
+                | codex_protocol::protocol::HookEventName::AfterCompaction
         );
         let status = format!("{:?}", event.run.status).to_lowercase();
         let header = format!("{} hook ({status})", hook_event_label(event.run.event_name));
@@ -4119,7 +4120,9 @@ impl ChatWidget {
                 codex_protocol::protocol::HookOutputEntryKind::Warning => "warning: ",
                 codex_protocol::protocol::HookOutputEntryKind::Stop => "stop: ",
                 codex_protocol::protocol::HookOutputEntryKind::Feedback => "feedback: ",
-                codex_protocol::protocol::HookOutputEntryKind::Context if is_after_agent => {
+                codex_protocol::protocol::HookOutputEntryKind::Context
+                    if is_runtime_status_event =>
+                {
                     "runtime status: "
                 }
                 codex_protocol::protocol::HookOutputEntryKind::Context => "hook context: ",
@@ -11400,6 +11403,7 @@ fn hook_event_label(event_name: codex_protocol::protocol::HookEventName) -> &'st
         codex_protocol::protocol::HookEventName::UserPromptSubmit => "UserPromptSubmit",
         codex_protocol::protocol::HookEventName::Stop => "Stop",
         codex_protocol::protocol::HookEventName::AfterAgent => "AfterAgent",
+        codex_protocol::protocol::HookEventName::AfterCompaction => "AfterCompaction",
     }
 }
 

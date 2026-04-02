@@ -36,9 +36,10 @@ pub(crate) fn select_handlers(
             | HookEventName::SessionStart => {
                 matches_matcher(handler.matcher.as_deref(), matcher_input)
             }
-            HookEventName::UserPromptSubmit | HookEventName::Stop | HookEventName::AfterAgent => {
-                true
-            }
+            HookEventName::UserPromptSubmit
+            | HookEventName::Stop
+            | HookEventName::AfterAgent
+            | HookEventName::AfterCompaction => true,
         })
         .cloned()
         .collect()
@@ -114,7 +115,8 @@ fn scope_for_event(event_name: HookEventName) -> HookScope {
         | HookEventName::PostToolUse
         | HookEventName::UserPromptSubmit
         | HookEventName::Stop
-        | HookEventName::AfterAgent => HookScope::Turn,
+        | HookEventName::AfterAgent
+        | HookEventName::AfterCompaction => HookScope::Turn,
     }
 }
 
@@ -336,5 +338,33 @@ mod tests {
         assert_eq!(selected[0].command, "first");
         assert_eq!(selected[1].command, "second");
         assert_eq!(selected[2].command, "third");
+    }
+
+    #[test]
+    fn after_compaction_ignores_matcher() {
+        let handlers = vec![
+            make_handler(
+                HookEventName::AfterCompaction,
+                Some("^auto$"),
+                "echo first",
+                /*display_order*/ 0,
+            ),
+            make_handler(
+                HookEventName::AfterCompaction,
+                Some("["),
+                "echo second",
+                /*display_order*/ 1,
+            ),
+        ];
+
+        let selected = select_handlers(
+            &handlers,
+            HookEventName::AfterCompaction,
+            /*matcher_input*/ Some("manual"),
+        );
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].display_order, 0);
+        assert_eq!(selected[1].display_order, 1);
     }
 }

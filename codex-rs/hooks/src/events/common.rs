@@ -77,7 +77,10 @@ pub(crate) fn matcher_pattern_for_event(
         HookEventName::PreToolUse | HookEventName::PostToolUse | HookEventName::SessionStart => {
             matcher
         }
-        HookEventName::UserPromptSubmit | HookEventName::Stop | HookEventName::AfterAgent => None,
+        HookEventName::UserPromptSubmit
+        | HookEventName::Stop
+        | HookEventName::AfterAgent
+        | HookEventName::AfterCompaction => None,
     }
 }
 
@@ -164,6 +167,10 @@ mod tests {
         );
         assert_eq!(
             matcher_pattern_for_event(HookEventName::Stop, Some("^done$")),
+            None
+        );
+        assert_eq!(
+            matcher_pattern_for_event(HookEventName::AfterCompaction, Some("^compact$")),
             None
         );
     }

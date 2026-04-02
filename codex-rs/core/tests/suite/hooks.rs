@@ -3,6 +3,9 @@ use std::path::Path;
 
 use anyhow::Context;
 use anyhow::Result;
+use codex_core::ModelProviderInfo;
+use codex_core::built_in_model_providers;
+use codex_core::compact::SUMMARIZATION_PROMPT;
 use codex_features::Feature;
 use codex_protocol::items::parse_hook_prompt_fragment;
 use codex_protocol::models::ContentItem;
@@ -11,9 +14,12 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_message_item_added;
 use core_test_support::responses::ev_output_text_delta;
 use core_test_support::responses::ev_response_created;
@@ -26,6 +32,7 @@ use core_test_support::streaming_sse::StreamingSseChunk;
 use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_with_timeout;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use std::time::Duration;
@@ -346,6 +353,47 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
     Ok(())
 }
 
+fn write_after_compaction_hook(home: &Path, additional_context: &str) -> Result<()> {
+    let script_path = home.join("after_compaction_hook.py");
+    let log_path = home.join("after_compaction_hook_log.jsonl");
+    let additional_context_json = serde_json::to_string(additional_context)
+        .context("serialize after compaction additional context for test")?;
+    let script = format!(
+        r#"import json
+from pathlib import Path
+import sys
+
+payload = json.load(sys.stdin)
+with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(payload) + "\n")
+
+print(json.dumps({{
+    "hookSpecificOutput": {{
+        "hookEventName": "AfterCompaction",
+        "additionalContext": {additional_context_json}
+    }}
+}}))
+"#,
+        log_path = log_path.display(),
+        additional_context_json = additional_context_json,
+    );
+    let hooks = serde_json::json!({
+        "hooks": {
+            "AfterCompaction": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("python3 {}", script_path.display()),
+                    "statusMessage": "running after compaction hook",
+                }]
+            }]
+        }
+    });
+
+    fs::write(&script_path, script).context("write after compaction hook script")?;
+    fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
+    Ok(())
+}
+
 fn rollout_hook_prompt_texts(text: &str) -> Result<Vec<String>> {
     let mut texts = Vec::new();
     for line in text.lines() {
@@ -415,6 +463,15 @@ fn read_session_start_hook_inputs(home: &Path) -> Result<Vec<serde_json::Value>>
         .collect()
 }
 
+fn read_after_compaction_hook_inputs(home: &Path) -> Result<Vec<serde_json::Value>> {
+    fs::read_to_string(home.join("after_compaction_hook_log.jsonl"))
+        .context("read after compaction hook log")?
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).context("parse after compaction hook log line"))
+        .collect()
+}
+
 fn read_user_prompt_submit_hook_inputs(home: &Path) -> Result<Vec<serde_json::Value>> {
     fs::read_to_string(home.join("user_prompt_submit_hook_log.jsonl"))
         .context("read user prompt submit hook log")?
@@ -456,6 +513,14 @@ fn request_message_input_texts(body: &[u8], role: &str) -> Vec<String> {
         .filter(|span| span.get("type").and_then(Value::as_str) == Some("input_text"))
         .filter_map(|span| span.get("text").and_then(Value::as_str).map(str::to_owned))
         .collect()
+}
+
+fn non_openai_model_provider(server: &wiremock::MockServer) -> ModelProviderInfo {
+    let mut provider = built_in_model_providers(/* openai_base_url */ None)["openai"].clone();
+    provider.name = "OpenAI (hook test)".into();
+    provider.base_url = Some(format!("{}/v1", server.uri()));
+    provider.supports_websockets = false;
+    provider
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -613,6 +678,331 @@ async fn session_start_hook_sees_materialized_transcript_path() -> Result<()> {
         Some(false)
     );
     assert_eq!(hook_inputs[0].get("exists"), Some(&Value::Bool(true)));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_compact_runs_after_compaction_hook_and_records_context() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_assistant_message("msg-1", "hello from the quay"),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-2", "compacted summary"),
+                ev_completed("resp-2"),
+            ]),
+            sse(vec![ev_completed("resp-3")]),
+        ],
+    )
+    .await;
+
+    let after_compaction_context = "Keep the migration checkpoint visible after compaction.";
+    let model_provider = non_openai_model_provider(&server);
+    let mut builder = test_codex()
+        .with_pre_build_hook(move |home| {
+            if let Err(error) = write_after_compaction_hook(home, after_compaction_context) {
+                panic!("failed to write after compaction hook test fixture: {error}");
+            }
+        })
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+            config
+                .features
+                .enable(Feature::CodexHooks)
+                .expect("test config should allow feature update");
+        });
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("hello before compact").await?;
+
+    test.codex.submit(Op::Compact).await?;
+    let hook_completed = wait_for_event(&test.codex, |event| match event {
+        EventMsg::HookCompleted(event) => {
+            event.run.event_name == codex_protocol::protocol::HookEventName::AfterCompaction
+        }
+        _ => false,
+    })
+    .await;
+    let EventMsg::HookCompleted(hook_completed) = hook_completed else {
+        panic!("expected after compaction hook completion");
+    };
+    assert_eq!(
+        hook_completed.run.entries,
+        vec![codex_protocol::protocol::HookOutputEntry {
+            kind: codex_protocol::protocol::HookOutputEntryKind::Context,
+            text: after_compaction_context.to_string(),
+        }]
+    );
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    test.submit_turn("after compact").await?;
+
+    let hook_inputs = read_after_compaction_hook_inputs(test.codex_home_path())?;
+    assert_eq!(hook_inputs.len(), 1);
+    assert_eq!(
+        hook_inputs[0].get("hook_event_name"),
+        Some(&Value::String("AfterCompaction".to_string()))
+    );
+    assert_eq!(
+        hook_inputs[0].get("trigger"),
+        Some(&Value::String("manual".to_string()))
+    );
+    assert_eq!(
+        hook_inputs[0]
+            .get("transcript_path")
+            .and_then(Value::as_str)
+            .map(str::is_empty),
+        Some(false)
+    );
+
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 3);
+    let developer_texts = requests[2].message_input_texts("developer");
+    assert!(
+        developer_texts
+            .iter()
+            .any(|text| text.contains(after_compaction_context)),
+        "follow-up request should include after-compaction additional context",
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_compact_runs_after_compaction_hook_with_auto_trigger() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_assistant_message("msg-1", "first shoreline reply"),
+                ev_completed_with_tokens("resp-1", /*total_tokens*/ 70_000),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-2", "second shoreline reply"),
+                ev_completed_with_tokens("resp-2", /*total_tokens*/ 330_000),
+            ]),
+            sse(vec![
+                ev_response_created("resp-3"),
+                ev_assistant_message("msg-3", "auto compact summary"),
+                ev_completed_with_tokens("resp-3", /*total_tokens*/ 200),
+            ]),
+            sse(vec![
+                ev_response_created("resp-4"),
+                ev_assistant_message("msg-4", "post auto response"),
+                ev_completed_with_tokens("resp-4", /*total_tokens*/ 120),
+            ]),
+        ],
+    )
+    .await;
+
+    let after_compaction_context = "Keep the auto-compaction checkpoint grounded.";
+    let model_provider = non_openai_model_provider(&server);
+    let mut builder = test_codex()
+        .with_pre_build_hook(move |home| {
+            if let Err(error) = write_after_compaction_hook(home, after_compaction_context) {
+                panic!("failed to write after compaction hook test fixture: {error}");
+            }
+        })
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+            config.compact_prompt = Some(SUMMARIZATION_PROMPT.to_string());
+            config.model_auto_compact_token_limit = Some(200_000);
+            config
+                .features
+                .enable(Feature::CodexHooks)
+                .expect("test config should allow feature update");
+        });
+    let test = builder.build(&server).await?;
+
+    test.codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "hello before auto compact".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: test.config.cwd.to_path_buf(),
+            approval_policy: codex_protocol::protocol::AskForApproval::Never,
+            approvals_reviewer: None,
+            sandbox_policy: codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
+            model: test.session_configured.model.clone(),
+            effort: None,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await?;
+    wait_for_event_with_timeout(
+        &test.codex,
+        |event| matches!(event, EventMsg::TurnComplete(_)),
+        Duration::from_secs(30),
+    )
+    .await;
+
+    test.codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "push token usage higher".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: test.config.cwd.to_path_buf(),
+            approval_policy: codex_protocol::protocol::AskForApproval::Never,
+            approvals_reviewer: None,
+            sandbox_policy: codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
+            model: test.session_configured.model.clone(),
+            effort: None,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await?;
+    wait_for_event_with_timeout(
+        &test.codex,
+        |event| matches!(event, EventMsg::TurnComplete(_)),
+        Duration::from_secs(30),
+    )
+    .await;
+
+    test.codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "turn that triggers auto compact".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: test.config.cwd.to_path_buf(),
+            approval_policy: codex_protocol::protocol::AskForApproval::Never,
+            approvals_reviewer: None,
+            sandbox_policy: codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
+            model: test.session_configured.model.clone(),
+            effort: None,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await?;
+    wait_for_event_with_timeout(
+        &test.codex,
+        |event| matches!(event, EventMsg::TurnComplete(_)),
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let hook_inputs = read_after_compaction_hook_inputs(test.codex_home_path())?;
+    assert_eq!(hook_inputs.len(), 1);
+    assert_eq!(
+        hook_inputs[0].get("hook_event_name"),
+        Some(&Value::String("AfterCompaction".to_string()))
+    );
+    assert_eq!(
+        hook_inputs[0].get("trigger"),
+        Some(&Value::String("auto".to_string()))
+    );
+
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 4);
+    let developer_texts = requests[3].message_input_texts("developer");
+    assert!(
+        developer_texts
+            .iter()
+            .any(|text| text.contains(after_compaction_context)),
+        "post-auto follow-up request should include after-compaction additional context",
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subagent_session_skips_after_compaction_hook() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_assistant_message("msg-1", "hello from the inlet"),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-2", "subagent compact summary"),
+                ev_completed("resp-2"),
+            ]),
+            sse(vec![ev_completed("resp-3")]),
+        ],
+    )
+    .await;
+
+    let after_compaction_context = "This should never reach a subagent follow-up.";
+    let model_provider = non_openai_model_provider(&server);
+    let mut builder = test_codex()
+        .with_pre_build_hook(move |home| {
+            if let Err(error) = write_after_compaction_hook(home, after_compaction_context) {
+                panic!("failed to write after compaction hook test fixture: {error}");
+            }
+        })
+        .with_session_source(SessionSource::SubAgent(SubAgentSource::Other(
+            "hook-msg-v2".to_string(),
+        )))
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+            config
+                .features
+                .enable(Feature::CodexHooks)
+                .expect("test config should allow feature update");
+        });
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("hello before compact").await?;
+
+    test.codex.submit(Op::Compact).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    test.submit_turn("after compact").await?;
+
+    let hook_log_path = test
+        .codex_home_path()
+        .join("after_compaction_hook_log.jsonl");
+    assert!(
+        !hook_log_path.exists(),
+        "subagent compaction should not execute after-compaction hooks",
+    );
+
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 3);
+    let developer_texts = requests[2].message_input_texts("developer");
+    assert!(
+        developer_texts
+            .iter()
+            .all(|text| !text.contains(after_compaction_context)),
+        "subagent follow-up request should not include after-compaction context",
+    );
 
     Ok(())
 }

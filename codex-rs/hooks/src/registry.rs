@@ -4,6 +4,8 @@ use tracing::debug;
 
 use crate::engine::ClaudeHooksEngine;
 use crate::engine::CommandShell;
+use crate::events::after_compaction::AfterCompactionOutcome;
+use crate::events::after_compaction::AfterCompactionRequest;
 use crate::events::post_tool_use::PostToolUseOutcome;
 use crate::events::post_tool_use::PostToolUseRequest;
 use crate::events::pre_tool_use::PreToolUseOutcome;
@@ -31,6 +33,7 @@ pub struct HooksConfig {
 #[derive(Clone)]
 pub struct Hooks {
     after_agent: Vec<Hook>,
+    after_compaction: Vec<Hook>,
     after_tool_use: Vec<Hook>,
     engine: ClaudeHooksEngine,
 }
@@ -68,6 +71,7 @@ impl Hooks {
         );
         Self {
             after_agent,
+            after_compaction: Vec::new(),
             after_tool_use: Vec::new(),
             engine,
         }
@@ -80,6 +84,7 @@ impl Hooks {
     fn hooks_for_event(&self, hook_event: &HookEvent) -> &[Hook] {
         match hook_event {
             HookEvent::AfterAgent { .. } => &self.after_agent,
+            HookEvent::AfterCompaction { .. } => &self.after_compaction,
             HookEvent::AfterToolUse { .. } => &self.after_tool_use,
         }
     }
@@ -94,6 +99,7 @@ impl Hooks {
             hook_count = hooks.len(),
             event_type = match &hook_payload.hook_event {
                 HookEvent::AfterAgent { .. } => "after_agent",
+                HookEvent::AfterCompaction { .. } => "after_compaction",
                 HookEvent::AfterToolUse { .. } => "after_tool_use",
             },
             "dispatching hooks"
@@ -183,6 +189,20 @@ impl Hooks {
 
     pub async fn run_stop(&self, request: StopRequest) -> StopOutcome {
         self.engine.run_stop(request).await
+    }
+
+    pub fn preview_after_compaction(
+        &self,
+        request: &AfterCompactionRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_after_compaction(request)
+    }
+
+    pub async fn run_after_compaction(
+        &self,
+        request: AfterCompactionRequest,
+    ) -> AfterCompactionOutcome {
+        self.engine.run_after_compaction(request).await
     }
 }
 

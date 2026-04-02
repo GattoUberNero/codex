@@ -16,6 +16,7 @@ use crate::protocol::EventMsg;
 use crate::protocol::TurnStartedEvent;
 use crate::protocol::WarningEvent;
 use crate::util::backoff;
+use codex_hooks::HookCompactionTrigger;
 use codex_protocol::items::ContextCompactionItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
@@ -63,7 +64,14 @@ pub(crate) async fn run_inline_auto_compact_task(
         text_elements: Vec::new(),
     }];
 
-    run_compact_task_inner(sess, turn_context, input, initial_context_injection).await?;
+    run_compact_task_inner(
+        sess,
+        turn_context,
+        input,
+        initial_context_injection,
+        HookCompactionTrigger::Auto,
+    )
+    .await?;
     Ok(())
 }
 
@@ -83,6 +91,7 @@ pub(crate) async fn run_compact_task(
         turn_context,
         input,
         InitialContextInjection::DoNotInject,
+        HookCompactionTrigger::Manual,
     )
     .await
 }
@@ -92,6 +101,7 @@ async fn run_compact_task_inner(
     turn_context: Arc<TurnContext>,
     input: Vec<UserInput>,
     initial_context_injection: InitialContextInjection,
+    trigger: HookCompactionTrigger,
 ) -> CodexResult<()> {
     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
     sess.emit_turn_item_started(&turn_context, &compaction_item)
@@ -224,6 +234,7 @@ async fn run_compact_task_inner(
 
     sess.emit_turn_item_completed(&turn_context, compaction_item)
         .await;
+    crate::hook_runtime::run_after_compaction_hooks(&sess, &turn_context, trigger).await;
     let warning = EventMsg::Warning(WarningEvent {
         message: "Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.".to_string(),
     });

@@ -13,6 +13,13 @@ pub(crate) struct SessionStartOutput {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct AfterCompactionOutput {
+    pub universal: UniversalOutput,
+    pub additional_context: Option<String>,
+    pub invalid_reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct PreToolUseOutput {
     pub universal: UniversalOutput,
     pub block_reason: Option<String>,
@@ -46,6 +53,7 @@ pub(crate) struct StopOutput {
     pub invalid_block_reason: Option<String>,
 }
 
+use crate::schema::AfterCompactionCommandOutputWire;
 use crate::schema::BlockDecisionWire;
 use crate::schema::HookUniversalOutputWire;
 use crate::schema::PostToolUseCommandOutputWire;
@@ -64,6 +72,20 @@ pub(crate) fn parse_session_start(stdout: &str) -> Option<SessionStartOutput> {
     Some(SessionStartOutput {
         universal: UniversalOutput::from(wire.universal),
         additional_context,
+    })
+}
+
+pub(crate) fn parse_after_compaction(stdout: &str) -> Option<AfterCompactionOutput> {
+    let wire: AfterCompactionCommandOutputWire = parse_json(stdout)?;
+    let universal = UniversalOutput::from(wire.universal);
+    let invalid_reason = unsupported_after_compaction_universal(&universal);
+    let additional_context = wire
+        .hook_specific_output
+        .and_then(|output| output.additional_context);
+    Some(AfterCompactionOutput {
+        universal,
+        additional_context,
+        invalid_reason,
     })
 }
 
@@ -238,6 +260,18 @@ fn unsupported_pre_tool_use_universal(universal: &UniversalOutput) -> Option<Str
 fn unsupported_post_tool_use_universal(universal: &UniversalOutput) -> Option<String> {
     if universal.suppress_output {
         Some("PostToolUse hook returned unsupported suppressOutput".to_string())
+    } else {
+        None
+    }
+}
+
+fn unsupported_after_compaction_universal(universal: &UniversalOutput) -> Option<String> {
+    if !universal.continue_processing {
+        Some("AfterCompaction hook returned unsupported continue:false".to_string())
+    } else if universal.stop_reason.is_some() {
+        Some("AfterCompaction hook returned unsupported stopReason".to_string())
+    } else if universal.suppress_output {
+        Some("AfterCompaction hook returned unsupported suppressOutput".to_string())
     } else {
         None
     }

@@ -1431,6 +1431,7 @@ pub enum HookEventName {
     UserPromptSubmit,
     Stop,
     AfterAgent,
+    AfterCompaction,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]

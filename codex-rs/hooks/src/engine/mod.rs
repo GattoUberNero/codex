@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use codex_config::ConfigLayerStack;
 use codex_protocol::protocol::HookRunSummary;
 
+use crate::events::after_compaction::AfterCompactionOutcome;
+use crate::events::after_compaction::AfterCompactionRequest;
 use crate::events::post_tool_use::PostToolUseOutcome;
 use crate::events::post_tool_use::PostToolUseRequest;
 use crate::events::pre_tool_use::PreToolUseOutcome;
@@ -56,6 +58,7 @@ impl ConfiguredHandler {
             codex_protocol::protocol::HookEventName::UserPromptSubmit => "user-prompt-submit",
             codex_protocol::protocol::HookEventName::Stop => "stop",
             codex_protocol::protocol::HookEventName::AfterAgent => "after-agent",
+            codex_protocol::protocol::HookEventName::AfterCompaction => "after-compaction",
         }
     }
 }
@@ -162,5 +165,19 @@ impl ClaudeHooksEngine {
 
     pub(crate) async fn run_stop(&self, request: StopRequest) -> StopOutcome {
         crate::events::stop::run(&self.handlers, &self.shell, request).await
+    }
+
+    pub(crate) fn preview_after_compaction(
+        &self,
+        request: &AfterCompactionRequest,
+    ) -> Vec<HookRunSummary> {
+        crate::events::after_compaction::preview(&self.handlers, request)
+    }
+
+    pub(crate) async fn run_after_compaction(
+        &self,
+        request: AfterCompactionRequest,
+    ) -> AfterCompactionOutcome {
+        crate::events::after_compaction::run(&self.handlers, &self.shell, request).await
     }
 }

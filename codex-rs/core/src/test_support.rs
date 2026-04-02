@@ -63,11 +63,28 @@ pub fn thread_manager_with_models_provider_and_home(
     codex_home: PathBuf,
     environment_manager: Arc<EnvironmentManager>,
 ) -> ThreadManager {
-    ThreadManager::with_models_provider_and_home_for_tests(
+    thread_manager_with_models_provider_and_home_and_source(
         auth,
         provider,
         codex_home,
         environment_manager,
+        codex_protocol::protocol::SessionSource::Exec,
+    )
+}
+
+pub fn thread_manager_with_models_provider_and_home_and_source(
+    auth: CodexAuth,
+    provider: ModelProviderInfo,
+    codex_home: PathBuf,
+    environment_manager: Arc<EnvironmentManager>,
+    session_source: codex_protocol::protocol::SessionSource,
+) -> ThreadManager {
+    ThreadManager::with_models_provider_and_home_and_source_for_tests(
+        auth,
+        provider,
+        codex_home,
+        environment_manager,
+        session_source,
     )
 }
 

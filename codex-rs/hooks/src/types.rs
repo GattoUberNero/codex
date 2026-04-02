@@ -112,6 +112,23 @@ pub struct HookEventAfterAgent {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum HookCompactionTrigger {
+    Auto,
+    Manual,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HookEventAfterCompaction {
+    pub thread_id: ThreadId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_name: Option<String>,
+    pub turn_id: String,
+    pub trigger: HookCompactionTrigger,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum HookToolKind {
     Function,
     Custom,
@@ -180,6 +197,10 @@ pub enum HookEvent {
         #[serde(flatten)]
         event: HookEventAfterAgent,
     },
+    AfterCompaction {
+        #[serde(flatten)]
+        event: HookEventAfterCompaction,
+    },
     AfterToolUse {
         #[serde(flatten)]
         event: HookEventAfterToolUse,
@@ -197,8 +218,10 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
+    use super::HookCompactionTrigger;
     use super::HookEvent;
     use super::HookEventAfterAgent;
+    use super::HookEventAfterCompaction;
     use super::HookEventAfterToolUse;
     use super::HookPayload;
     use super::HookToolInput;
@@ -246,6 +269,50 @@ mod tests {
         });
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn after_compaction_payload_serializes_stable_wire_shape() {
+        let session_id = ThreadId::new();
+        let thread_id = ThreadId::new();
+        let payload = HookPayload {
+            session_id,
+            cwd: PathBuf::from("tmp"),
+            client: Some("codex-tui".to_string()),
+            session_source: None,
+            session_agent_role: None,
+            nero_auto_runtime: None,
+            triggered_at: Utc
+                .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid timestamp"),
+            hook_event: HookEvent::AfterCompaction {
+                event: HookEventAfterCompaction {
+                    thread_id,
+                    thread_name: Some("reef-main".to_string()),
+                    turn_id: "turn-compact".to_string(),
+                    trigger: HookCompactionTrigger::Auto,
+                },
+            },
+        };
+
+        let actual = serde_json::to_value(&payload).expect("serialize hook payload");
+        assert_eq!(
+            actual,
+            json!({
+                "session_id": session_id,
+                "cwd": "tmp",
+                "client": "codex-tui",
+                "triggered_at": "2025-01-01T00:00:00Z",
+                "hook_event": {
+                    "event_type": "after_compaction",
+                    "thread_id": thread_id,
+                    "thread_name": "reef-main",
+                    "turn_id": "turn-compact",
+                    "trigger": "auto"
+                }
+            })
+        );
     }
 
     #[test]

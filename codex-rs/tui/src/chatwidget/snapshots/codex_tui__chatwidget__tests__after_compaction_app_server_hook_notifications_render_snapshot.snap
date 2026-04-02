@@ -1,0 +1,6 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: combined
+---
+AfterCompaction hook (completed)
+  runtime status: Keep the campaign checkpoint visible after compaction.

@@ -13763,6 +13763,47 @@ async fn after_agent_app_server_hook_notifications_render_snapshot() {
 }
 
 #[tokio::test]
+async fn after_compaction_app_server_hook_notifications_render_snapshot() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.handle_server_notification(
+        ServerNotification::HookCompleted(AppServerHookCompletedNotification {
+            thread_id: ThreadId::new().to_string(),
+            turn_id: Some("turn-compact".to_string()),
+            run: AppServerHookRunSummary {
+                id: "after-compaction:0:/tmp/hooks.json".to_string(),
+                event_name: AppServerHookEventName::AfterCompaction,
+                handler_type: AppServerHookHandlerType::Command,
+                execution_mode: AppServerHookExecutionMode::Sync,
+                scope: AppServerHookScope::Turn,
+                source_path: PathBuf::from("/tmp/hooks.json"),
+                display_order: 0,
+                status: AppServerHookRunStatus::Completed,
+                status_message: Some("refreshing runtime grounding".to_string()),
+                started_at: 1,
+                completed_at: Some(2),
+                duration_ms: Some(1),
+                entries: vec![AppServerHookOutputEntry {
+                    kind: AppServerHookOutputEntryKind::Context,
+                    text: "Keep the campaign checkpoint visible after compaction.".to_string(),
+                }],
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    let combined = cells
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert_snapshot!(
+        "after_compaction_app_server_hook_notifications_render_snapshot",
+        combined
+    );
+}
+
+#[tokio::test]
 async fn pre_tool_use_hook_events_render_snapshot() {
     assert_hook_events_snapshot(
         codex_protocol::protocol::HookEventName::PreToolUse,
@@ -13791,6 +13832,17 @@ async fn session_start_hook_events_render_snapshot() {
         "session-start:0:/tmp/hooks.json",
         "warming the shell",
         "session_start_hook_events_render_snapshot",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn after_compaction_hook_events_render_snapshot() {
+    assert_hook_events_snapshot(
+        codex_protocol::protocol::HookEventName::AfterCompaction,
+        "after-compaction:0:/tmp/hooks.json",
+        "refreshing runtime grounding",
+        "after_compaction_hook_events_render_snapshot",
     )
     .await;
 }

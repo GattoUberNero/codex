@@ -326,6 +326,7 @@ pub struct TestCodexBuilder {
     auth: CodexAuth,
     pre_build_hooks: Vec<Box<PreBuildHook>>,
     home: Option<Arc<TempDir>>,
+    session_source: SessionSource,
     user_shell_override: Option<Shell>,
 }
 
@@ -360,6 +361,11 @@ impl TestCodexBuilder {
 
     pub fn with_home(mut self, home: Arc<TempDir>) -> Self {
         self.home = Some(home);
+        self
+    }
+
+    pub fn with_session_source(mut self, session_source: SessionSource) -> Self {
+        self.session_source = session_source;
         self
     }
 
@@ -481,20 +487,22 @@ impl TestCodexBuilder {
         let environment_manager = Arc::new(codex_exec_server::EnvironmentManager::new(
             test_env.exec_server_url().map(str::to_owned),
         ));
+        let session_source = self.session_source.clone();
         let thread_manager = if config.model_catalog.is_some() {
             ThreadManager::new(
                 &config,
                 codex_core::test_support::auth_manager_from_auth(auth.clone()),
-                SessionSource::Exec,
+                session_source,
                 CollaborationModesConfig::default(),
                 Arc::clone(&environment_manager),
             )
         } else {
-            codex_core::test_support::thread_manager_with_models_provider_and_home(
+            codex_core::test_support::thread_manager_with_models_provider_and_home_and_source(
                 auth.clone(),
                 config.model_provider.clone(),
                 config.codex_home.clone(),
                 Arc::clone(&environment_manager),
+                session_source,
             )
         };
         let thread_manager = Arc::new(thread_manager);
@@ -906,6 +914,7 @@ pub fn test_codex() -> TestCodexBuilder {
         auth: CodexAuth::from_api_key("dummy"),
         pre_build_hooks: vec![],
         home: None,
+        session_source: SessionSource::Exec,
         user_shell_override: None,
     }
 }

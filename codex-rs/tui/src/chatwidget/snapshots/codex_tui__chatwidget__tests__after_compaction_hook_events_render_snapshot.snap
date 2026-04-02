@@ -1,0 +1,9 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: combined
+---
+• Running AfterCompaction hook: refreshing runtime grounding
+
+AfterCompaction hook (completed)
+  warning: Heads up from the hook
+  runtime status: Remember the startup checklist.

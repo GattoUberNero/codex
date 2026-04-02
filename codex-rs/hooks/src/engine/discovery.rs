@@ -77,6 +77,7 @@ pub(crate) fn discover_handlers(config_layer_stack: Option<&ConfigLayerStack>) -
             session_start,
             user_prompt_submit,
             stop,
+            after_compaction,
         } = parsed.hooks;
 
         for (event_name, groups) in [
@@ -97,6 +98,10 @@ pub(crate) fn discover_handlers(config_layer_stack: Option<&ConfigLayerStack>) -
                 user_prompt_submit,
             ),
             (codex_protocol::protocol::HookEventName::Stop, stop),
+            (
+                codex_protocol::protocol::HookEventName::AfterCompaction,
+                after_compaction,
+            ),
         ] {
             append_matcher_groups(
                 &mut handlers,

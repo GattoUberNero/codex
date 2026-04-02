@@ -177,9 +177,10 @@ pub fn parse_hook_actions_from_stdout(
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect();
-    if lines.len() >= 2 {
-        let candidate = *lines.last().expect("non-empty lines");
-        let prefix_contains_jsonish_tokens = lines[..lines.len() - 1]
+    if let [prefix @ .., candidate] = lines.as_slice()
+        && !prefix.is_empty()
+    {
+        let prefix_contains_jsonish_tokens = prefix
             .iter()
             .any(|line| line.contains('{') || line.contains('}'));
         if !prefix_contains_jsonish_tokens
