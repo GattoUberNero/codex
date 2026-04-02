@@ -26,7 +26,7 @@ use tempfile::TempDir;
 use tokio::time::timeout;
 
 const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
+const INTERNAL_ERROR_CODE: i64 = -32603;
 
 #[tokio::test]
 async fn thread_session_auto_read_and_update_proxy_through_bridge() -> Result<()> {
@@ -704,7 +704,288 @@ async fn thread_session_auto_update_rejects_subagent_threads() -> Result<()> {
         mcp.read_stream_until_error_message(RequestId::Integer(update_id)),
     )
     .await??;
-    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert_eq!(error.error.code, INTERNAL_ERROR_CODE);
+    assert!(
+        error
+            .error
+            .message
+            .contains("unsupported for subagent sessions")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_session_auto_read_rejects_missing_bridge_session_source_echo() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+    let bridge_dir = write_fake_runtime_bridge()?;
+    let thread_id = app_test_support::create_fake_rollout_with_source(
+        codex_home.path(),
+        "2026-04-01T14-30-00",
+        "2026-04-01T14:30:00Z",
+        "hello",
+        Some("mock"),
+        None,
+        codex_protocol::protocol::SessionSource::Cli,
+    )?;
+
+    let bridge_cwd = bridge_dir.path().to_string_lossy().to_string();
+    let mut mcp = McpProcess::new_with_env(
+        codex_home.path(),
+        &[
+            ("NERO_RUNTIME_STATE_CONTROL_CWD", Some(bridge_cwd.as_str())),
+            (
+                "NERO_RUNTIME_STATE_CONTROL_MODULE",
+                Some("fake_runtime_bridge"),
+            ),
+            ("FAKE_RUNTIME_BRIDGE_OMIT_SESSION_SOURCE", Some("1")),
+        ],
+    )
+    .await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let read_id = mcp
+        .send_thread_session_auto_read_request(ThreadSessionAutoReadParams {
+            thread_id: thread_id.clone(),
+        })
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, INTERNAL_ERROR_CODE);
+    assert!(
+        error
+            .error
+            .message
+            .contains("sessionSource echo is missing")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_session_auto_read_rejects_bridge_session_source_mismatch() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+    let bridge_dir = write_fake_runtime_bridge()?;
+    let thread_id = app_test_support::create_fake_rollout_with_source(
+        codex_home.path(),
+        "2026-04-01T14-45-00",
+        "2026-04-01T14:45:00Z",
+        "hello",
+        Some("mock"),
+        None,
+        codex_protocol::protocol::SessionSource::Cli,
+    )?;
+
+    let bridge_cwd = bridge_dir.path().to_string_lossy().to_string();
+    let mut mcp = McpProcess::new_with_env(
+        codex_home.path(),
+        &[
+            ("NERO_RUNTIME_STATE_CONTROL_CWD", Some(bridge_cwd.as_str())),
+            (
+                "NERO_RUNTIME_STATE_CONTROL_MODULE",
+                Some("fake_runtime_bridge"),
+            ),
+            (
+                "FAKE_RUNTIME_BRIDGE_SESSION_SOURCE_OVERRIDE",
+                Some("vscode"),
+            ),
+        ],
+    )
+    .await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let read_id = mcp
+        .send_thread_session_auto_read_request(ThreadSessionAutoReadParams {
+            thread_id: thread_id.clone(),
+        })
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, INTERNAL_ERROR_CODE);
+    assert!(
+        error
+            .error
+            .message
+            .contains("sessionSource mismatch: expected=cli, got=vscode")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_session_auto_read_rejects_empty_bridge_stdout() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+    let bridge_dir = write_fake_runtime_bridge()?;
+    let thread_id = app_test_support::create_fake_rollout_with_source(
+        codex_home.path(),
+        "2026-04-01T15-00-00",
+        "2026-04-01T15:00:00Z",
+        "hello",
+        Some("mock"),
+        None,
+        codex_protocol::protocol::SessionSource::Cli,
+    )?;
+
+    let bridge_cwd = bridge_dir.path().to_string_lossy().to_string();
+    let mut mcp = McpProcess::new_with_env(
+        codex_home.path(),
+        &[
+            ("NERO_RUNTIME_STATE_CONTROL_CWD", Some(bridge_cwd.as_str())),
+            (
+                "NERO_RUNTIME_STATE_CONTROL_MODULE",
+                Some("fake_runtime_bridge"),
+            ),
+            ("FAKE_RUNTIME_BRIDGE_EMPTY_STDOUT", Some("1")),
+        ],
+    )
+    .await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let read_id = mcp
+        .send_thread_session_auto_read_request(ThreadSessionAutoReadParams {
+            thread_id: thread_id.clone(),
+        })
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, INTERNAL_ERROR_CODE);
+    assert!(
+        error
+            .error
+            .message
+            .contains("runtime bridge returned empty stdout")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_session_auto_read_times_out_when_bridge_hangs() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+    let bridge_dir = write_fake_runtime_bridge()?;
+    let thread_id = app_test_support::create_fake_rollout_with_source(
+        codex_home.path(),
+        "2026-04-01T15-15-00",
+        "2026-04-01T15:15:00Z",
+        "hello",
+        Some("mock"),
+        None,
+        codex_protocol::protocol::SessionSource::Cli,
+    )?;
+
+    let bridge_cwd = bridge_dir.path().to_string_lossy().to_string();
+    let mut mcp = McpProcess::new_with_env(
+        codex_home.path(),
+        &[
+            ("NERO_RUNTIME_STATE_CONTROL_CWD", Some(bridge_cwd.as_str())),
+            (
+                "NERO_RUNTIME_STATE_CONTROL_MODULE",
+                Some("fake_runtime_bridge"),
+            ),
+            ("NERO_RUNTIME_CONTROL_TIMEOUT_MS", Some("10")),
+            ("FAKE_RUNTIME_BRIDGE_SLEEP_MS", Some("200")),
+        ],
+    )
+    .await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let read_id = mcp
+        .send_thread_session_auto_read_request(ThreadSessionAutoReadParams {
+            thread_id: thread_id.clone(),
+        })
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, INTERNAL_ERROR_CODE);
+    assert!(
+        error
+            .error
+            .message
+            .contains("runtime bridge timed out after")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_session_auto_update_rejects_bridge_reported_subagent_state() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+    let bridge_dir = write_fake_runtime_bridge()?;
+    let thread_id = app_test_support::create_fake_rollout_with_source(
+        codex_home.path(),
+        "2026-04-01T15-30-00",
+        "2026-04-01T15:30:00Z",
+        "hello",
+        Some("mock"),
+        None,
+        codex_protocol::protocol::SessionSource::Cli,
+    )?;
+
+    let bridge_cwd = bridge_dir.path().to_string_lossy().to_string();
+    let mut mcp = McpProcess::new_with_env(
+        codex_home.path(),
+        &[
+            ("NERO_RUNTIME_STATE_CONTROL_CWD", Some(bridge_cwd.as_str())),
+            (
+                "NERO_RUNTIME_STATE_CONTROL_MODULE",
+                Some("fake_runtime_bridge"),
+            ),
+            ("FAKE_RUNTIME_BRIDGE_FORCE_IS_SUBAGENT", Some("1")),
+        ],
+    )
+    .await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let read_id = mcp
+        .send_thread_session_auto_read_request(ThreadSessionAutoReadParams {
+            thread_id: thread_id.clone(),
+        })
+        .await?;
+    let read_resp: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    let state = to_response::<ThreadSessionAutoReadResponse>(read_resp)?;
+    assert!(state.state.is_subagent);
+
+    let update_id = mcp
+        .send_thread_session_auto_update_request(ThreadSessionAutoUpdateParams {
+            thread_id: thread_id.clone(),
+            expected_version: state.state.version,
+            expected_session_source: None,
+            enabled: Some(Some(true)),
+            autonomy_level: None,
+            autonomy_step_per_round: None,
+            max_auto_rounds: None,
+            done_stop_scope: None,
+            auto_rounds: None,
+            reset_counter: false,
+        })
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(update_id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, INTERNAL_ERROR_CODE);
     assert!(
         error
             .error
@@ -754,6 +1035,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 
@@ -823,7 +1105,14 @@ def read(request: dict) -> dict:
         return {'ok': False, 'error': 'invalid_input', 'message': 'threadId is required'}
     path = state_path(request)
     data = load_state(path)
-    session_source = None if os.environ.get('FAKE_RUNTIME_BRIDGE_OMIT_SESSION_SOURCE') else request.get('sessionSource')
+    session_source_override = os.environ.get('FAKE_RUNTIME_BRIDGE_SESSION_SOURCE_OVERRIDE')
+    if os.environ.get('FAKE_RUNTIME_BRIDGE_OMIT_SESSION_SOURCE'):
+        session_source = None
+    elif session_source_override is not None:
+        session_source = session_source_override
+    else:
+        session_source = request.get('sessionSource')
+    is_subagent = bool(os.environ.get('FAKE_RUNTIME_BRIDGE_FORCE_IS_SUBAGENT'))
     return {
         'ok': True,
         'path': str(path),
@@ -831,7 +1120,7 @@ def read(request: dict) -> dict:
         'version': version_for(data),
         'threadId': thread_id,
         'sessionSource': session_source,
-        'isSubagent': False,
+        'isSubagent': is_subagent,
         'defaults': defaults(),
         'applied': applied_from_state(data),
         'effective': effective_from_state(data),
@@ -927,6 +1216,11 @@ def main(argv: list[str]) -> int:
         print(json.dumps({'ok': False, 'error': 'invalid_command'}))
         return 2
     request = json.load(sys.stdin)
+    sleep_ms = os.environ.get('FAKE_RUNTIME_BRIDGE_SLEEP_MS')
+    if sleep_ms:
+        time.sleep(float(sleep_ms) / 1000.0)
+    if os.environ.get('FAKE_RUNTIME_BRIDGE_EMPTY_STDOUT'):
+        return 0
     command = argv[1]
     if command == 'read-session-auto':
         print(json.dumps(read(request)))

@@ -27,6 +27,7 @@ const NERO_RUNTIME_STATE_CONTROL_TIMEOUT_ENV_COMPAT: &str =
     "NEROBAR_NERO_RUNTIME_CONTROL_TIMEOUT_MS";
 const NERO_RUNTIME_STATE_CONTROL_PYTHON_ENV: &str = "NERO_RUNTIME_PYTHON_BIN";
 const NERO_RUNTIME_STATE_CONTROL_PYTHON_ENV_COMPAT: &str = "NEROBAR_NERO_RUNTIME_PYTHON_BIN";
+const CODEXN_ROOT_ENV: &str = "CODEXN_ROOT";
 const NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE: &str = "nero_hook_runtime.session_auto_bridge";
 const NERO_RUNTIME_STATE_CONTROL_RETIRED_MODULE: &str = "nero_hook_runtime.state_runtime_control";
 const NERO_RUNTIME_STATE_CONTROL_DEFAULT_TIMEOUT_MS: u64 = 2_500;
@@ -186,13 +187,27 @@ fn normalize_runtime_state_control_module(module: String) -> String {
     module
 }
 
+fn resolve_runtime_bridge_default_cwd() -> PathBuf {
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut candidates = Vec::with_capacity(3);
+    if let Some(root) = first_non_empty_env(&[CODEXN_ROOT_ENV]) {
+        candidates.push(PathBuf::from(root).join("apps/codex-nero-sdk"));
+    }
+    candidates.push(current_dir.clone());
+    candidates.push(current_dir.join("apps/codex-nero-sdk"));
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.join("nero_hook_runtime").is_dir())
+        .unwrap_or(current_dir)
+}
+
 fn resolve_runtime_bridge_settings() -> RuntimeBridgeSettings {
     let cwd = first_non_empty_env(&[
         NERO_RUNTIME_STATE_CONTROL_CWD_ENV,
         NERO_RUNTIME_STATE_CONTROL_CWD_ENV_COMPAT,
     ])
     .map(PathBuf::from)
-    .unwrap_or_else(|| PathBuf::from("/workspace/purrnet/apps/codex-nero-sdk"));
+    .unwrap_or_else(resolve_runtime_bridge_default_cwd);
     let module = first_non_empty_env(&[
         NERO_RUNTIME_STATE_CONTROL_MODULE_ENV,
         NERO_RUNTIME_STATE_CONTROL_MODULE_ENV_COMPAT,
@@ -219,13 +234,23 @@ fn resolve_runtime_bridge_settings() -> RuntimeBridgeSettings {
     }
 }
 
-fn runtime_bridge_config_path(codex_home: &Path) -> PathBuf {
-    if let Some(path) = std::env::var_os(NERO_AUTO_RUNTIME_CONFIG_ENV)
+fn runtime_bridge_config_path_from_env(
+    codex_home: &Path,
+    configured_path: Option<&std::ffi::OsStr>,
+) -> PathBuf {
+    if let Some(path) = configured_path
         && !path.is_empty()
     {
         return PathBuf::from(path);
     }
     codex_home.join("config-nero-hook-auto.toml")
+}
+
+fn runtime_bridge_config_path(codex_home: &Path) -> PathBuf {
+    runtime_bridge_config_path_from_env(
+        codex_home,
+        std::env::var_os(NERO_AUTO_RUNTIME_CONFIG_ENV).as_deref(),
+    )
 }
 
 async fn run_runtime_bridge<T, U>(command_name: &str, payload: &T) -> Result<U, String>
@@ -387,52 +412,6 @@ fn map_bridge_state(
     })
 }
 
-fn updated_effective_state(
-    current: &ThreadSessionAutoState,
-    applied: &ThreadSessionAutoApplied,
-) -> ThreadSessionAutoEffective {
-    let has_session_override = applied.enabled.is_some()
-        || applied.autonomy_level.is_some()
-        || applied.autonomy_step_per_round.is_some()
-        || applied.max_auto_rounds.is_some()
-        || applied.done_stop_scope.is_some();
-    let (enabled, source) = if current.is_subagent {
-        (false, "subagent-forced-off".to_string())
-    } else if let Some(enabled) = applied.enabled {
-        (enabled, "session-override".to_string())
-    } else if has_session_override {
-        (
-            current.defaults.runtime.enabled,
-            "session-override".to_string(),
-        )
-    } else {
-        (
-            current.defaults.runtime.enabled,
-            "config-default".to_string(),
-        )
-    };
-    ThreadSessionAutoEffective {
-        runtime: sanitize_runtime(NeroAutoRuntimeConfig {
-            enabled,
-            autonomy_level: applied
-                .autonomy_level
-                .unwrap_or(current.defaults.runtime.autonomy_level),
-            max_auto_rounds: applied
-                .max_auto_rounds
-                .unwrap_or(current.defaults.runtime.max_auto_rounds),
-        }),
-        autonomy_step_per_round: applied
-            .autonomy_step_per_round
-            .unwrap_or(current.defaults.autonomy_step_per_round),
-        done_stop_scope: applied
-            .done_stop_scope
-            .clone()
-            .unwrap_or_else(|| current.defaults.done_stop_scope.clone()),
-        auto_rounds: applied.auto_rounds,
-        source,
-    }
-}
-
 pub(crate) async fn read_thread_session_auto(
     codex_home: &Path,
     context: &ThreadSessionAutoContext,
@@ -534,53 +513,25 @@ pub(crate) async fn update_thread_session_auto(
     )
     .await?;
     if response.ok {
-        let version = response
+        let applied_version = response
             ._version
             .clone()
             .ok_or_else(|| "runtime bridge update succeeded without a version".to_string())?;
-        let applied = response
+        response
             .applied
             .as_ref()
             .ok_or_else(|| "runtime bridge update succeeded without applied payload".to_string())?;
-        let state = ThreadSessionAutoState {
-            thread_name: current.state.thread_name.clone(),
-            session_source: current.state.session_source.clone(),
-            loaded: current.state.loaded,
-            config_path: current.state.config_path.clone(),
-            state_path: response
-                .path
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| current.state.state_path.clone()),
-            version,
-            is_subagent: current.state.is_subagent,
-            defaults: current.state.defaults.clone(),
-            applied: ThreadSessionAutoApplied {
-                enabled: applied.enabled,
-                autonomy_level: applied
-                    .policy_override
-                    .as_ref()
-                    .and_then(|policy| policy.autonomy_level),
-                autonomy_step_per_round: applied
-                    .policy_override
-                    .as_ref()
-                    .and_then(|policy| policy.autonomy_step_per_round),
-                max_auto_rounds: applied
-                    .policy_override
-                    .as_ref()
-                    .and_then(|policy| policy.max_auto_rounds),
-                done_stop_scope: applied
-                    .policy_override
-                    .as_ref()
-                    .and_then(|policy| policy.done_stop_scope.clone()),
-                auto_rounds: applied.auto_rounds.max(0),
-                updated_at: applied.updated_at.clone(),
-            },
-            effective: current.state.effective.clone(),
-        };
-        let effective = updated_effective_state(&state, &state.applied);
-        let state = ThreadSessionAutoState { effective, ..state };
+        let confirmed = read_thread_session_auto(codex_home, context)
+            .await
+            .map_err(|err| {
+                format!("runtime bridge update succeeded but confirmation read failed: {err}")
+            })?;
+        if confirmed.state.version != applied_version {
+            return Err(format!(
+                "runtime bridge update confirmation version mismatch: applied={applied_version}, confirmed={}",
+                confirmed.state.version
+            ));
+        }
         return Ok(ThreadSessionAutoUpdateResponse {
             thread_id: context.thread_id.clone(),
             authority: ThreadSessionAutoAuthorityMode::BridgeProxy,
@@ -589,7 +540,7 @@ pub(crate) async fn update_thread_session_auto(
             message: None,
             error_code: None,
             reason_code: None,
-            state: Some(state),
+            state: Some(confirmed.state),
         });
     }
     let error_code = response
@@ -650,7 +601,10 @@ mod tests {
     use super::NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE;
     use super::NERO_RUNTIME_STATE_CONTROL_RETIRED_MODULE;
     use super::normalize_runtime_state_control_module;
+    use super::runtime_bridge_config_path_from_env;
     use pretty_assertions::assert_eq;
+    use std::ffi::OsStr;
+    use std::path::Path;
 
     #[test]
     fn normalize_runtime_state_control_module_maps_retired_cli_module_to_current_bridge() {
@@ -669,6 +623,25 @@ mod tests {
                 NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE.to_string(),
             ),
             NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE.to_string()
+        );
+    }
+
+    #[test]
+    fn runtime_bridge_config_path_uses_explicit_override_when_present() {
+        assert_eq!(
+            runtime_bridge_config_path_from_env(
+                Path::new("/tmp/codex-home"),
+                Some(OsStr::new("/tmp/explicit-nero-auto.toml"))
+            ),
+            Path::new("/tmp/explicit-nero-auto.toml")
+        );
+    }
+
+    #[test]
+    fn runtime_bridge_config_path_falls_back_for_empty_override() {
+        assert_eq!(
+            runtime_bridge_config_path_from_env(Path::new("/tmp/codex-home"), Some(OsStr::new(""))),
+            Path::new("/tmp/codex-home/config-nero-hook-auto.toml")
         );
     }
 }

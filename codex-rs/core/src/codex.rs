@@ -560,9 +560,9 @@ fn is_runtime_delivery_status_kind(status_kind: Option<&str>) -> bool {
     !matches!(status_kind, Some("state") | Some("auto"))
 }
 
-enum LegacyNeroHookTuiDelivery {
-    Warning(String),
-    HookSummary(codex_protocol::protocol::HookOutputEntry),
+struct LegacyNeroHookTuiDelivery {
+    warning: Option<String>,
+    hook_summary: Option<codex_protocol::protocol::HookOutputEntry>,
 }
 
 fn nero_hook_summary_entry_kind(
@@ -604,17 +604,37 @@ fn legacy_nero_hook_tui_delivery(
     status_kind_normalized: Option<&str>,
 ) -> LegacyNeroHookTuiDelivery {
     if let Some(status_entry) = status {
-        return LegacyNeroHookTuiDelivery::HookSummary(codex_protocol::protocol::HookOutputEntry {
+        let hook_summary = codex_protocol::protocol::HookOutputEntry {
             kind: nero_hook_summary_entry_kind(status_kind_normalized),
             text: nero_hook_summary_entry_text(tui_body, status_entry),
-        });
+        };
+        let (warning, hook_summary) = match format {
+            // In block mode preserve legacy user-facing block delivery and avoid
+            // duplicate status rendering through the hook summary lane.
+            NeroHookMsgFormat::Block => (
+                Some(nero_hook_tui_warning_message(
+                    tui_body,
+                    format,
+                    status.map(|item| (item.kind.as_str(), item.text.as_str())),
+                )),
+                None,
+            ),
+            NeroHookMsgFormat::Inline => (None, Some(hook_summary)),
+        };
+        return LegacyNeroHookTuiDelivery {
+            warning,
+            hook_summary,
+        };
     }
 
-    LegacyNeroHookTuiDelivery::Warning(nero_hook_tui_warning_message(
-        tui_body,
-        format,
-        status.map(|item| (item.kind.as_str(), item.text.as_str())),
-    ))
+    LegacyNeroHookTuiDelivery {
+        warning: Some(nero_hook_tui_warning_message(
+            tui_body,
+            format,
+            status.map(|item| (item.kind.as_str(), item.text.as_str())),
+        )),
+        hook_summary: None,
+    }
 }
 
 fn runtime_delivery_contract_satisfied(
@@ -6001,6 +6021,7 @@ mod handlers {
     use serde::Deserialize;
     use serde::Serialize;
     use serde_json::Value;
+    use std::path::Path;
     use std::path::PathBuf;
     use std::process::Stdio;
     use std::sync::Arc;
@@ -6021,6 +6042,8 @@ mod handlers {
         "NEROBAR_NERO_RUNTIME_CONTROL_TIMEOUT_MS";
     const NERO_RUNTIME_STATE_CONTROL_PYTHON_ENV: &str = "NERO_RUNTIME_PYTHON_BIN";
     const NERO_RUNTIME_STATE_CONTROL_PYTHON_ENV_COMPAT: &str = "NEROBAR_NERO_RUNTIME_PYTHON_BIN";
+    const CODEXN_ROOT_ENV: &str = "CODEXN_ROOT";
+    const NERO_AUTO_RUNTIME_CONFIG_ENV: &str = "CODEXN_CONFIG_NERO_AUTO_PATH";
     const NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE: &str = "nero_hook_runtime.session_auto_bridge";
     const NERO_RUNTIME_STATE_CONTROL_RETIRED_MODULE: &str =
         "nero_hook_runtime.state_runtime_control";
@@ -6058,6 +6081,8 @@ mod handlers {
         ok: bool,
         error: Option<String>,
         message: Option<String>,
+        thread_id: Option<String>,
+        session_source: Option<String>,
         is_subagent: bool,
         effective: NeroAutoBridgeEffective,
     }
@@ -6082,13 +6107,46 @@ mod handlers {
         module
     }
 
+    fn runtime_bridge_config_path_from_env(
+        codex_home: &Path,
+        configured_path: Option<&std::ffi::OsStr>,
+    ) -> PathBuf {
+        if let Some(path) = configured_path
+            && !path.is_empty()
+        {
+            return PathBuf::from(path);
+        }
+        codex_home.join("config-nero-hook-auto.toml")
+    }
+
+    fn runtime_bridge_config_path(codex_home: &Path) -> PathBuf {
+        runtime_bridge_config_path_from_env(
+            codex_home,
+            std::env::var_os(NERO_AUTO_RUNTIME_CONFIG_ENV).as_deref(),
+        )
+    }
+
+    fn resolve_runtime_bridge_default_cwd() -> PathBuf {
+        let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let mut candidates = Vec::with_capacity(3);
+        if let Some(root) = first_non_empty_env(&[CODEXN_ROOT_ENV]) {
+            candidates.push(PathBuf::from(root).join("apps/codex-nero-sdk"));
+        }
+        candidates.push(current_dir.clone());
+        candidates.push(current_dir.join("apps/codex-nero-sdk"));
+        candidates
+            .into_iter()
+            .find(|candidate| candidate.join("nero_hook_runtime").is_dir())
+            .unwrap_or(current_dir)
+    }
+
     fn resolve_nero_auto_runtime_bridge_settings() -> NeroAutoRuntimeBridgeSettings {
         let cwd = first_non_empty_env(&[
             NERO_RUNTIME_STATE_CONTROL_CWD_ENV,
             NERO_RUNTIME_STATE_CONTROL_CWD_ENV_COMPAT,
         ])
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/workspace/purrnet/apps/codex-nero-sdk"));
+        .unwrap_or_else(resolve_runtime_bridge_default_cwd);
         let module = first_non_empty_env(&[
             NERO_RUNTIME_STATE_CONTROL_MODULE_ENV,
             NERO_RUNTIME_STATE_CONTROL_MODULE_ENV_COMPAT,
@@ -6153,6 +6211,7 @@ mod handlers {
         let mut command = Command::new(&settings.python_bin);
         command
             .current_dir(&settings.cwd)
+            .kill_on_drop(true)
             .arg("-m")
             .arg(&settings.module)
             .arg(command_name)
@@ -6238,6 +6297,48 @@ In your final assistant response include the auto protocol JSON block required b
         response.effective.auto_rounds == 0
     }
 
+    fn validate_nero_auto_bridge_read_identity(
+        response: &NeroAutoBridgeReadResponse,
+        request: &NeroAutoBridgeReadRequest,
+    ) -> Result<(), String> {
+        let thread_id = response
+            .thread_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "runtime bridge threadId echo is missing".to_string())?;
+        if thread_id != request.thread_id {
+            return Err(format!(
+                "runtime bridge threadId mismatch: expected={}, got={thread_id}",
+                request.thread_id
+            ));
+        }
+        let session_source = response
+            .session_source
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "runtime bridge sessionSource echo is missing".to_string())?;
+        if session_source != request.session_source {
+            return Err(format!(
+                "runtime bridge sessionSource mismatch: expected={}, got={session_source}",
+                request.session_source
+            ));
+        }
+        Ok(())
+    }
+
+    fn session_source_supports_nero_auto_turn_booster(session_source: &SessionSource) -> bool {
+        match session_source {
+            SessionSource::SubAgent(_) | SessionSource::Unknown => false,
+            SessionSource::Cli
+            | SessionSource::VSCode
+            | SessionSource::Exec
+            | SessionSource::Mcp
+            | SessionSource::Custom(_) => true,
+        }
+    }
+
     async fn maybe_prepare_nero_auto_turn_booster(
         sess: &Arc<Session>,
         turn_context: &Arc<TurnContext>,
@@ -6249,6 +6350,12 @@ In your final assistant response include the auto protocol JSON block required b
         if matches!(turn_context.session_source, SessionSource::SubAgent(_)) {
             return None;
         }
+        // Session-auto authority is app-server scoped. Keep booster injection
+        // bound to app-server-backed sessions so non-app-server sources do not
+        // make parallel runtime decisions via the bridge path.
+        if !session_source_supports_nero_auto_turn_booster(&turn_context.session_source) {
+            return None;
+        }
         if developer_instructions_have_auto_path(turn_context.developer_instructions.as_deref()) {
             return None;
         }
@@ -6256,10 +6363,7 @@ In your final assistant response include the auto protocol JSON block required b
         let request = NeroAutoBridgeReadRequest {
             thread_id: sess.conversation_id.to_string(),
             session_source: turn_context.session_source.to_string(),
-            config_path: sess
-                .codex_home()
-                .await
-                .join(codex_config::CONFIG_TOML_FILE)
+            config_path: runtime_bridge_config_path(&sess.codex_home().await)
                 .to_string_lossy()
                 .to_string(),
         };
@@ -6277,6 +6381,10 @@ In your final assistant response include the auto protocol JSON block required b
                 .or(response.error)
                 .unwrap_or_else(|| "runtime bridge read failed".to_string());
             warn!("runtime bridge read reported failure for auto-turn booster: {detail}");
+            return None;
+        }
+        if let Err(err) = validate_nero_auto_bridge_read_identity(&response, &request) {
+            warn!("{err}");
             return None;
         }
         if !should_inject_nero_auto_turn_booster(&response) {
@@ -7096,6 +7204,8 @@ In your final assistant response include the auto protocol JSON block required b
                 ok: true,
                 error: None,
                 message: None,
+                thread_id: Some("thread-123".to_string()),
+                session_source: Some("mcp".to_string()),
                 is_subagent,
                 effective: NeroAutoBridgeEffective {
                     enabled,
@@ -7151,6 +7261,107 @@ In your final assistant response include the auto protocol JSON block required b
 
             let default_source = sample_bridge_response(true, "config-default", false, 0);
             assert!(!should_inject_nero_auto_turn_booster(&default_source));
+        }
+
+        #[test]
+        fn booster_path_supports_all_non_subagent_sources() {
+            assert!(session_source_supports_nero_auto_turn_booster(
+                &SessionSource::Mcp
+            ));
+            assert!(session_source_supports_nero_auto_turn_booster(
+                &SessionSource::Cli,
+            ));
+            assert!(session_source_supports_nero_auto_turn_booster(
+                &SessionSource::VSCode,
+            ));
+            assert!(session_source_supports_nero_auto_turn_booster(
+                &SessionSource::Exec,
+            ));
+            assert!(session_source_supports_nero_auto_turn_booster(
+                &SessionSource::Custom("other".to_string()),
+            ));
+            assert!(!session_source_supports_nero_auto_turn_booster(
+                &SessionSource::SubAgent(crate::protocol::SubAgentSource::Review),
+            ));
+            assert!(!session_source_supports_nero_auto_turn_booster(
+                &SessionSource::Unknown
+            ));
+        }
+
+        #[test]
+        fn bridge_identity_validation_rejects_missing_echo_fields() {
+            let response = NeroAutoBridgeReadResponse {
+                ok: true,
+                error: None,
+                message: None,
+                thread_id: None,
+                session_source: Some("mcp".to_string()),
+                is_subagent: false,
+                effective: NeroAutoBridgeEffective {
+                    enabled: true,
+                    source: "session-override".to_string(),
+                    auto_rounds: 0,
+                },
+            };
+            let request = NeroAutoBridgeReadRequest {
+                thread_id: "thread-123".to_string(),
+                session_source: "mcp".to_string(),
+                config_path: "/tmp/config-nero-hook-auto.toml".to_string(),
+            };
+            let result = validate_nero_auto_bridge_read_identity(&response, &request);
+            assert_eq!(
+                result,
+                Err("runtime bridge threadId echo is missing".to_string())
+            );
+        }
+
+        #[test]
+        fn bridge_identity_validation_rejects_session_source_mismatch() {
+            let response = NeroAutoBridgeReadResponse {
+                ok: true,
+                error: None,
+                message: None,
+                thread_id: Some("thread-123".to_string()),
+                session_source: Some("cli".to_string()),
+                is_subagent: false,
+                effective: NeroAutoBridgeEffective {
+                    enabled: true,
+                    source: "session-override".to_string(),
+                    auto_rounds: 0,
+                },
+            };
+            let request = NeroAutoBridgeReadRequest {
+                thread_id: "thread-123".to_string(),
+                session_source: "mcp".to_string(),
+                config_path: "/tmp/config-nero-hook-auto.toml".to_string(),
+            };
+            let result = validate_nero_auto_bridge_read_identity(&response, &request);
+            assert_eq!(
+                result,
+                Err("runtime bridge sessionSource mismatch: expected=mcp, got=cli".to_string())
+            );
+        }
+
+        #[test]
+        fn runtime_bridge_config_path_uses_explicit_override_when_present() {
+            assert_eq!(
+                runtime_bridge_config_path_from_env(
+                    std::path::Path::new("/tmp/codex-home"),
+                    Some(std::ffi::OsStr::new("/tmp/explicit-nero-auto.toml"))
+                ),
+                std::path::Path::new("/tmp/explicit-nero-auto.toml")
+            );
+        }
+
+        #[test]
+        fn runtime_bridge_config_path_falls_back_for_empty_override() {
+            assert_eq!(
+                runtime_bridge_config_path_from_env(
+                    std::path::Path::new("/tmp/codex-home"),
+                    Some(std::ffi::OsStr::new(""))
+                ),
+                std::path::Path::new("/tmp/codex-home/config-nero-hook-auto.toml")
+            );
         }
     }
 }
@@ -8072,22 +8283,21 @@ pub(crate) async fn run_turn(
                                                 NeroHookMsgMode::Synced => msg.full.clone(),
                                                 NeroHookMsgMode::TuiShort => msg.short.clone(),
                                             };
-                                            match legacy_nero_hook_tui_delivery(
+                                            let delivery = legacy_nero_hook_tui_delivery(
                                                 &tui_body,
                                                 format,
                                                 status.as_ref(),
                                                 status_kind_normalized.as_deref(),
-                                            ) {
-                                                LegacyNeroHookTuiDelivery::Warning(message) => {
-                                                    sess.send_event(
-                                                        &turn_context,
-                                                        EventMsg::Warning(WarningEvent { message }),
-                                                    )
-                                                    .await;
-                                                }
-                                                LegacyNeroHookTuiDelivery::HookSummary(entry) => {
-                                                    legacy_after_agent_summary_entries.push(entry);
-                                                }
+                                            );
+                                            if let Some(message) = delivery.warning {
+                                                sess.send_event(
+                                                    &turn_context,
+                                                    EventMsg::Warning(WarningEvent { message }),
+                                                )
+                                                .await;
+                                            }
+                                            if let Some(entry) = delivery.hook_summary {
+                                                legacy_after_agent_summary_entries.push(entry);
                                             }
                                             delivered_tui = true;
                                         }
@@ -13961,7 +14171,7 @@ mod tests {
     }
 
     #[test]
-    fn status_nero_hook_tui_delivery_uses_hook_summary_instead_of_warning() {
+    fn status_nero_hook_tui_delivery_in_block_mode_prefers_warning_block() {
         let status = codex_hooks::NeroHookMsgStatus {
             kind: "state".to_string(),
             text: "healthy".to_string(),
@@ -13975,20 +14185,10 @@ mod tests {
             Some("state"),
         );
 
-        match delivery {
-            LegacyNeroHookTuiDelivery::HookSummary(entry) => {
-                assert_eq!(
-                    entry,
-                    codex_protocol::protocol::HookOutputEntry {
-                        kind: codex_protocol::protocol::HookOutputEntryKind::Context,
-                        text: "NERO HOOK SYSTEM [state: healthy]".to_string(),
-                    }
-                );
-            }
-            LegacyNeroHookTuiDelivery::Warning(message) => {
-                panic!("expected HookSummary, got warning: {message}");
-            }
-        }
+        assert!(delivery.hook_summary.is_none());
+        let warning = delivery.warning.expect("block delivery warning");
+        assert!(warning.contains("content = NERO HOOK SYSTEM"));
+        assert!(warning.contains("status = state: healthy"));
     }
 
     #[test]
@@ -14006,20 +14206,14 @@ mod tests {
             Some("warning"),
         );
 
-        match delivery {
-            LegacyNeroHookTuiDelivery::HookSummary(entry) => {
-                assert_eq!(
-                    entry,
-                    codex_protocol::protocol::HookOutputEntry {
-                        kind: codex_protocol::protocol::HookOutputEntryKind::Warning,
-                        text: "NERO HOOK SYSTEM [warning: campaign unresolved]".to_string(),
-                    }
-                );
-            }
-            LegacyNeroHookTuiDelivery::Warning(message) => {
-                panic!("expected HookSummary, got warning: {message}");
-            }
-        }
+        assert_eq!(
+            delivery.hook_summary,
+            Some(codex_protocol::protocol::HookOutputEntry {
+                kind: codex_protocol::protocol::HookOutputEntryKind::Warning,
+                text: "NERO HOOK SYSTEM [warning: campaign unresolved]".to_string(),
+            })
+        );
+        assert!(delivery.warning.is_none());
     }
 
     #[test]

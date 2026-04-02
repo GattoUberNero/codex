@@ -85,13 +85,13 @@ fn parse_legacy_notify_stdout(stdout_bytes: Vec<u8>) -> Result<Vec<crate::HookAc
                 Ok(parsed.actions)
             }
             Err(err) if stdout.trim_start().starts_with('{') => {
-                debug!(
+                warn!(
                     hook_name = "legacy_notify",
                     stdout_len = stdout.len(),
                     error = %err,
-                    "legacy notify stdout looked like JSON but actions parsing failed"
+                    "legacy notify stdout looked like JSON but actions parsing failed; treating as compatibility plain text"
                 );
-                Err(io::Error::other(err.to_string()))
+                Ok(Vec::new())
             }
             Err(_) => {
                 debug!(
