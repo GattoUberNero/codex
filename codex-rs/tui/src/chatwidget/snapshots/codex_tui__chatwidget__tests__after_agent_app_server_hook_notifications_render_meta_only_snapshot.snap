@@ -1,0 +1,7 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: combined
+---
+AfterAgent hook (completed)
+  hook-auto protocol: ok (expected=true, delivered=true)
+  hook-auto follow-up: queued (queued=1, blocked=0)

@@ -660,6 +660,8 @@ fn runtime_delivery_contract_status(
 fn after_agent_runtime_hook_completed_event(
     turn_id: &str,
     hook_name: &str,
+    status: codex_protocol::protocol::HookRunStatus,
+    status_message: Option<String>,
     meta: Option<Value>,
     entries: Vec<codex_protocol::protocol::HookOutputEntry>,
 ) -> Option<crate::protocol::HookCompletedEvent> {
@@ -678,8 +680,8 @@ fn after_agent_runtime_hook_completed_event(
             scope: codex_protocol::protocol::HookScope::Turn,
             source_path: PathBuf::from(format!("legacy://after_agent/{hook_name}")),
             display_order: 0,
-            status: codex_protocol::protocol::HookRunStatus::Completed,
-            status_message: Some("after_agent runtime status".to_string()),
+            status,
+            status_message,
             started_at,
             completed_at: Some(started_at),
             duration_ms: Some(0),
@@ -6242,6 +6244,18 @@ mod handlers {
             .map_err(|err| format!("wait runtime bridge output: {err}"))?;
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if !output.status.success() {
+            let detail = match (stderr.is_empty(), stdout.is_empty()) {
+                (true, true) => format!("exit status {}", output.status),
+                (false, true) => format!("exit status {}; stderr={stderr}", output.status),
+                (true, false) => format!("exit status {}; stdout={stdout}", output.status),
+                (false, false) => format!(
+                    "exit status {}; stderr={stderr}; stdout={stdout}",
+                    output.status
+                ),
+            };
+            return Err(format!("runtime bridge command failed: {detail}"));
+        }
         if stdout.is_empty() {
             let detail = if stderr.is_empty() {
                 format!("exit status {}", output.status)
@@ -6350,9 +6364,9 @@ In your final assistant response include the auto protocol JSON block required b
         if matches!(turn_context.session_source, SessionSource::SubAgent(_)) {
             return None;
         }
-        // Session-auto authority is app-server scoped. Keep booster injection
-        // bound to app-server-backed sessions so non-app-server sources do not
-        // make parallel runtime decisions via the bridge path.
+        // Booster is intentionally disabled for unknown/subagent sources and
+        // allowed for first-party interactive sources that participate in the
+        // shared runtime bridge contract.
         if !session_source_supports_nero_auto_turn_booster(&turn_context.session_source) {
             return None;
         }
@@ -8660,9 +8674,26 @@ pub(crate) async fn run_turn(
                                 hook_auto_user_replies_queued,
                                 hook_auto_user_replies_blocked,
                             ));
+                            let (runtime_event_status, runtime_event_status_message) =
+                                if matches!(&result, HookResult::FailedContinue(_)) {
+                                    (
+                                        codex_protocol::protocol::HookRunStatus::Failed,
+                                        Some(
+                                            "after_agent runtime status (hook failed_continue)"
+                                                .to_string(),
+                                        ),
+                                    )
+                                } else {
+                                    (
+                                        codex_protocol::protocol::HookRunStatus::Completed,
+                                        Some("after_agent runtime status".to_string()),
+                                    )
+                                };
                             if let Some(event) = after_agent_runtime_hook_completed_event(
                                 &turn_context.sub_id,
                                 &hook_name,
+                                runtime_event_status,
+                                runtime_event_status_message,
                                 runtime_summary_meta,
                                 legacy_after_agent_summary_entries,
                             ) {
@@ -14226,6 +14257,8 @@ mod tests {
         let event = after_agent_runtime_hook_completed_event(
             "turn-1",
             "nero-hook-runtime",
+            codex_protocol::protocol::HookRunStatus::Completed,
+            Some("after_agent runtime status".to_string()),
             Some(json!({
                 "status": {
                     "kind_normalized": "state",
@@ -14310,6 +14343,8 @@ mod tests {
         let event = after_agent_runtime_hook_completed_event(
             "turn-2",
             "nero-hook-runtime",
+            codex_protocol::protocol::HookRunStatus::Completed,
+            Some("after_agent runtime status".to_string()),
             Some(json!({
                 "protocol": {
                     "status": "ok",

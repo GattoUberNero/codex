@@ -13814,6 +13814,59 @@ async fn after_agent_app_server_hook_notifications_render_snapshot() {
 }
 
 #[tokio::test]
+async fn after_agent_app_server_hook_notifications_render_meta_only_snapshot() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.handle_server_notification(
+        ServerNotification::HookCompleted(AppServerHookCompletedNotification {
+            thread_id: ThreadId::new().to_string(),
+            turn_id: Some("turn-2".to_string()),
+            run: AppServerHookRunSummary {
+                id: "after-agent:nero-hook-runtime:turn-2".to_string(),
+                event_name: AppServerHookEventName::AfterAgent,
+                handler_type: AppServerHookHandlerType::Agent,
+                execution_mode: AppServerHookExecutionMode::Sync,
+                scope: AppServerHookScope::Turn,
+                source_path: PathBuf::from("legacy://after_agent/nero-hook-runtime"),
+                display_order: 0,
+                status: AppServerHookRunStatus::Completed,
+                status_message: Some("legacy after_agent runtime status".to_string()),
+                started_at: 1,
+                completed_at: Some(1),
+                duration_ms: Some(0),
+                meta: Some(serde_json::json!({
+                    "status": {
+                        "kind_normalized": "auto",
+                    },
+                    "protocol": {
+                        "status": "ok",
+                        "runtime_msg_expected": true,
+                        "runtime_msg_delivered": true,
+                    },
+                    "follow_up": {
+                        "status": "queued",
+                        "queued_count": 1,
+                        "blocked_count": 0,
+                    },
+                })),
+                entries: Vec::new(),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    let combined = cells
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert_snapshot!(
+        "after_agent_app_server_hook_notifications_render_meta_only_snapshot",
+        combined
+    );
+}
+
+#[tokio::test]
 async fn after_compaction_app_server_hook_notifications_render_snapshot() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

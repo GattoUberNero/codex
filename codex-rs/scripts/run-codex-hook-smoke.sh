@@ -2,11 +2,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR/.."
+WORKTREE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$WORKTREE_ROOT"
 
-export CODEXN_CONFIG_NERO_MSG_PATH="${CODEXN_CONFIG_NERO_MSG_PATH:-$HOME/.codex/config-nero-hook-msg.toml}"
-export CODEXN_CONFIG_NERO_AUTO_PATH="${CODEXN_CONFIG_NERO_AUTO_PATH:-$HOME/.codex/config-nero-hook-auto.toml}"
-export NERO_RUNTIME_STATE_CONTROL_MODULE="${NERO_RUNTIME_STATE_CONTROL_MODULE:-nero_hook_runtime.session_auto_bridge}"
-export NEROBAR_NERO_RUNTIME_STATE_CONTROL_MODULE="${NEROBAR_NERO_RUNTIME_STATE_CONTROL_MODULE:-nero_hook_runtime.session_auto_bridge}"
+export CODEXN_ROOT="${CODEXN_ROOT:-$WORKTREE_ROOT}"
+export NERO_HOOK_SMOKE_MODE="${NERO_HOOK_SMOKE_MODE:-nero_status_block_probe}"
 
-cargo run -p codex-cli --bin codex --
+exec /workspace/purrnet/scripts/codexn --hook-debug --dev "$@"

@@ -89,9 +89,15 @@ fn parse_legacy_notify_stdout(stdout_bytes: Vec<u8>) -> Result<Vec<crate::HookAc
                     hook_name = "legacy_notify",
                     stdout_len = stdout.len(),
                     error = %err,
-                    "legacy notify stdout looked like JSON but actions parsing failed; treating as compatibility plain text"
+                    "legacy notify stdout looked like JSON but actions parsing failed"
                 );
-                Ok(Vec::new())
+                Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "legacy notify structured stdout parsing failed: {err}; stdout={}",
+                        stdout.trim()
+                    ),
+                ))
             }
             Err(_) => {
                 debug!(
@@ -949,6 +955,53 @@ mod tests {
         let outcome = hook.execute(&payload).await;
         assert!(matches!(outcome.result, HookResult::Success));
         assert!(outcome.actions.is_empty());
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn notify_hook_fails_on_malformed_structured_stdout() -> Result<()> {
+        let hook = notify_hook(vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf '%s' '{\"actions\":[{\"type\":\"visible_note\"}]'".to_string(),
+        ]);
+
+        let payload = HookPayload {
+            session_id: ThreadId::new(),
+            cwd: tempdir()?.path().to_path_buf(),
+            client: None,
+            session_source: None,
+            session_agent_role: None,
+            nero_auto_runtime: None,
+            triggered_at: chrono::Utc::now(),
+            hook_event: HookEvent::AfterAgent {
+                event: crate::HookEventAfterAgent {
+                    thread_id: ThreadId::new(),
+                    thread_name: None,
+                    turn_id: "turn-malformed-structured-stdout".to_string(),
+                    input_messages: vec!["hi".to_string()],
+                    last_assistant_message: Some("done".to_string()),
+                },
+            },
+        };
+
+        let outcome = hook.execute(&payload).await;
+        assert!(outcome.actions.is_empty());
+        match outcome.result {
+            HookResult::FailedContinue(err) => {
+                let io_err = err.downcast_ref::<std::io::Error>();
+                assert!(io_err.is_some(), "{err}");
+                let io_err = io_err.expect("downcast io::Error");
+                assert_eq!(io_err.kind(), std::io::ErrorKind::InvalidData);
+                assert!(
+                    io_err
+                        .to_string()
+                        .contains("legacy notify structured stdout parsing failed")
+                );
+            }
+            other => panic!("expected FailedContinue, got {other:?}"),
+        }
         Ok(())
     }
 

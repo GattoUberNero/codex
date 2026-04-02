@@ -1412,12 +1412,21 @@ fn hook_runtime_meta_lines(
     meta: Option<&serde_json::Value>,
     has_runtime_status_entry: bool,
 ) -> Vec<String> {
-    if !has_runtime_status_entry {
-        return Vec::new();
-    }
     let Some(meta_obj) = meta.and_then(serde_json::Value::as_object) else {
         return Vec::new();
     };
+    if !has_runtime_status_entry {
+        let has_runtime_meta = meta_obj.get("protocol").is_some()
+            || meta_obj.get("follow_up").is_some()
+            || meta_obj
+                .get("status")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|item| item.get("meta"))
+                .is_some();
+        if !has_runtime_meta {
+            return Vec::new();
+        }
+    }
 
     let protocol = meta_obj
         .get("protocol")

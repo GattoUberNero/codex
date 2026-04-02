@@ -159,6 +159,9 @@ struct BridgeApplyResponse {
     error: Option<String>,
     message: Option<String>,
     reason_code: Option<String>,
+    thread_id: Option<String>,
+    session_source: Option<String>,
+    config_path: Option<String>,
     path: Option<String>,
     #[serde(rename = "version")]
     _version: Option<String>,
@@ -294,6 +297,18 @@ where
         .map_err(|err| format!("wait runtime bridge output: {err}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !output.status.success() {
+        let detail = match (stderr.is_empty(), stdout.is_empty()) {
+            (true, true) => format!("exit status {}", output.status),
+            (false, true) => format!("exit status {}; stderr={stderr}", output.status),
+            (true, false) => format!("exit status {}; stdout={stdout}", output.status),
+            (false, false) => format!(
+                "exit status {}; stderr={stderr}; stdout={stdout}",
+                output.status
+            ),
+        };
+        return Err(format!("runtime bridge command failed: {detail}"));
+    }
     if stdout.is_empty() {
         let detail = if stderr.is_empty() {
             format!("exit status {}", output.status)
@@ -309,6 +324,52 @@ where
             format!("parse runtime bridge payload failed: {err}; stderr={stderr}; stdout={stdout}")
         }
     })
+}
+
+fn validate_bridge_apply_identity(
+    response: &BridgeApplyResponse,
+    context: &ThreadSessionAutoContext,
+    expected_config_path: &Path,
+) -> Result<(), String> {
+    if let Some(thread_id) = response
+        .thread_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        && thread_id != context.thread_id
+    {
+        return Err(format!(
+            "runtime bridge apply thread mismatch: expected={}, got={thread_id}",
+            context.thread_id
+        ));
+    }
+    if let Some(session_source) = response
+        .session_source
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let expected = session_source_wire_value(&context.session_source);
+        if session_source != expected {
+            return Err(format!(
+                "runtime bridge apply sessionSource mismatch: expected={expected}, got={session_source}"
+            ));
+        }
+    }
+    if let Some(config_path) = response
+        .config_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let expected = expected_config_path.to_string_lossy();
+        if config_path != expected {
+            return Err(format!(
+                "runtime bridge apply configPath mismatch: expected={expected}, got={config_path}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn bridge_failure_detail(response: &BridgeReadResponse) -> String {
@@ -513,6 +574,7 @@ pub(crate) async fn update_thread_session_auto(
     )
     .await?;
     if response.ok {
+        validate_bridge_apply_identity(&response, context, &current.state.config_path)?;
         let applied_version = response
             ._version
             .clone()
@@ -527,10 +589,19 @@ pub(crate) async fn update_thread_session_auto(
                 format!("runtime bridge update succeeded but confirmation read failed: {err}")
             })?;
         if confirmed.state.version != applied_version {
-            return Err(format!(
-                "runtime bridge update confirmation version mismatch: applied={applied_version}, confirmed={}",
-                confirmed.state.version
-            ));
+            return Ok(ThreadSessionAutoUpdateResponse {
+                thread_id: context.thread_id.clone(),
+                authority: ThreadSessionAutoAuthorityMode::BridgeProxy,
+                applied: false,
+                conflict: true,
+                message: Some(format!(
+                    "runtime bridge update confirmation version mismatch: applied={applied_version}, confirmed={}",
+                    confirmed.state.version
+                )),
+                error_code: Some("version_conflict".to_string()),
+                reason_code: Some("post_apply_drift".to_string()),
+                state: Some(confirmed.state),
+            });
         }
         return Ok(ThreadSessionAutoUpdateResponse {
             thread_id: context.thread_id.clone(),
