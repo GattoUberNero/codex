@@ -190,27 +190,48 @@ fn normalize_runtime_state_control_module(module: String) -> String {
     module
 }
 
-fn resolve_runtime_bridge_default_cwd() -> PathBuf {
-    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+fn resolve_runtime_bridge_default_cwd_with_inputs(
+    current_dir: &Path,
+    codexn_root: Option<&str>,
+) -> Result<PathBuf, String> {
     let mut candidates = Vec::with_capacity(3);
-    if let Some(root) = first_non_empty_env(&[CODEXN_ROOT_ENV]) {
+    if let Some(root) = codexn_root.map(str::trim).filter(|value| !value.is_empty()) {
         candidates.push(PathBuf::from(root).join("apps/codex-nero-sdk"));
     }
-    candidates.push(current_dir.clone());
+    candidates.push(current_dir.to_path_buf());
     candidates.push(current_dir.join("apps/codex-nero-sdk"));
-    candidates
-        .into_iter()
+    if let Some(candidate) = candidates
+        .iter()
         .find(|candidate| candidate.join("nero_hook_runtime").is_dir())
-        .unwrap_or(current_dir)
+    {
+        return Ok(candidate.clone());
+    }
+    let searched = candidates
+        .iter()
+        .map(|candidate| candidate.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "runtime bridge bootstrap failed: no nero_hook_runtime package found under [{searched}]; set {NERO_RUNTIME_STATE_CONTROL_CWD_ENV} or {CODEXN_ROOT_ENV}"
+    ))
 }
 
-fn resolve_runtime_bridge_settings() -> RuntimeBridgeSettings {
+fn resolve_runtime_bridge_default_cwd() -> Result<PathBuf, String> {
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    resolve_runtime_bridge_default_cwd_with_inputs(
+        &current_dir,
+        first_non_empty_env(&[CODEXN_ROOT_ENV]).as_deref(),
+    )
+}
+
+fn resolve_runtime_bridge_settings() -> Result<RuntimeBridgeSettings, String> {
     let cwd = first_non_empty_env(&[
         NERO_RUNTIME_STATE_CONTROL_CWD_ENV,
         NERO_RUNTIME_STATE_CONTROL_CWD_ENV_COMPAT,
     ])
     .map(PathBuf::from)
-    .unwrap_or_else(resolve_runtime_bridge_default_cwd);
+    .map(Ok)
+    .unwrap_or_else(resolve_runtime_bridge_default_cwd)?;
     let module = first_non_empty_env(&[
         NERO_RUNTIME_STATE_CONTROL_MODULE_ENV,
         NERO_RUNTIME_STATE_CONTROL_MODULE_ENV_COMPAT,
@@ -229,12 +250,12 @@ fn resolve_runtime_bridge_settings() -> RuntimeBridgeSettings {
     .and_then(|value| value.parse::<u64>().ok())
     .filter(|value| *value > 0)
     .unwrap_or(NERO_RUNTIME_STATE_CONTROL_DEFAULT_TIMEOUT_MS);
-    RuntimeBridgeSettings {
+    Ok(RuntimeBridgeSettings {
         cwd,
         module,
         python_bin,
         timeout: Duration::from_millis(timeout_ms),
-    }
+    })
 }
 
 fn runtime_bridge_config_path_from_env(
@@ -261,7 +282,7 @@ where
     T: Serialize,
     U: for<'de> Deserialize<'de>,
 {
-    let settings = resolve_runtime_bridge_settings();
+    let settings = resolve_runtime_bridge_settings()?;
     let bridge_input =
         serde_json::to_vec(payload).map_err(|err| format!("serialize bridge payload: {err}"))?;
     let mut command = Command::new(&settings.python_bin);
@@ -672,10 +693,12 @@ mod tests {
     use super::NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE;
     use super::NERO_RUNTIME_STATE_CONTROL_RETIRED_MODULE;
     use super::normalize_runtime_state_control_module;
+    use super::resolve_runtime_bridge_default_cwd_with_inputs;
     use super::runtime_bridge_config_path_from_env;
     use pretty_assertions::assert_eq;
     use std::ffi::OsStr;
     use std::path::Path;
+    use tempfile::tempdir;
 
     #[test]
     fn normalize_runtime_state_control_module_maps_retired_cli_module_to_current_bridge() {
@@ -714,5 +737,29 @@ mod tests {
             runtime_bridge_config_path_from_env(Path::new("/tmp/codex-home"), Some(OsStr::new(""))),
             Path::new("/tmp/codex-home/config-nero-hook-auto.toml")
         );
+    }
+
+    #[test]
+    fn resolve_runtime_bridge_default_cwd_uses_codexn_root_sdk_when_available() {
+        let root = tempdir().expect("tempdir root");
+        let sdk_dir = root.path().join("apps/codex-nero-sdk/nero_hook_runtime");
+        std::fs::create_dir_all(&sdk_dir).expect("create sdk package");
+        let cwd = tempdir().expect("tempdir cwd");
+        assert_eq!(
+            resolve_runtime_bridge_default_cwd_with_inputs(
+                cwd.path(),
+                Some(root.path().to_string_lossy().as_ref()),
+            ),
+            Ok(root.path().join("apps/codex-nero-sdk"))
+        );
+    }
+
+    #[test]
+    fn resolve_runtime_bridge_default_cwd_fails_when_no_candidate_contains_package() {
+        let cwd = tempdir().expect("tempdir cwd");
+        let err = resolve_runtime_bridge_default_cwd_with_inputs(cwd.path(), None)
+            .expect_err("expected bootstrap failure");
+        assert!(err.contains("runtime bridge bootstrap failed"));
+        assert!(err.contains("set NERO_RUNTIME_STATE_CONTROL_CWD or CODEXN_ROOT"));
     }
 }
