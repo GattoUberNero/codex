@@ -562,26 +562,52 @@ fn is_runtime_delivery_status_kind(status_kind: Option<&str>) -> bool {
 
 enum LegacyNeroHookTuiDelivery {
     Warning(String),
-    AfterAgentSummary(codex_protocol::protocol::HookOutputEntry),
+    HookSummary(codex_protocol::protocol::HookOutputEntry),
+}
+
+fn nero_hook_summary_entry_kind(
+    status_kind_normalized: Option<&str>,
+) -> codex_protocol::protocol::HookOutputEntryKind {
+    match status_kind_normalized {
+        Some("warning") => codex_protocol::protocol::HookOutputEntryKind::Warning,
+        Some("stop") => codex_protocol::protocol::HookOutputEntryKind::Stop,
+        Some("feedback") => codex_protocol::protocol::HookOutputEntryKind::Feedback,
+        Some("error") => codex_protocol::protocol::HookOutputEntryKind::Error,
+        Some("state") | Some("auto") | None | Some(_) => {
+            codex_protocol::protocol::HookOutputEntryKind::Context
+        }
+    }
+}
+
+fn nero_hook_summary_entry_text(
+    tui_body: &str,
+    status_entry: &codex_hooks::NeroHookMsgStatus,
+) -> String {
+    let kind = status_entry.kind.trim();
+    let text = status_entry.text.trim();
+
+    if !kind.is_empty() && !text.is_empty() {
+        format!("{tui_body} [{kind}: {text}]")
+    } else if !kind.is_empty() {
+        format!("{tui_body} [{kind}]")
+    } else if !text.is_empty() {
+        format!("{tui_body} [{text}]")
+    } else {
+        tui_body.to_string()
+    }
 }
 
 fn legacy_nero_hook_tui_delivery(
     tui_body: &str,
     format: NeroHookMsgFormat,
-    show_agent: bool,
     status: Option<&codex_hooks::NeroHookMsgStatus>,
     status_kind_normalized: Option<&str>,
 ) -> LegacyNeroHookTuiDelivery {
-    if !show_agent
-        && matches!(status_kind_normalized, Some("state"))
-        && let Some(status_entry) = status
-    {
-        return LegacyNeroHookTuiDelivery::AfterAgentSummary(
-            codex_protocol::protocol::HookOutputEntry {
-                kind: codex_protocol::protocol::HookOutputEntryKind::Context,
-                text: format!("{tui_body} [{}: {}]", status_entry.kind, status_entry.text),
-            },
-        );
+    if let Some(status_entry) = status {
+        return LegacyNeroHookTuiDelivery::HookSummary(codex_protocol::protocol::HookOutputEntry {
+            kind: nero_hook_summary_entry_kind(status_kind_normalized),
+            text: nero_hook_summary_entry_text(tui_body, status_entry),
+        });
     }
 
     LegacyNeroHookTuiDelivery::Warning(nero_hook_tui_warning_message(
@@ -611,7 +637,7 @@ fn runtime_delivery_contract_status(
     }
 }
 
-fn legacy_after_agent_runtime_hook_completed_event(
+fn after_agent_runtime_hook_completed_event(
     turn_id: &str,
     hook_name: &str,
     entries: Vec<codex_protocol::protocol::HookOutputEntry>,
@@ -632,7 +658,7 @@ fn legacy_after_agent_runtime_hook_completed_event(
             source_path: PathBuf::from(format!("legacy://after_agent/{hook_name}")),
             display_order: 0,
             status: codex_protocol::protocol::HookRunStatus::Completed,
-            status_message: Some("legacy after_agent runtime status".to_string()),
+            status_message: Some("after_agent runtime status".to_string()),
             started_at,
             completed_at: Some(started_at),
             duration_ms: Some(0),
@@ -668,6 +694,8 @@ fn sanitize_auto_decision_meta_for_audit(value: &Value) -> Option<Value> {
         "score_explanation",
         "assistant_stop_mode",
         "backend_error_code",
+        "campaign_id",
+        "campaign_status",
         "turn_id",
         "stop_cause",
         "stop_flag",
@@ -7971,7 +7999,6 @@ pub(crate) async fn run_turn(
                                             match legacy_nero_hook_tui_delivery(
                                                 &tui_body,
                                                 format,
-                                                show.agent,
                                                 status.as_ref(),
                                                 status_kind_normalized.as_deref(),
                                             ) {
@@ -7982,9 +8009,7 @@ pub(crate) async fn run_turn(
                                                     )
                                                     .await;
                                                 }
-                                                LegacyNeroHookTuiDelivery::AfterAgentSummary(
-                                                    entry,
-                                                ) => {
+                                                LegacyNeroHookTuiDelivery::HookSummary(entry) => {
                                                     legacy_after_agent_summary_entries.push(entry);
                                                 }
                                             }
@@ -8220,7 +8245,7 @@ pub(crate) async fn run_turn(
                                     }
                                 }
                             }
-                            if let Some(event) = legacy_after_agent_runtime_hook_completed_event(
+                            if let Some(event) = after_agent_runtime_hook_completed_event(
                                 &turn_context.sub_id,
                                 &hook_name,
                                 legacy_after_agent_summary_entries,
@@ -13829,7 +13854,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_state_nero_hook_tui_delivery_uses_after_agent_summary_instead_of_warning() {
+    fn status_nero_hook_tui_delivery_uses_hook_summary_instead_of_warning() {
         let status = codex_hooks::NeroHookMsgStatus {
             kind: "state".to_string(),
             text: "healthy".to_string(),
@@ -13839,13 +13864,12 @@ mod tests {
         let delivery = legacy_nero_hook_tui_delivery(
             "NERO HOOK SYSTEM",
             NeroHookMsgFormat::Block,
-            false,
             Some(&status),
             Some("state"),
         );
 
         match delivery {
-            LegacyNeroHookTuiDelivery::AfterAgentSummary(entry) => {
+            LegacyNeroHookTuiDelivery::HookSummary(entry) => {
                 assert_eq!(
                     entry,
                     codex_protocol::protocol::HookOutputEntry {
@@ -13855,19 +13879,50 @@ mod tests {
                 );
             }
             LegacyNeroHookTuiDelivery::Warning(message) => {
-                panic!("expected AfterAgentSummary, got warning: {message}");
+                panic!("expected HookSummary, got warning: {message}");
             }
         }
     }
 
     #[test]
-    fn legacy_after_agent_summary_entries_build_hook_completed_event() {
+    fn warning_status_nero_hook_tui_delivery_uses_warning_summary_entry() {
+        let status = codex_hooks::NeroHookMsgStatus {
+            kind: "warning".to_string(),
+            text: "campaign unresolved".to_string(),
+            meta: None,
+        };
+
+        let delivery = legacy_nero_hook_tui_delivery(
+            "NERO HOOK SYSTEM",
+            NeroHookMsgFormat::Inline,
+            Some(&status),
+            Some("warning"),
+        );
+
+        match delivery {
+            LegacyNeroHookTuiDelivery::HookSummary(entry) => {
+                assert_eq!(
+                    entry,
+                    codex_protocol::protocol::HookOutputEntry {
+                        kind: codex_protocol::protocol::HookOutputEntryKind::Warning,
+                        text: "NERO HOOK SYSTEM [warning: campaign unresolved]".to_string(),
+                    }
+                );
+            }
+            LegacyNeroHookTuiDelivery::Warning(message) => {
+                panic!("expected HookSummary, got warning: {message}");
+            }
+        }
+    }
+
+    #[test]
+    fn after_agent_summary_entries_build_hook_completed_event() {
         let entries = vec![codex_protocol::protocol::HookOutputEntry {
             kind: codex_protocol::protocol::HookOutputEntryKind::Context,
             text: "NERO HOOK SYSTEM [state: healthy]".to_string(),
         }];
 
-        let event = legacy_after_agent_runtime_hook_completed_event(
+        let event = after_agent_runtime_hook_completed_event(
             "turn-1",
             "nero-hook-runtime",
             entries.clone(),
@@ -13899,7 +13954,7 @@ mod tests {
         );
         assert_eq!(
             event.run.status_message.as_deref(),
-            Some("legacy after_agent runtime status")
+            Some("after_agent runtime status")
         );
         assert_eq!(event.run.entries, entries);
         assert_eq!(event.run.completed_at, Some(event.run.started_at));
@@ -13926,6 +13981,8 @@ mod tests {
             "auto_decision": {
                 "decision": "continue",
                 "reason_code": "continue",
+                "campaign_id": "A",
+                "campaign_status": "active",
                 "score": 9,
                 "effective_threshold": 5,
                 "score_explanation": long_explanation,
@@ -13959,6 +14016,14 @@ mod tests {
         assert_eq!(
             auto.get("decision"),
             Some(&Value::String("continue".to_string()))
+        );
+        assert_eq!(
+            auto.get("campaign_id"),
+            Some(&Value::String("A".to_string()))
+        );
+        assert_eq!(
+            auto.get("campaign_status"),
+            Some(&Value::String("active".to_string()))
         );
         assert!(auto.get("private_blob").is_none());
         assert!(sanitized.get("extra_top_level").is_none());
