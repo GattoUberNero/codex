@@ -2224,7 +2224,6 @@ async fn make_chatwidget_manual(
         last_rendered_user_message_event: None,
         last_nero_auto_hotkey_action: None,
         last_nero_auto_hotkey_at: None,
-        nero_auto_runtime_defaults: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
         nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
         is_subagent_session: false,
         nero_auto_hotkey_inflight: false,

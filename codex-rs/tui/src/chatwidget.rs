@@ -235,7 +235,6 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 use tokio::sync::mpsc::UnboundedSender;
-use toml::Value as TomlValue;
 use tracing::debug;
 use tracing::warn;
 
@@ -253,7 +252,6 @@ const PLAN_MODE_REASONING_SCOPE_PLAN_ONLY: &str = "Apply to Plan mode override";
 const PLAN_MODE_REASONING_SCOPE_ALL_MODES: &str = "Apply to global default and Plan mode override";
 const CONNECTORS_SELECTION_VIEW_ID: &str = "connectors-selection";
 const TUI_STUB_MESSAGE: &str = "Not available in TUI yet.";
-const NERO_AUTO_HOTKEY_CONFIG_ENV: &str = "CODEXN_CONFIG_NERO_AUTO_PATH";
 const NERO_AUTO_HOTKEY_DEBOUNCE: Duration = Duration::from_millis(180);
 const NERO_AUTO_TOGGLE_HOTKEY_DEBOUNCE: Duration = Duration::from_millis(450);
 
@@ -999,7 +997,6 @@ pub(crate) struct ChatWidget {
     last_rendered_user_message_event: Option<RenderedUserMessageEvent>,
     last_nero_auto_hotkey_action: Option<NeroAutoHotkeyAction>,
     last_nero_auto_hotkey_at: Option<Instant>,
-    nero_auto_runtime_defaults: NeroAutoRuntimeConfig,
     nero_auto_runtime: NeroAutoRuntimeConfig,
     is_subagent_session: bool,
     nero_auto_hotkey_inflight: bool,
@@ -1312,7 +1309,6 @@ impl ThreadItemRenderSource {
 
 fn thread_session_state_to_legacy_event(
     session: ThreadSessionState,
-    nero_auto_runtime_defaults: NeroAutoRuntimeConfig,
 ) -> codex_protocol::protocol::SessionConfiguredEvent {
     codex_protocol::protocol::SessionConfiguredEvent {
         session_id: session.thread_id,
@@ -1327,7 +1323,7 @@ fn thread_session_state_to_legacy_event(
         sandbox_policy: session.sandbox_policy,
         cwd: session.cwd,
         reasoning_effort: session.reasoning_effort,
-        nero_auto_runtime: nero_auto_runtime_defaults,
+        nero_auto_runtime: NeroAutoRuntimeConfig::default(),
         history_log_id: session.history_log_id,
         history_entry_count: usize::try_from(session.history_entry_count).unwrap_or(usize::MAX),
         initial_messages: None,
@@ -2225,10 +2221,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn handle_thread_session(&mut self, session: ThreadSessionState) {
-        self.on_session_configured(thread_session_state_to_legacy_event(
-            session,
-            self.nero_auto_runtime_defaults,
-        ));
+        self.on_session_configured(thread_session_state_to_legacy_event(session));
     }
 
     fn emit_forked_thread_event(&self, forked_from_id: ThreadId) {
@@ -4900,8 +4893,7 @@ impl ChatWidget {
         let active_cell = Some(Self::placeholder_session_header_cell(&config));
 
         let current_cwd = Some(config.cwd.to_path_buf());
-        let nero_auto_runtime_defaults = load_nero_auto_runtime_defaults(&config.codex_home);
-        let nero_auto_runtime = nero_auto_runtime_defaults;
+        let nero_auto_runtime = NeroAutoRuntimeConfig::default();
         let queued_message_edit_binding = queued_message_edit_binding_for_terminal(terminal_info());
         let mut widget = Self {
             app_event_tx: app_event_tx.clone(),
@@ -5020,7 +5012,6 @@ impl ChatWidget {
             last_rendered_user_message_event: None,
             last_nero_auto_hotkey_action: None,
             last_nero_auto_hotkey_at: None,
-            nero_auto_runtime_defaults,
             nero_auto_runtime,
             is_subagent_session: false,
             nero_auto_hotkey_inflight: false,
@@ -11339,68 +11330,6 @@ const PLACEHOLDERS: [&str; 8] = [
     "Run /review on my current changes",
     "Use /skills to list available skills",
 ];
-
-fn nero_auto_config_path(codex_home: &Path) -> PathBuf {
-    if let Some(path) = std::env::var_os(NERO_AUTO_HOTKEY_CONFIG_ENV) {
-        PathBuf::from(path)
-    } else {
-        codex_home.join("config-nero-hook-auto.toml")
-    }
-}
-
-fn load_nero_auto_runtime_defaults(codex_home: &Path) -> NeroAutoRuntimeConfig {
-    let path = nero_auto_config_path(codex_home);
-    if !path.is_file() {
-        return NeroAutoRuntimeConfig::default();
-    }
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return NeroAutoRuntimeConfig::default();
-    };
-    let Ok(doc) = toml::from_str::<TomlValue>(&content) else {
-        return NeroAutoRuntimeConfig::default();
-    };
-    read_nero_auto_runtime_config(&doc)
-}
-
-fn toml_bool(value: Option<&TomlValue>, default: bool) -> bool {
-    value.and_then(TomlValue::as_bool).unwrap_or(default)
-}
-
-fn toml_int(value: Option<&TomlValue>, default: i64) -> i64 {
-    value.and_then(TomlValue::as_integer).unwrap_or(default)
-}
-
-fn clamp_autonomy_level(value: i64) -> i64 {
-    value.clamp(1, 10)
-}
-
-fn clamp_max_auto_rounds(value: i64) -> i64 {
-    value.max(0)
-}
-
-fn read_nero_auto_runtime_config(doc: &TomlValue) -> NeroAutoRuntimeConfig {
-    let auto = doc
-        .get("nero")
-        .and_then(|v| v.get("hook"))
-        .and_then(|v| v.get("runtime"))
-        .and_then(|v| v.get("auto"));
-    let policy = auto.and_then(|v| v.get("policy"));
-
-    NeroAutoRuntimeConfig {
-        enabled: toml_bool(
-            auto.and_then(|v| v.get("enabled")),
-            NeroAutoRuntimeConfig::default().enabled,
-        ),
-        autonomy_level: clamp_autonomy_level(toml_int(
-            policy.and_then(|v| v.get("autonomy_level")),
-            NeroAutoRuntimeConfig::default().autonomy_level,
-        )),
-        max_auto_rounds: clamp_max_auto_rounds(toml_int(
-            policy.and_then(|v| v.get("max_auto_rounds")),
-            NeroAutoRuntimeConfig::default().max_auto_rounds,
-        )),
-    }
-}
 
 fn bump_wrapping(value: i64, min: i64, max: i64) -> i64 {
     if value >= max { min } else { value + 1 }

@@ -3062,6 +3062,10 @@ impl App {
 
         self.reset_for_thread_switch(tui)?;
         self.replay_thread_snapshot(snapshot, !is_replay_only);
+        if !is_replay_only {
+            self.sync_nero_auto_runtime_context_from_authority(app_server, thread_id)
+                .await;
+        }
         if is_replay_only {
             let message = if attached_replay_only {
                 format!(
@@ -3124,6 +3128,31 @@ impl App {
             session_source,
         );
         Ok(response)
+    }
+
+    async fn sync_nero_auto_runtime_context_from_authority(
+        &mut self,
+        app_server: &mut AppServerSession,
+        thread_id: ThreadId,
+    ) {
+        if self.active_thread_id != Some(thread_id) {
+            return;
+        }
+
+        if let Err(err) = self
+            .refresh_nero_auto_runtime_context_from_app_server(app_server, thread_id)
+            .await
+        {
+            if err.to_string().contains("stale hotkey event") {
+                tracing::debug!("{err}");
+                return;
+            }
+            tracing::warn!(
+                thread_id = %thread_id,
+                error = %err,
+                "failed to refresh session-auto authority context during thread activation"
+            );
+        }
     }
 
     async fn handle_nero_auto_hotkey_event(
@@ -3438,6 +3467,10 @@ impl App {
         self.replace_chat_widget(ChatWidget::new_with_app_event(init));
         self.enqueue_primary_thread_session(started.session, started.turns)
             .await?;
+        if let Some(active_thread_id) = self.active_thread_id {
+            self.sync_nero_auto_runtime_context_from_authority(app_server, active_thread_id)
+                .await;
+        }
         self.backfill_loaded_subagent_threads(app_server).await;
         Ok(())
     }
@@ -3909,6 +3942,13 @@ impl App {
         if let Some(started) = initial_started_thread {
             app.enqueue_primary_thread_session(started.session, started.turns)
                 .await?;
+            if let Some(active_thread_id) = app.active_thread_id {
+                app.sync_nero_auto_runtime_context_from_authority(
+                    &mut app_server,
+                    active_thread_id,
+                )
+                .await;
+            }
         }
 
         // On startup, if Agent mode (workspace-write) or ReadOnly is active, warn about world-writable dirs on Windows.
