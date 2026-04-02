@@ -774,11 +774,34 @@ fn sanitize_auto_decision_meta_for_audit(value: &Value) -> Option<Value> {
     Some(Value::Object(out))
 }
 
+fn sanitize_auto_stage_meta_for_audit(value: &Value) -> Option<Value> {
+    let Value::Object(obj) = value else {
+        return None;
+    };
+
+    let mut out = serde_json::Map::new();
+    if let Some(raw) = obj.get("stage").and_then(|value| value.as_str()) {
+        out.insert(
+            "stage".to_string(),
+            Value::String(truncate_audit_meta_string(raw)),
+        );
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(Value::Object(out))
+}
+
 fn sanitize_nero_hook_status_meta_for_audit(meta: Option<Value>) -> Option<Value> {
     let Value::Object(meta_obj) = meta? else {
         return None;
     };
     let mut out = serde_json::Map::new();
+    if let Some(auto_stage) = meta_obj.get("auto_stage")
+        && let Some(sanitized) = sanitize_auto_stage_meta_for_audit(auto_stage)
+    {
+        out.insert("auto_stage".to_string(), sanitized);
+    }
     if let Some(auto_decision) = meta_obj.get("auto_decision")
         && let Some(sanitized) = sanitize_auto_decision_meta_for_audit(auto_decision)
     {
@@ -8217,6 +8240,9 @@ pub(crate) async fn run_turn(
                                                 false,
                                                 json!({
                                                     "message_len": message.len(),
+                                                    "auto_stage": {
+                                                        "stage": "follow_up",
+                                                    },
                                                 }),
                                             )
                                             .await;
@@ -8238,6 +8264,9 @@ pub(crate) async fn run_turn(
                                             false,
                                             json!({
                                                 "message_len": message.len(),
+                                                "auto_stage": {
+                                                    "stage": "follow_up",
+                                                },
                                             }),
                                         )
                                         .await;
@@ -8272,6 +8301,9 @@ pub(crate) async fn run_turn(
                                             false,
                                             json!({
                                                 "message_len": message.len(),
+                                                "auto_stage": {
+                                                    "stage": "follow_up",
+                                                },
                                                 "delivery_contract": {
                                                     "runtime_msg_expected": hook_runtime_msg_expected,
                                                     "runtime_msg_delivered": hook_runtime_msg_delivered,
@@ -8318,6 +8350,9 @@ pub(crate) async fn run_turn(
                                             false,
                                             json!({
                                                 "message_len": message.len(),
+                                                "auto_stage": {
+                                                    "stage": "follow_up",
+                                                },
                                                 "delivery_contract": {
                                                     "runtime_msg_expected": hook_runtime_msg_expected,
                                                     "runtime_msg_delivered": hook_runtime_msg_delivered,
@@ -8343,6 +8378,9 @@ pub(crate) async fn run_turn(
                                 hook_runtime_msg_delivered,
                                 false,
                                 json!({
+                                    "auto_stage": {
+                                        "stage": "protocol",
+                                    },
                                     "runtime_msg_expected": hook_runtime_msg_expected,
                                     "runtime_msg_delivered": hook_runtime_msg_delivered,
                                     "contract_satisfied": hook_delivery_contract_satisfied,
@@ -13978,6 +14016,10 @@ mod tests {
     fn sanitize_nero_hook_status_meta_for_audit_keeps_allowlisted_fields() {
         let long_explanation = "x".repeat(NERO_HOOK_STATUS_META_MAX_STRING_CHARS + 32);
         let input = Some(json!({
+            "auto_stage": {
+                "stage": "decision",
+                "private": "drop-me",
+            },
             "auto_decision": {
                 "decision": "continue",
                 "reason_code": "continue",
@@ -14008,11 +14050,19 @@ mod tests {
         }));
 
         let sanitized = sanitize_nero_hook_status_meta_for_audit(input).expect("sanitized meta");
+        let auto_stage = sanitized
+            .get("auto_stage")
+            .and_then(|value| value.as_object())
+            .expect("auto_stage object");
         let auto = sanitized
             .get("auto_decision")
             .and_then(|value| value.as_object())
             .expect("auto_decision object");
 
+        assert_eq!(
+            auto_stage.get("stage"),
+            Some(&Value::String("decision".to_string()))
+        );
         assert_eq!(
             auto.get("decision"),
             Some(&Value::String("continue".to_string()))
