@@ -59,6 +59,7 @@ pub(crate) fn running_summary(handler: &ConfiguredHandler) -> HookRunSummary {
         started_at: chrono::Utc::now().timestamp(),
         completed_at: None,
         duration_ms: None,
+        meta: None,
         entries: Vec::new(),
     }
 }
@@ -104,6 +105,7 @@ pub(crate) fn completed_summary(
         started_at: run_result.started_at,
         completed_at: Some(run_result.completed_at),
         duration_ms: Some(run_result.duration_ms),
+        meta: None,
         entries,
     }
 }

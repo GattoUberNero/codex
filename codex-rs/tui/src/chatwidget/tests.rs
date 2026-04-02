@@ -13673,6 +13673,7 @@ async fn user_prompt_submit_app_server_hook_notifications_render_snapshot() {
                 started_at: 1,
                 completed_at: None,
                 duration_ms: None,
+                meta: None,
                 entries: Vec::new(),
             },
         }),
@@ -13695,6 +13696,7 @@ async fn user_prompt_submit_app_server_hook_notifications_render_snapshot() {
                 started_at: 1,
                 completed_at: Some(11),
                 duration_ms: Some(10),
+                meta: None,
                 entries: vec![
                     AppServerHookOutputEntry {
                         kind: AppServerHookOutputEntryKind::Warning,
@@ -13742,6 +13744,29 @@ async fn after_agent_app_server_hook_notifications_render_snapshot() {
                 started_at: 1,
                 completed_at: Some(1),
                 duration_ms: Some(0),
+                meta: Some(serde_json::json!({
+                    "status": {
+                        "kind_normalized": "auto",
+                        "meta": {
+                            "auto_decision": {
+                                "decision": "continue",
+                                "reason_code": "score_above_threshold",
+                                "campaign_id": "D",
+                                "campaign_status": "active",
+                            },
+                        },
+                    },
+                    "protocol": {
+                        "status": "ok",
+                        "runtime_msg_expected": true,
+                        "runtime_msg_delivered": true,
+                    },
+                    "follow_up": {
+                        "status": "queued",
+                        "queued_count": 1,
+                        "blocked_count": 0,
+                    },
+                })),
                 entries: vec![AppServerHookOutputEntry {
                     kind: AppServerHookOutputEntryKind::Context,
                     text: "NERO HOOK SYSTEM [state: healthy]".to_string(),
@@ -13783,6 +13808,7 @@ async fn after_compaction_app_server_hook_notifications_render_snapshot() {
                 started_at: 1,
                 completed_at: Some(2),
                 duration_ms: Some(1),
+                meta: None,
                 entries: vec![AppServerHookOutputEntry {
                     kind: AppServerHookOutputEntryKind::Context,
                     text: "Keep the campaign checkpoint visible after compaction.".to_string(),
@@ -13872,6 +13898,7 @@ async fn assert_hook_events_snapshot(
                 started_at: 1,
                 completed_at: None,
                 duration_ms: None,
+                meta: None,
                 entries: vec![],
             },
         }),
@@ -13894,6 +13921,7 @@ async fn assert_hook_events_snapshot(
                 started_at: 1,
                 completed_at: Some(11),
                 duration_ms: Some(10),
+                meta: None,
                 entries: vec![
                     codex_protocol::protocol::HookOutputEntry {
                         kind: codex_protocol::protocol::HookOutputEntryKind::Warning,

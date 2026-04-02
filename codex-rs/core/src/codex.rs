@@ -640,9 +640,10 @@ fn runtime_delivery_contract_status(
 fn after_agent_runtime_hook_completed_event(
     turn_id: &str,
     hook_name: &str,
+    meta: Option<Value>,
     entries: Vec<codex_protocol::protocol::HookOutputEntry>,
 ) -> Option<crate::protocol::HookCompletedEvent> {
-    if entries.is_empty() {
+    if entries.is_empty() && meta.is_none() {
         return None;
     }
 
@@ -662,6 +663,7 @@ fn after_agent_runtime_hook_completed_event(
             started_at,
             completed_at: Some(started_at),
             duration_ms: Some(0),
+            meta,
             entries,
         },
     })
@@ -811,6 +813,51 @@ fn sanitize_nero_hook_status_meta_for_audit(meta: Option<Value>) -> Option<Value
         return None;
     }
     Some(Value::Object(out))
+}
+
+fn after_agent_runtime_hook_summary_meta(
+    hook_name: &str,
+    status_kind_normalized: Option<String>,
+    status_meta: Option<Value>,
+    protocol_status: &str,
+    runtime_msg_expected: bool,
+    runtime_msg_delivered: bool,
+    contract_satisfied: bool,
+    nero_hook_msg_total: usize,
+    nero_hook_msg_throttled: usize,
+    follow_up_queued_count: usize,
+    follow_up_blocked_count: usize,
+) -> Value {
+    let follow_up_status = if follow_up_blocked_count > 0 {
+        "blocked-delivery-contract"
+    } else if follow_up_queued_count > 0 {
+        "queued"
+    } else {
+        "none"
+    };
+
+    json!({
+        "domain": "nero_runtime",
+        "hook_name": hook_name,
+        "status": {
+            "kind_normalized": status_kind_normalized,
+            "meta": status_meta,
+        },
+        "protocol": {
+            "status": protocol_status,
+            "runtime_msg_expected": runtime_msg_expected,
+            "runtime_msg_delivered": runtime_msg_delivered,
+            "contract_satisfied": contract_satisfied,
+            "nero_hook_msg_total": nero_hook_msg_total,
+            "nero_hook_msg_throttled": nero_hook_msg_throttled,
+            "auto_user_replies_blocked": follow_up_blocked_count,
+        },
+        "follow_up": {
+            "status": follow_up_status,
+            "queued_count": follow_up_queued_count,
+            "blocked_count": follow_up_blocked_count,
+        },
+    })
 }
 
 async fn append_nero_hook_delivery_audit(
@@ -7903,6 +7950,9 @@ pub(crate) async fn run_turn(
                             let mut hook_nero_msg_throttled = 0usize;
                             let mut hook_auto_user_replies_pending: Vec<String> = Vec::new();
                             let mut hook_auto_user_replies_blocked = 0usize;
+                            let mut hook_auto_user_replies_queued = 0usize;
+                            let mut latest_runtime_status_kind_normalized = None::<String>;
+                            let mut latest_runtime_status_meta = None::<Value>;
                             let mut legacy_after_agent_summary_entries =
                                 Vec::<codex_protocol::protocol::HookOutputEntry>::new();
                             for action in actions {
@@ -8011,6 +8061,9 @@ pub(crate) async fn run_turn(
                                         }
                                         if runtime_delivery_candidate {
                                             hook_runtime_msg_expected = true;
+                                            latest_runtime_status_kind_normalized =
+                                                status_kind_normalized.clone();
+                                            latest_runtime_status_meta = status_meta.clone();
                                         }
                                         let mut delivered_tui = false;
                                         let mut delivered_agent = false;
@@ -8274,14 +8327,6 @@ pub(crate) async fn run_turn(
                                     }
                                 }
                             }
-                            if let Some(event) = after_agent_runtime_hook_completed_event(
-                                &turn_context.sub_id,
-                                &hook_name,
-                                legacy_after_agent_summary_entries,
-                            ) {
-                                sess.send_event(&turn_context, EventMsg::HookCompleted(event))
-                                    .await;
-                            }
                             let hook_delivery_contract_satisfied =
                                 runtime_delivery_contract_satisfied(
                                     hook_runtime_msg_expected,
@@ -8290,6 +8335,8 @@ pub(crate) async fn run_turn(
                             if !hook_auto_user_replies_pending.is_empty() {
                                 if hook_delivery_contract_satisfied {
                                     for message in hook_auto_user_replies_pending {
+                                        hook_auto_user_replies_queued =
+                                            hook_auto_user_replies_queued.saturating_add(1);
                                         append_nero_hook_delivery_audit(
                                             &hook_delivery_log_path,
                                             &sess.conversation_id,
@@ -8390,6 +8437,28 @@ pub(crate) async fn run_turn(
                                 }),
                             )
                             .await;
+                            let runtime_summary_meta = Some(after_agent_runtime_hook_summary_meta(
+                                &hook_name,
+                                latest_runtime_status_kind_normalized,
+                                latest_runtime_status_meta,
+                                contract_status,
+                                hook_runtime_msg_expected,
+                                hook_runtime_msg_delivered,
+                                hook_delivery_contract_satisfied,
+                                hook_nero_msg_total,
+                                hook_nero_msg_throttled,
+                                hook_auto_user_replies_queued,
+                                hook_auto_user_replies_blocked,
+                            ));
+                            if let Some(event) = after_agent_runtime_hook_completed_event(
+                                &turn_context.sub_id,
+                                &hook_name,
+                                runtime_summary_meta,
+                                legacy_after_agent_summary_entries,
+                            ) {
+                                sess.send_event(&turn_context, EventMsg::HookCompleted(event))
+                                    .await;
+                            }
                         }
                         match result {
                             HookResult::Success => {}
@@ -13963,6 +14032,26 @@ mod tests {
         let event = after_agent_runtime_hook_completed_event(
             "turn-1",
             "nero-hook-runtime",
+            Some(json!({
+                "status": {
+                    "kind_normalized": "state",
+                    "meta": null,
+                },
+                "protocol": {
+                    "status": "ok",
+                    "runtime_msg_expected": true,
+                    "runtime_msg_delivered": true,
+                    "contract_satisfied": true,
+                    "nero_hook_msg_total": 1,
+                    "nero_hook_msg_throttled": 0,
+                    "auto_user_replies_blocked": 0,
+                },
+                "follow_up": {
+                    "status": "queued",
+                    "queued_count": 1,
+                    "blocked_count": 0,
+                },
+            })),
             entries.clone(),
         )
         .expect("expected hook completed event");
@@ -13995,8 +14084,61 @@ mod tests {
             Some("after_agent runtime status")
         );
         assert_eq!(event.run.entries, entries);
+        assert_eq!(
+            event.run.meta,
+            Some(json!({
+                "status": {
+                    "kind_normalized": "state",
+                    "meta": null,
+                },
+                "protocol": {
+                    "status": "ok",
+                    "runtime_msg_expected": true,
+                    "runtime_msg_delivered": true,
+                    "contract_satisfied": true,
+                    "nero_hook_msg_total": 1,
+                    "nero_hook_msg_throttled": 0,
+                    "auto_user_replies_blocked": 0,
+                },
+                "follow_up": {
+                    "status": "queued",
+                    "queued_count": 1,
+                    "blocked_count": 0,
+                },
+            }))
+        );
         assert_eq!(event.run.completed_at, Some(event.run.started_at));
         assert_eq!(event.run.duration_ms, Some(0));
+    }
+
+    #[test]
+    fn after_agent_runtime_meta_only_still_builds_hook_completed_event() {
+        let event = after_agent_runtime_hook_completed_event(
+            "turn-2",
+            "nero-hook-runtime",
+            Some(json!({
+                "protocol": {
+                    "status": "ok",
+                    "runtime_msg_expected": true,
+                    "runtime_msg_delivered": true,
+                    "contract_satisfied": true,
+                    "nero_hook_msg_total": 1,
+                    "nero_hook_msg_throttled": 0,
+                    "auto_user_replies_blocked": 0,
+                },
+                "follow_up": {
+                    "status": "queued",
+                    "queued_count": 1,
+                    "blocked_count": 0,
+                },
+            })),
+            Vec::new(),
+        )
+        .expect("expected meta-only hook completed event");
+
+        assert_eq!(event.turn_id.as_deref(), Some("turn-2"));
+        assert!(event.run.entries.is_empty());
+        assert!(event.run.meta.is_some());
     }
 
     #[test]

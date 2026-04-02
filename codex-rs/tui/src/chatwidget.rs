@@ -1371,6 +1371,7 @@ fn hook_run_summary_from_notification(
         started_at: run.started_at,
         completed_at: run.completed_at,
         duration_ms: run.duration_ms,
+        meta: run.meta,
         entries: run
             .entries
             .into_iter()
@@ -1395,6 +1396,120 @@ fn hook_completed_event_from_notification(
         turn_id: notification.turn_id,
         run: hook_run_summary_from_notification(notification.run),
     }
+}
+
+fn hook_runtime_status_prefix(meta: Option<&serde_json::Value>) -> &'static str {
+    let kind_normalized = meta
+        .and_then(serde_json::Value::as_object)
+        .and_then(|item| item.get("status"))
+        .and_then(serde_json::Value::as_object)
+        .and_then(|item| item.get("kind_normalized"))
+        .and_then(serde_json::Value::as_str);
+    if kind_normalized == Some("auto") {
+        "hook-auto instruction: "
+    } else {
+        "runtime status: "
+    }
+}
+
+fn hook_runtime_meta_lines(
+    meta: Option<&serde_json::Value>,
+    has_runtime_status_entry: bool,
+) -> Vec<String> {
+    if !has_runtime_status_entry {
+        return Vec::new();
+    }
+    let Some(meta_obj) = meta.and_then(serde_json::Value::as_object) else {
+        return Vec::new();
+    };
+
+    let protocol = meta_obj
+        .get("protocol")
+        .and_then(serde_json::Value::as_object);
+    let follow_up = meta_obj
+        .get("follow_up")
+        .and_then(serde_json::Value::as_object);
+    let status_meta = meta_obj
+        .get("status")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|item| item.get("meta"))
+        .and_then(serde_json::Value::as_object);
+    let auto_decision = status_meta
+        .and_then(|item| item.get("auto_decision"))
+        .and_then(serde_json::Value::as_object);
+
+    let mut lines = Vec::new();
+
+    if let Some(protocol) = protocol
+        && let Some(status) = protocol.get("status").and_then(serde_json::Value::as_str)
+    {
+        let runtime_msg_expected = protocol
+            .get("runtime_msg_expected")
+            .and_then(serde_json::Value::as_bool);
+        let runtime_msg_delivered = protocol
+            .get("runtime_msg_delivered")
+            .and_then(serde_json::Value::as_bool);
+        lines.push(format!(
+            "  hook-auto protocol: {status} (expected={}, delivered={})",
+            runtime_msg_expected.unwrap_or(false),
+            runtime_msg_delivered.unwrap_or(false),
+        ));
+    }
+
+    if let Some(follow_up) = follow_up
+        && let Some(status) = follow_up.get("status").and_then(serde_json::Value::as_str)
+        && status != "none"
+    {
+        let queued_count = follow_up
+            .get("queued_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let blocked_count = follow_up
+            .get("blocked_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        lines.push(format!(
+            "  hook-auto follow-up: {status} (queued={queued_count}, blocked={blocked_count})"
+        ));
+    }
+
+    if let Some(auto_decision) = auto_decision {
+        let decision = auto_decision
+            .get("decision")
+            .and_then(serde_json::Value::as_str);
+        let reason_code = auto_decision
+            .get("reason_code")
+            .and_then(serde_json::Value::as_str);
+        let campaign_id = auto_decision
+            .get("campaign_id")
+            .and_then(serde_json::Value::as_str);
+        let campaign_status = auto_decision
+            .get("campaign_status")
+            .and_then(serde_json::Value::as_str);
+        let mut detail_parts = Vec::new();
+        if let Some(reason_code) = reason_code {
+            detail_parts.push(format!("reason={reason_code}"));
+        }
+        if let Some(campaign_id) = campaign_id {
+            if let Some(campaign_status) = campaign_status {
+                detail_parts.push(format!("campaign={campaign_id} ({campaign_status})"));
+            } else {
+                detail_parts.push(format!("campaign={campaign_id}"));
+            }
+        }
+        if let Some(decision) = decision {
+            if detail_parts.is_empty() {
+                lines.push(format!("  hook-auto decision: {decision}"));
+            } else {
+                lines.push(format!(
+                    "  hook-auto decision: {decision} ({})",
+                    detail_parts.join(", "),
+                ));
+            }
+        }
+    }
+
+    lines
 }
 
 fn app_server_request_id_to_mcp_request_id(
@@ -1998,7 +2113,7 @@ impl ChatWidget {
     // --- Small event handlers ---
     fn on_session_configured(&mut self, event: codex_protocol::protocol::SessionConfiguredEvent) {
         let session_source = event.session_source.clone();
-        let nero_auto_runtime = event.nero_auto_runtime.clone();
+        let nero_auto_runtime = event.nero_auto_runtime;
         self.bottom_pane
             .set_history_metadata(event.history_log_id, event.history_entry_count);
         self.set_skills(/*skills*/ None);
@@ -4107,15 +4222,30 @@ impl ChatWidget {
     }
 
     fn on_hook_completed(&mut self, event: codex_protocol::protocol::HookCompletedEvent) {
+        let codex_protocol::protocol::HookRunSummary {
+            event_name,
+            status,
+            meta,
+            entries,
+            ..
+        } = event.run;
         let is_runtime_status_event = matches!(
-            event.run.event_name,
+            event_name,
             codex_protocol::protocol::HookEventName::AfterAgent
                 | codex_protocol::protocol::HookEventName::AfterCompaction
         );
-        let status = format!("{:?}", event.run.status).to_lowercase();
-        let header = format!("{} hook ({status})", hook_event_label(event.run.event_name));
+        let status = format!("{status:?}").to_lowercase();
+        let header = format!("{} hook ({status})", hook_event_label(event_name));
         let mut lines: Vec<ratatui::text::Line<'static>> = vec![header.into()];
-        for entry in event.run.entries {
+        let runtime_status_prefix = hook_runtime_status_prefix(meta.as_ref());
+        let has_runtime_status_entry = is_runtime_status_event
+            && entries.iter().any(|entry| {
+                matches!(
+                    entry.kind,
+                    codex_protocol::protocol::HookOutputEntryKind::Context
+                )
+            });
+        for entry in entries {
             let prefix = match entry.kind {
                 codex_protocol::protocol::HookOutputEntryKind::Warning => "warning: ",
                 codex_protocol::protocol::HookOutputEntryKind::Stop => "stop: ",
@@ -4123,12 +4253,15 @@ impl ChatWidget {
                 codex_protocol::protocol::HookOutputEntryKind::Context
                     if is_runtime_status_event =>
                 {
-                    "runtime status: "
+                    runtime_status_prefix
                 }
                 codex_protocol::protocol::HookOutputEntryKind::Context => "hook context: ",
                 codex_protocol::protocol::HookOutputEntryKind::Error => "error: ",
             };
             lines.push(format!("  {prefix}{}", entry.text).into());
+        }
+        for runtime_meta_line in hook_runtime_meta_lines(meta.as_ref(), has_runtime_status_entry) {
+            lines.push(runtime_meta_line.into());
         }
         self.add_to_history(PlainHistoryCell::new(lines));
         self.request_redraw();

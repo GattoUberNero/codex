@@ -1501,6 +1501,7 @@ pub struct HookRunSummary {
     pub completed_at: Option<i64>,
     #[ts(type = "number | null")]
     pub duration_ms: Option<i64>,
+    pub meta: Option<Value>,
     pub entries: Vec<HookOutputEntry>,
 }
 
@@ -4678,6 +4679,12 @@ mod tests {
                 },
                 "cwd": "/home/user/project",
                 "reasoning_effort": "medium",
+                "session_source": "vscode",
+                "nero_auto_runtime": {
+                    "enabled": false,
+                    "autonomy_level": 5,
+                    "max_auto_rounds": 7,
+                },
                 "history_log_id": 0,
                 "history_entry_count": 0,
                 "rollout_path": format!("{}", rollout_file.path().display()),

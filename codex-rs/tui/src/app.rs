@@ -9338,6 +9338,7 @@ guardian_approval = true
                 started_at: 1,
                 completed_at: None,
                 duration_ms: None,
+                meta: None,
                 entries: Vec::new(),
             },
         })
@@ -9360,6 +9361,7 @@ guardian_approval = true
                 started_at: 1,
                 completed_at: Some(11),
                 duration_ms: Some(10),
+                meta: None,
                 entries: vec![
                     AppServerHookOutputEntry {
                         kind: AppServerHookOutputEntryKind::Warning,

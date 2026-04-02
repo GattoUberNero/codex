@@ -440,6 +440,7 @@ pub struct HookRunSummary {
     pub started_at: i64,
     pub completed_at: Option<i64>,
     pub duration_ms: Option<i64>,
+    pub meta: Option<JsonValue>,
     pub entries: Vec<HookOutputEntry>,
 }
 
@@ -458,6 +459,7 @@ impl From<CoreHookRunSummary> for HookRunSummary {
             started_at: value.started_at,
             completed_at: value.completed_at,
             duration_ms: value.duration_ms,
+            meta: value.meta,
             entries: value.entries.into_iter().map(Into::into).collect(),
         }
     }

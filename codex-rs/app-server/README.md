@@ -951,6 +951,10 @@ The app-server streams JSON-RPC notifications while a turn is running. Each turn
 
 Today both notifications carry an empty `items` array even when item events were streamed; rely on `item/*` notifications for the canonical item list until this is fixed.
 
+#### Hook run summaries
+
+Hook lifecycle notifications include a `run` object with the canonical hook execution summary. When the backend has structured operator-facing hook telemetry, it may attach it to `run.meta` instead of forcing clients to infer lifecycle from human-readable entry text. For example, Codex Nero uses `run.meta` on native hook summaries to surface structured `status`, `protocol`, and `follow_up` runtime state alongside the normal `entries` text.
+
 #### Items
 
 `ThreadItem` is the tagged union carried in turn responses and `item/*` notifications. Currently we support events for the following items:

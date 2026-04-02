@@ -8385,6 +8385,7 @@
           "id": {
             "type": "string"
           },
+          "meta": true,
           "scope": {
             "$ref": "#/definitions/v2/HookScope"
           },

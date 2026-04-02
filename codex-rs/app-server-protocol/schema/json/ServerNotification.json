@@ -1318,6 +1318,7 @@
         "id": {
           "type": "string"
         },
+        "meta": true,
         "scope": {
           "$ref": "#/definitions/HookScope"
         },

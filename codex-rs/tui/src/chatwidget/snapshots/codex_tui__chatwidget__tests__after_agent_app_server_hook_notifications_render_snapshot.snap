@@ -1,7 +1,10 @@
 ---
 source: tui/src/chatwidget/tests.rs
-assertion_line: 13759
+assertion_line: 13785
 expression: combined
 ---
 AfterAgent hook (completed)
-  runtime status: NERO HOOK SYSTEM [state: healthy]
+  hook-auto instruction: NERO HOOK SYSTEM [state: healthy]
+  hook-auto protocol: ok (expected=true, delivered=true)
+  hook-auto follow-up: queued (queued=1, blocked=0)
+  hook-auto decision: continue (reason=score_above_threshold, campaign=D (active))
