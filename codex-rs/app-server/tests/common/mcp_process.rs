@@ -136,10 +136,24 @@ impl McpProcess {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         cmd.current_dir(codex_home);
-        cmd.env("CODEX_HOME", codex_home);
         cmd.env("RUST_LOG", "info");
         cmd.env_remove(CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR);
         cmd.args(args);
+
+        // Integration tests must not inherit fork/runtime overlays from the parent
+        // process. These overlays can inject extra hooks, notifications, and
+        // developer-instruction payloads that make assertions nondeterministic.
+        for (key, _) in std::env::vars_os() {
+            let key_text = key.to_string_lossy();
+            if ((key_text.starts_with("CODEX_") || key_text.starts_with("CODEXN_"))
+                && key_text != "CODEX_HOME")
+                || key_text.starts_with("NERO_RUNTIME_")
+                || key_text.starts_with("NEROBAR_NERO_RUNTIME_")
+            {
+                cmd.env_remove(&key);
+            }
+        }
+        cmd.env("CODEX_HOME", codex_home);
 
         for (k, v) in env_overrides {
             match v {

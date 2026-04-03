@@ -9428,15 +9428,21 @@ async fn run_sampling_request(
                 sess.set_total_tokens_full(&turn_context).await;
                 return Err(CodexErr::ContextWindowExceeded);
             }
-            Err(CodexErr::UsageLimitReached(e)) => {
-                let rate_limits = e.rate_limits.clone();
-                if let Some(rate_limits) = rate_limits {
-                    sess.update_rate_limits(&turn_context, *rate_limits).await;
-                }
-                return Err(CodexErr::UsageLimitReached(e));
-            }
             Err(err) => err,
         };
+
+        if let CodexErr::UsageLimitReached(e) = &err
+            && let Some(rate_limits) = e.rate_limits.clone()
+        {
+            sess.update_rate_limits(&turn_context, *rate_limits).await;
+        }
+
+        if client_session
+            .try_recover_stream_usage_limit_or_quota(&err)
+            .await?
+        {
+            continue;
+        }
 
         if !err.is_retryable() {
             return Err(err);

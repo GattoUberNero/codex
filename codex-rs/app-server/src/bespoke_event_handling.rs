@@ -278,21 +278,32 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .await;
             if let ApiVersion::V2 = api_version {
                 let turn = {
-                    let state = thread_state.lock().await;
-                    state.active_turn_snapshot().unwrap_or_else(|| Turn {
-                        id: payload.turn_id.clone(),
-                        items: Vec::new(),
-                        error: None,
-                        status: TurnStatus::InProgress,
-                    })
+                    let mut state = thread_state.lock().await;
+                    if state
+                        .last_notified_turn_started_id
+                        .as_ref()
+                        .is_some_and(|turn_id| turn_id == &payload.turn_id)
+                    {
+                        None
+                    } else {
+                        state.last_notified_turn_started_id = Some(payload.turn_id.clone());
+                        Some(state.active_turn_snapshot().unwrap_or_else(|| Turn {
+                            id: payload.turn_id.clone(),
+                            items: Vec::new(),
+                            error: None,
+                            status: TurnStatus::InProgress,
+                        }))
+                    }
                 };
-                let notification = TurnStartedNotification {
-                    thread_id: conversation_id.to_string(),
-                    turn,
-                };
-                outgoing
-                    .send_server_notification(ServerNotification::TurnStarted(notification))
-                    .await;
+                if let Some(turn) = turn {
+                    let notification = TurnStartedNotification {
+                        thread_id: conversation_id.to_string(),
+                        turn,
+                    };
+                    outgoing
+                        .send_server_notification(ServerNotification::TurnStarted(notification))
+                        .await;
+                }
             }
         }
         EventMsg::TurnComplete(_ev) => {

@@ -911,6 +911,22 @@ impl ThreadHistoryBuilder {
     }
 
     fn handle_turn_started(&mut self, payload: &TurnStartedEvent) {
+        if let Some(current_turn) = self.current_turn.as_mut()
+            && current_turn.id == payload.turn_id
+        {
+            current_turn.status = TurnStatus::InProgress;
+            current_turn.opened_explicitly = true;
+            return;
+        }
+
+        if self.turns.iter().any(|turn| turn.id == payload.turn_id) {
+            warn!(
+                turn_id = %payload.turn_id,
+                "ignoring duplicate turn_started for existing turn id"
+            );
+            return;
+        }
+
         self.finish_current_turn();
         self.current_turn = Some(
             self.new_turn(Some(payload.turn_id.clone()))
@@ -2801,6 +2817,43 @@ mod tests {
                 ],
             }
         );
+    }
+
+    #[test]
+    fn duplicate_turn_started_after_completion_is_ignored() {
+        let items = vec![
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-a".into(),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                message: "hello".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            })),
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "done".into(),
+                phase: None,
+                memory_citation: None,
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "turn-a".into(),
+                last_agent_message: None,
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-a".into(),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+        ];
+
+        let turns = build_turns_from_rollout_items(&items);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].id, "turn-a");
+        assert_eq!(turns[0].status, TurnStatus::Completed);
+        assert_eq!(turns[0].items.len(), 2);
     }
 
     #[test]
