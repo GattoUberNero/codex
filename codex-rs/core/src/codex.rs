@@ -1423,6 +1423,7 @@ pub(crate) struct Session {
     hook_seen_terminal_turn_ids: Mutex<HashSet<String>>,
     hook_auto_reply_internal_submission_ids: StdMutex<HashSet<String>>,
     hook_nero_msg_throttle: StdMutex<HashMap<String, StdInstant>>,
+    nero_auto_bridge_warning_emitted: StdMutex<bool>,
     hook_auto_reply_guard_state: StdMutex<HookAutoReplyGuardState>,
     next_internal_sub_id: AtomicU64,
 }
@@ -2693,6 +2694,7 @@ impl Session {
             hook_seen_terminal_turn_ids: Mutex::new(HashSet::new()),
             hook_auto_reply_internal_submission_ids: StdMutex::new(HashSet::new()),
             hook_nero_msg_throttle: StdMutex::new(HashMap::new()),
+            nero_auto_bridge_warning_emitted: StdMutex::new(false),
             hook_auto_reply_guard_state: StdMutex::new(HookAutoReplyGuardState::default()),
             next_internal_sub_id: AtomicU64::new(0),
         });
@@ -2921,6 +2923,31 @@ impl Session {
         let cleared = guard.len();
         guard.clear();
         debug!(cleared, "reset nero_hook_msg throttle cache");
+    }
+
+    async fn maybe_emit_nero_auto_bridge_warning(&self, turn_context: &TurnContext, detail: &str) {
+        let should_emit = {
+            let mut guard = match self.nero_auto_bridge_warning_emitted.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if *guard {
+                false
+            } else {
+                *guard = true;
+                true
+            }
+        };
+        if !should_emit {
+            return;
+        }
+        let message = nero_hook_tui_warning_message(
+            &format!("NERO auto booster bridge unavailable for this session: {detail}"),
+            NeroHookMsgFormat::Block,
+            Some(("warning", "bridge-read")),
+        );
+        self.send_event(turn_context, EventMsg::Warning(WarningEvent { message }))
+            .await;
     }
 
     fn nero_hook_msg_throttle_remaining(
@@ -6495,6 +6522,8 @@ In your final assistant response include the auto protocol JSON block required b
             Ok(response) => response,
             Err(err) => {
                 warn!("failed to read runtime bridge state for auto-turn booster: {err}");
+                sess.maybe_emit_nero_auto_bridge_warning(turn_context, &err)
+                    .await;
                 return None;
             }
         };
@@ -6505,11 +6534,22 @@ In your final assistant response include the auto protocol JSON block required b
                 .or(response.error)
                 .unwrap_or_else(|| "runtime bridge read failed".to_string());
             warn!("runtime bridge read reported failure for auto-turn booster: {detail}");
+            sess.maybe_emit_nero_auto_bridge_warning(turn_context, &detail)
+                .await;
             return None;
         }
         if let Err(err) = validate_nero_auto_bridge_read_identity(&response, &request) {
             warn!("{err}");
+            sess.maybe_emit_nero_auto_bridge_warning(turn_context, &err)
+                .await;
             return None;
+        }
+        {
+            let mut guard = match sess.nero_auto_bridge_warning_emitted.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            *guard = false;
         }
         if !should_inject_nero_auto_turn_booster(&response) {
             return None;
@@ -12598,6 +12638,7 @@ mod tests {
             hook_seen_terminal_turn_ids: Mutex::new(HashSet::new()),
             hook_auto_reply_internal_submission_ids: StdMutex::new(HashSet::new()),
             hook_nero_msg_throttle: StdMutex::new(HashMap::new()),
+            nero_auto_bridge_warning_emitted: StdMutex::new(false),
             hook_auto_reply_guard_state: StdMutex::new(HookAutoReplyGuardState::default()),
             out_of_band_elicitation_paused,
             next_internal_sub_id: AtomicU64::new(0),
@@ -13056,6 +13097,7 @@ mod tests {
             hook_seen_terminal_turn_ids: Mutex::new(HashSet::new()),
             hook_auto_reply_internal_submission_ids: StdMutex::new(HashSet::new()),
             hook_nero_msg_throttle: StdMutex::new(HashMap::new()),
+            nero_auto_bridge_warning_emitted: StdMutex::new(false),
             hook_auto_reply_guard_state: StdMutex::new(HookAutoReplyGuardState::default()),
             out_of_band_elicitation_paused,
             next_internal_sub_id: AtomicU64::new(0),
@@ -14283,6 +14325,44 @@ mod tests {
             remaining.is_none(),
             "emit after reset should not be throttled (compaction reset semantics)"
         );
+    }
+
+    #[tokio::test]
+    async fn nero_auto_bridge_warning_emits_once_until_reset() {
+        let (sess, tc, rx) = make_session_and_context_with_rx().await;
+
+        sess.maybe_emit_nero_auto_bridge_warning(&tc, "bridge read failed")
+            .await;
+        let first = rx.recv().await.expect("first warning event");
+        let first_message = match first.msg {
+            EventMsg::Warning(WarningEvent { message }) => message,
+            other => panic!("expected warning event, got {other:?}"),
+        };
+        assert!(first_message.contains("bridge read failed"));
+
+        sess.maybe_emit_nero_auto_bridge_warning(&tc, "should be suppressed")
+            .await;
+        assert!(
+            matches!(rx.try_recv(), Err(async_channel::TryRecvError::Empty)),
+            "second warning should be suppressed until reset"
+        );
+
+        {
+            let mut guard = match sess.nero_auto_bridge_warning_emitted.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            *guard = false;
+        }
+
+        sess.maybe_emit_nero_auto_bridge_warning(&tc, "after reset")
+            .await;
+        let second = rx.recv().await.expect("warning event after reset");
+        let second_message = match second.msg {
+            EventMsg::Warning(WarningEvent { message }) => message,
+            other => panic!("expected warning event after reset, got {other:?}"),
+        };
+        assert!(second_message.contains("after reset"));
     }
 
     #[test]
