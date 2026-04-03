@@ -452,7 +452,7 @@ fn session_source_wire_value(session_source: &SessionSource) -> &str {
         SessionSource::Cli => "cli",
         SessionSource::VsCode => "vscode",
         SessionSource::Exec => "exec",
-        SessionSource::AppServer => "appServer",
+        SessionSource::AppServer => "mcp",
         SessionSource::Custom(source) => source.as_str(),
         SessionSource::SubAgent(_) => "subAgent",
         SessionSource::Unknown => "unknown",

@@ -627,7 +627,7 @@ async fn thread_session_auto_update_uses_loaded_thread_context_and_bridge_ack_ve
         SessionSource::Cli => "cli",
         SessionSource::VsCode => "vscode",
         SessionSource::Exec => "exec",
-        SessionSource::AppServer => "appServer",
+        SessionSource::AppServer => "mcp",
         SessionSource::Custom(_) => unreachable!("custom session source is not expected here"),
         SessionSource::SubAgent(_) => unreachable!("subagent session source is not expected here"),
         SessionSource::Unknown => "unknown",
