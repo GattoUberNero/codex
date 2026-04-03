@@ -69,6 +69,7 @@ use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::SkillSummary;
 use codex_app_server_protocol::ThreadClosedNotification;
 use codex_app_server_protocol::ThreadItem as AppServerThreadItem;
+use codex_app_server_protocol::ThreadWarningNotification as AppServerThreadWarningNotification;
 use codex_app_server_protocol::Turn as AppServerTurn;
 use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnError as AppServerTurnError;
@@ -13207,6 +13208,31 @@ async fn warning_event_parses_nero_hook_structured_block() {
     assert!(
         !rendered.contains("[nero-hook]"),
         "structured warning marker should not be rendered verbatim: {rendered}"
+    );
+}
+
+#[tokio::test]
+async fn app_server_thread_warning_parses_nero_hook_structured_block() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.handle_server_notification(
+        ServerNotification::ThreadWarning(AppServerThreadWarningNotification {
+            thread_id: ThreadId::new().to_string(),
+            turn_id: "turn-1".to_string(),
+            message: "[nero-hook]\n------------\ncontent = NERO HOOK SYSTEM\n  status: msg=on(sync)\n------------\nstatus = info: Smoke: structured block hook note [info: static status demo (format probe)]".to_string(),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(cells.len(), 1, "expected one warning history cell");
+    let rendered = lines_to_single_string(&cells[0]);
+    assert!(
+        rendered.contains("NERO HOOK SYSTEM"),
+        "NERO warning cell missing structured header: {rendered}"
+    );
+    assert!(
+        rendered.contains("status: msg=on(sync)"),
+        "NERO warning cell missing block status line: {rendered}"
     );
 }
 

@@ -89,6 +89,7 @@ use codex_app_server_protocol::ThreadRealtimeTranscriptUpdatedNotification;
 use codex_app_server_protocol::ThreadRollbackResponse;
 use codex_app_server_protocol::ThreadTokenUsage;
 use codex_app_server_protocol::ThreadTokenUsageUpdatedNotification;
+use codex_app_server_protocol::ThreadWarningNotification;
 use codex_app_server_protocol::ToolRequestUserInputOption;
 use codex_app_server_protocol::ToolRequestUserInputParams;
 use codex_app_server_protocol::ToolRequestUserInputQuestion;
@@ -340,7 +341,18 @@ pub(crate) async fn apply_bespoke_event_handling(
                     .await;
             }
         }
-        EventMsg::Warning(_warning_event) => {}
+        EventMsg::Warning(warning_event) => {
+            if let ApiVersion::V2 = api_version {
+                let notification = ThreadWarningNotification {
+                    thread_id: conversation_id.to_string(),
+                    turn_id: event_turn_id.clone(),
+                    message: warning_event.message,
+                };
+                outgoing
+                    .send_server_notification(ServerNotification::ThreadWarning(notification))
+                    .await;
+            }
+        }
         EventMsg::GuardianAssessment(assessment) => {
             if let ApiVersion::V2 = api_version {
                 let notification = guardian_auto_approval_review_notification(

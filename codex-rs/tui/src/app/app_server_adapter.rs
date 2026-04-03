@@ -105,6 +105,8 @@ use codex_protocol::protocol::TurnCompleteEvent;
 #[cfg(test)]
 use codex_protocol::protocol::TurnStartedEvent;
 #[cfg(test)]
+use codex_protocol::protocol::WarningEvent;
+#[cfg(test)]
 use std::time::Duration;
 
 impl App {
@@ -329,6 +331,7 @@ fn server_notification_thread_target(
         ServerNotification::ThreadNameUpdated(notification) => {
             Some(notification.thread_id.as_str())
         }
+        ServerNotification::ThreadWarning(notification) => Some(notification.thread_id.as_str()),
         ServerNotification::ThreadTokenUsageUpdated(notification) => {
             Some(notification.thread_id.as_str())
         }
@@ -482,6 +485,15 @@ fn server_notification_thread_events(
                         .error
                         .codex_error_info
                         .and_then(app_server_codex_error_info_to_core),
+                }),
+            }],
+        )),
+        ServerNotification::ThreadWarning(notification) => Some((
+            ThreadId::from_string(&notification.thread_id).ok()?,
+            vec![Event {
+                id: String::new(),
+                msg: EventMsg::Warning(WarningEvent {
+                    message: notification.message,
                 }),
             }],
         )),

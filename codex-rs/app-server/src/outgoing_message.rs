@@ -661,6 +661,7 @@ mod tests {
     use codex_app_server_protocol::ModelReroutedNotification;
     use codex_app_server_protocol::RateLimitSnapshot;
     use codex_app_server_protocol::RateLimitWindow;
+    use codex_app_server_protocol::ThreadWarningNotification;
     use codex_app_server_protocol::ToolRequestUserInputParams;
     use codex_protocol::ThreadId;
     use pretty_assertions::assert_eq;
@@ -830,6 +831,30 @@ mod tests {
                     "fromModel": "gpt-5.3-codex",
                     "toModel": "gpt-5.2",
                     "reason": "highRiskCyberActivity",
+                },
+            }),
+            serde_json::to_value(jsonrpc_notification)
+                .expect("ensure the notification serializes correctly"),
+            "ensure the notification serializes correctly"
+        );
+    }
+
+    #[test]
+    fn verify_thread_warning_notification_serialization() {
+        let notification = ServerNotification::ThreadWarning(ThreadWarningNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            message: "NERO HOOK SYSTEM".to_string(),
+        });
+
+        let jsonrpc_notification = OutgoingMessage::AppServerNotification(notification);
+        assert_eq!(
+            json!({
+                "method": "thread/warning",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "message": "NERO HOOK SYSTEM",
                 },
             }),
             serde_json::to_value(jsonrpc_notification)

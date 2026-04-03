@@ -264,7 +264,7 @@ fn resolve_runtime_bridge_settings() -> Result<RuntimeBridgeSettings, String> {
         Some(path) => path,
         None => {
             if module_overridden {
-                current_dir.clone()
+                current_dir
             } else {
                 resolve_runtime_bridge_default_cwd()?
             }

@@ -6754,6 +6754,9 @@ impl ChatWidget {
                     .map(|details| format!("{}: {details}", notification.summary))
                     .unwrap_or(notification.summary),
             ),
+            ServerNotification::ThreadWarning(notification) => {
+                self.on_warning(notification.message)
+            }
             ServerNotification::McpServerStatusUpdated(notification) => {
                 self.on_mcp_server_status_updated(notification)
             }
