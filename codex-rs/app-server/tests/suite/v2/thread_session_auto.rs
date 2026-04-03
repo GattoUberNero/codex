@@ -28,6 +28,7 @@ use tokio::time::timeout;
 const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
 const INTERNAL_ERROR_CODE: i64 = -32603;
+const INVALID_REQUEST_CODE: i64 = -32600;
 
 #[tokio::test]
 async fn thread_session_auto_read_and_update_proxy_through_bridge() -> Result<()> {
@@ -1112,7 +1113,7 @@ async fn thread_session_auto_update_rejects_bridge_reported_subagent_state() -> 
         mcp.read_stream_until_error_message(RequestId::Integer(update_id)),
     )
     .await??;
-    assert_eq!(error.error.code, INTERNAL_ERROR_CODE);
+    assert_eq!(error.error.code, INVALID_REQUEST_CODE);
     assert!(
         error
             .error

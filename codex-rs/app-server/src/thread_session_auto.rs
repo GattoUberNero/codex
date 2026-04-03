@@ -190,16 +190,44 @@ fn normalize_runtime_state_control_module(module: String) -> String {
     module
 }
 
+fn resolve_runtime_bridge_module(raw_module: Option<String>) -> (String, bool) {
+    match raw_module {
+        Some(module) => (normalize_runtime_state_control_module(module), true),
+        None => (NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE.to_string(), false),
+    }
+}
+
+fn resolve_runtime_bridge_module_from_env() -> (String, bool) {
+    let raw_module = first_non_empty_env(&[
+        NERO_RUNTIME_STATE_CONTROL_MODULE_ENV,
+        NERO_RUNTIME_STATE_CONTROL_MODULE_ENV_COMPAT,
+    ]);
+    resolve_runtime_bridge_module(raw_module)
+}
+
 fn resolve_runtime_bridge_default_cwd_with_inputs(
     current_dir: &Path,
     codexn_root: Option<&str>,
 ) -> Result<PathBuf, String> {
-    let mut candidates = Vec::with_capacity(3);
+    let mut candidates = Vec::with_capacity(8);
+    let mut push_unique = |candidate: PathBuf| {
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    };
     if let Some(root) = codexn_root.map(str::trim).filter(|value| !value.is_empty()) {
-        candidates.push(PathBuf::from(root).join("apps/codex-nero-sdk"));
+        let root_path = PathBuf::from(root);
+        push_unique(root_path.join("apps/codex-nero-sdk"));
+        if let Some(parent) = root_path.parent() {
+            push_unique(parent.join("codex-nero-sdk"));
+        }
     }
-    candidates.push(current_dir.to_path_buf());
-    candidates.push(current_dir.join("apps/codex-nero-sdk"));
+    push_unique(current_dir.to_path_buf());
+    push_unique(current_dir.join("apps/codex-nero-sdk"));
+    if let Some(parent) = current_dir.parent() {
+        push_unique(parent.join("apps/codex-nero-sdk"));
+        push_unique(parent.join("codex-nero-sdk"));
+    }
     if let Some(candidate) = candidates
         .iter()
         .find(|candidate| candidate.join("nero_hook_runtime").is_dir())
@@ -225,19 +253,23 @@ fn resolve_runtime_bridge_default_cwd() -> Result<PathBuf, String> {
 }
 
 fn resolve_runtime_bridge_settings() -> Result<RuntimeBridgeSettings, String> {
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let (module, module_overridden) = resolve_runtime_bridge_module_from_env();
     let cwd = first_non_empty_env(&[
         NERO_RUNTIME_STATE_CONTROL_CWD_ENV,
         NERO_RUNTIME_STATE_CONTROL_CWD_ENV_COMPAT,
     ])
-    .map(PathBuf::from)
-    .map(Ok)
-    .unwrap_or_else(resolve_runtime_bridge_default_cwd)?;
-    let module = first_non_empty_env(&[
-        NERO_RUNTIME_STATE_CONTROL_MODULE_ENV,
-        NERO_RUNTIME_STATE_CONTROL_MODULE_ENV_COMPAT,
-    ])
-    .map(normalize_runtime_state_control_module)
-    .unwrap_or_else(|| NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE.to_string());
+    .map(PathBuf::from);
+    let cwd = match cwd {
+        Some(path) => path,
+        None => {
+            if module_overridden {
+                current_dir.clone()
+            } else {
+                resolve_runtime_bridge_default_cwd()?
+            }
+        }
+    };
     let python_bin = first_non_empty_env(&[
         NERO_RUNTIME_STATE_CONTROL_PYTHON_ENV,
         NERO_RUNTIME_STATE_CONTROL_PYTHON_ENV_COMPAT,
@@ -352,43 +384,41 @@ fn validate_bridge_apply_identity(
     context: &ThreadSessionAutoContext,
     expected_config_path: &Path,
 ) -> Result<(), String> {
-    if let Some(thread_id) = response
+    let thread_id = response
         .thread_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        && thread_id != context.thread_id
-    {
+        .ok_or_else(|| "runtime bridge apply threadId echo is missing".to_string())?;
+    if thread_id != context.thread_id {
         return Err(format!(
             "runtime bridge apply thread mismatch: expected={}, got={thread_id}",
             context.thread_id
         ));
     }
-    if let Some(session_source) = response
+    let session_source = response
         .session_source
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    {
-        let expected = session_source_wire_value(&context.session_source);
-        if session_source != expected {
-            return Err(format!(
-                "runtime bridge apply sessionSource mismatch: expected={expected}, got={session_source}"
-            ));
-        }
+        .ok_or_else(|| "runtime bridge apply sessionSource echo is missing".to_string())?;
+    let expected_session_source = session_source_wire_value(&context.session_source);
+    if session_source != expected_session_source {
+        return Err(format!(
+            "runtime bridge apply sessionSource mismatch: expected={expected_session_source}, got={session_source}"
+        ));
     }
-    if let Some(config_path) = response
+    let config_path = response
         .config_path
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    {
-        let expected = expected_config_path.to_string_lossy();
-        if config_path != expected {
-            return Err(format!(
-                "runtime bridge apply configPath mismatch: expected={expected}, got={config_path}"
-            ));
-        }
+        .ok_or_else(|| "runtime bridge apply configPath echo is missing".to_string())?;
+    let expected_config_path = expected_config_path.to_string_lossy();
+    if config_path != expected_config_path {
+        return Err(format!(
+            "runtime bridge apply configPath mismatch: expected={expected_config_path}, got={config_path}"
+        ));
     }
     Ok(())
 }
@@ -432,6 +462,7 @@ fn session_source_wire_value(session_source: &SessionSource) -> &str {
 fn map_bridge_state(
     response: BridgeReadResponse,
     context: &ThreadSessionAutoContext,
+    expected_config_path: &Path,
 ) -> Result<ThreadSessionAutoState, String> {
     if response.thread_id.trim() != context.thread_id {
         return Err(format!(
@@ -439,6 +470,20 @@ fn map_bridge_state(
             context.thread_id,
             response.thread_id.trim()
         ));
+    }
+    let config_path = response.config_path.trim();
+    if config_path.is_empty() {
+        return Err("runtime bridge configPath echo is missing".to_string());
+    }
+    let expected_config_path = expected_config_path.to_string_lossy();
+    if config_path != expected_config_path {
+        return Err(format!(
+            "runtime bridge configPath mismatch: expected={expected_config_path}, got={config_path}"
+        ));
+    }
+    let state_path = response.path.trim();
+    if state_path.is_empty() {
+        return Err("runtime bridge state path is missing".to_string());
     }
     let session_source = response
         .session_source
@@ -457,8 +502,8 @@ fn map_bridge_state(
         thread_name: context.thread_name.clone(),
         session_source: context.session_source.clone(),
         loaded: context.loaded,
-        config_path: PathBuf::from(response.config_path),
-        state_path: PathBuf::from(response.path),
+        config_path: PathBuf::from(config_path),
+        state_path: PathBuf::from(state_path),
         version: response.version,
         is_subagent: response.is_subagent,
         defaults: ThreadSessionAutoDefaults {
@@ -514,7 +559,7 @@ pub(crate) async fn read_thread_session_auto(
     Ok(ThreadSessionAutoReadResponse {
         thread_id: context.thread_id.clone(),
         authority: ThreadSessionAutoAuthorityMode::BridgeProxy,
-        state: map_bridge_state(response, context)?,
+        state: map_bridge_state(response, context, &config_path)?,
     })
 }
 
@@ -556,7 +601,7 @@ pub(crate) async fn update_thread_session_auto(
                 "session-auto version conflict: expected={}, current={}",
                 params.expected_version, current.state.version
             )),
-            error_code: None,
+            error_code: Some("version_conflict".to_string()),
             reason_code: None,
             state: Some(current.state),
         });
@@ -694,6 +739,7 @@ mod tests {
     use super::NERO_RUNTIME_STATE_CONTROL_RETIRED_MODULE;
     use super::normalize_runtime_state_control_module;
     use super::resolve_runtime_bridge_default_cwd_with_inputs;
+    use super::resolve_runtime_bridge_module;
     use super::runtime_bridge_config_path_from_env;
     use pretty_assertions::assert_eq;
     use std::ffi::OsStr;
@@ -755,9 +801,38 @@ mod tests {
     }
 
     #[test]
+    fn resolve_runtime_bridge_default_cwd_uses_codexn_root_parent_sdk_when_available() {
+        let workspace = tempdir().expect("tempdir workspace");
+        let app_root = workspace.path().join("apps/codex-nero");
+        std::fs::create_dir_all(&app_root).expect("create app root");
+        let sdk_dir = workspace.path().join("codex-nero-sdk/nero_hook_runtime");
+        std::fs::create_dir_all(&sdk_dir).expect("create sibling sdk package");
+        let cwd = workspace.path().join("cwd");
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let expected_sdk_root = workspace.path().join("codex-nero-sdk");
+        assert_eq!(
+            resolve_runtime_bridge_default_cwd_with_inputs(
+                &cwd,
+                Some(app_root.to_string_lossy().as_ref()),
+            ),
+            Ok(expected_sdk_root)
+        );
+    }
+
+    #[test]
+    fn resolve_runtime_bridge_module_uses_default_when_unset() {
+        assert_eq!(
+            resolve_runtime_bridge_module(None),
+            (NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE.to_string(), false)
+        );
+    }
+
+    #[test]
     fn resolve_runtime_bridge_default_cwd_fails_when_no_candidate_contains_package() {
-        let cwd = tempdir().expect("tempdir cwd");
-        let err = resolve_runtime_bridge_default_cwd_with_inputs(cwd.path(), None)
+        let workspace = tempdir().expect("tempdir workspace");
+        let cwd = workspace.path().join("sandbox/cwd");
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let err = resolve_runtime_bridge_default_cwd_with_inputs(&cwd, None)
             .expect_err("expected bootstrap failure");
         assert!(err.contains("runtime bridge bootstrap failed"));
         assert!(err.contains("set NERO_RUNTIME_STATE_CONTROL_CWD or CODEXN_ROOT"));

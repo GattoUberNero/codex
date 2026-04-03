@@ -3738,11 +3738,15 @@ impl CodexMessageProcessor {
                     .await;
             }
             Err(err) => {
-                self.send_internal_error(
-                    request_id,
-                    format!("failed to update thread/sessionAuto state: {err}"),
-                )
-                .await;
+                if err.contains("unsupported for subagent sessions") {
+                    self.send_invalid_request_error(request_id, err).await;
+                } else {
+                    self.send_internal_error(
+                        request_id,
+                        format!("failed to update thread/sessionAuto state: {err}"),
+                    )
+                    .await;
+                }
             }
         }
     }

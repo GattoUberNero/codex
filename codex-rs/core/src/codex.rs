@@ -6109,6 +6109,21 @@ mod handlers {
         module
     }
 
+    fn resolve_runtime_bridge_module(raw_module: Option<String>) -> (String, bool) {
+        match raw_module {
+            Some(module) => (normalize_runtime_state_control_module(module), true),
+            None => (NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE.to_string(), false),
+        }
+    }
+
+    fn resolve_runtime_bridge_module_from_env() -> (String, bool) {
+        let raw_module = first_non_empty_env(&[
+            NERO_RUNTIME_STATE_CONTROL_MODULE_ENV,
+            NERO_RUNTIME_STATE_CONTROL_MODULE_ENV_COMPAT,
+        ]);
+        resolve_runtime_bridge_module(raw_module)
+    }
+
     fn runtime_bridge_config_path_from_env(
         codex_home: &Path,
         configured_path: Option<&std::ffi::OsStr>,
@@ -6132,12 +6147,25 @@ mod handlers {
         current_dir: &Path,
         codexn_root: Option<&str>,
     ) -> Result<PathBuf, String> {
-        let mut candidates = Vec::with_capacity(3);
+        let mut candidates = Vec::with_capacity(8);
+        let mut push_unique = |candidate: PathBuf| {
+            if !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        };
         if let Some(root) = codexn_root.map(str::trim).filter(|value| !value.is_empty()) {
-            candidates.push(PathBuf::from(root).join("apps/codex-nero-sdk"));
+            let root_path = PathBuf::from(root);
+            push_unique(root_path.join("apps/codex-nero-sdk"));
+            if let Some(parent) = root_path.parent() {
+                push_unique(parent.join("codex-nero-sdk"));
+            }
         }
-        candidates.push(current_dir.to_path_buf());
-        candidates.push(current_dir.join("apps/codex-nero-sdk"));
+        push_unique(current_dir.to_path_buf());
+        push_unique(current_dir.join("apps/codex-nero-sdk"));
+        if let Some(parent) = current_dir.parent() {
+            push_unique(parent.join("apps/codex-nero-sdk"));
+            push_unique(parent.join("codex-nero-sdk"));
+        }
         if let Some(candidate) = candidates
             .iter()
             .find(|candidate| candidate.join("nero_hook_runtime").is_dir())
@@ -6164,19 +6192,23 @@ mod handlers {
 
     fn resolve_nero_auto_runtime_bridge_settings() -> Result<NeroAutoRuntimeBridgeSettings, String>
     {
-        let cwd = first_non_empty_env(&[
+        let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let (module, module_overridden) = resolve_runtime_bridge_module_from_env();
+        let configured_cwd = first_non_empty_env(&[
             NERO_RUNTIME_STATE_CONTROL_CWD_ENV,
             NERO_RUNTIME_STATE_CONTROL_CWD_ENV_COMPAT,
         ])
-        .map(PathBuf::from)
-        .map(Ok)
-        .unwrap_or_else(resolve_runtime_bridge_default_cwd)?;
-        let module = first_non_empty_env(&[
-            NERO_RUNTIME_STATE_CONTROL_MODULE_ENV,
-            NERO_RUNTIME_STATE_CONTROL_MODULE_ENV_COMPAT,
-        ])
-        .map(normalize_runtime_state_control_module)
-        .unwrap_or_else(|| NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE.to_string());
+        .map(PathBuf::from);
+        let cwd = match configured_cwd {
+            Some(path) => path,
+            None => {
+                if module_overridden {
+                    current_dir.clone()
+                } else {
+                    resolve_runtime_bridge_default_cwd()?
+                }
+            }
+        };
         let python_bin = first_non_empty_env(&[
             NERO_RUNTIME_STATE_CONTROL_PYTHON_ENV,
             NERO_RUNTIME_STATE_CONTROL_PYTHON_ENV_COMPAT,
@@ -6203,6 +6235,7 @@ mod handlers {
         use super::NERO_RUNTIME_STATE_CONTROL_RETIRED_MODULE;
         use super::normalize_runtime_state_control_module;
         use super::resolve_runtime_bridge_default_cwd_with_inputs;
+        use super::resolve_runtime_bridge_module;
         use pretty_assertions::assert_eq;
         use tempfile::tempdir;
 
@@ -6242,12 +6275,41 @@ mod handlers {
         }
 
         #[test]
+        fn resolve_runtime_bridge_default_cwd_uses_codexn_root_parent_sdk_when_available() {
+            let workspace = tempdir().expect("tempdir workspace");
+            let app_root = workspace.path().join("apps/codex-nero");
+            std::fs::create_dir_all(&app_root).expect("create app root");
+            let sdk_dir = workspace.path().join("codex-nero-sdk/nero_hook_runtime");
+            std::fs::create_dir_all(&sdk_dir).expect("create sibling sdk package");
+            let cwd = workspace.path().join("cwd");
+            std::fs::create_dir_all(&cwd).expect("create cwd");
+            let expected_sdk_root = workspace.path().join("codex-nero-sdk");
+            assert_eq!(
+                resolve_runtime_bridge_default_cwd_with_inputs(
+                    &cwd,
+                    Some(app_root.to_string_lossy().as_ref()),
+                ),
+                Ok(expected_sdk_root)
+            );
+        }
+
+        #[test]
         fn resolve_runtime_bridge_default_cwd_fails_when_no_candidate_contains_package() {
-            let cwd = tempdir().expect("tempdir cwd");
-            let err = resolve_runtime_bridge_default_cwd_with_inputs(cwd.path(), None)
+            let workspace = tempdir().expect("tempdir workspace");
+            let cwd = workspace.path().join("sandbox/cwd");
+            std::fs::create_dir_all(&cwd).expect("create cwd");
+            let err = resolve_runtime_bridge_default_cwd_with_inputs(&cwd, None)
                 .expect_err("expected bootstrap failure");
             assert!(err.contains("runtime bridge bootstrap failed"));
             assert!(err.contains("set NERO_RUNTIME_STATE_CONTROL_CWD or CODEXN_ROOT"));
+        }
+
+        #[test]
+        fn resolve_runtime_bridge_module_uses_default_when_unset() {
+            assert_eq!(
+                resolve_runtime_bridge_module(None),
+                (NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE.to_string(), false)
+            );
         }
     }
 
