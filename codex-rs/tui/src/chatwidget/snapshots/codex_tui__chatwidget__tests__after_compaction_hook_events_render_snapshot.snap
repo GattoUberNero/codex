@@ -5,5 +5,6 @@ expression: combined
 • Running AfterCompaction hook: refreshing runtime grounding
 
 AfterCompaction hook (completed)
+  status: refreshing runtime grounding
   warning: Heads up from the hook
-  runtime status: Remember the startup checklist.
+  hook context: Remember the startup checklist.

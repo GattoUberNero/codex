@@ -13867,6 +13867,38 @@ async fn after_agent_app_server_hook_notifications_render_meta_only_snapshot() {
 }
 
 #[tokio::test]
+async fn after_agent_app_server_hook_notifications_skip_noop_completion() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.handle_server_notification(
+        ServerNotification::HookCompleted(AppServerHookCompletedNotification {
+            thread_id: ThreadId::new().to_string(),
+            turn_id: Some("turn-3".to_string()),
+            run: AppServerHookRunSummary {
+                id: "after-agent:nero-hook-runtime:turn-3".to_string(),
+                event_name: AppServerHookEventName::AfterAgent,
+                handler_type: AppServerHookHandlerType::Agent,
+                execution_mode: AppServerHookExecutionMode::Sync,
+                scope: AppServerHookScope::Turn,
+                source_path: PathBuf::from("legacy://after_agent/nero-hook-runtime"),
+                display_order: 0,
+                status: AppServerHookRunStatus::Completed,
+                status_message: None,
+                started_at: 1,
+                completed_at: Some(1),
+                duration_ms: Some(0),
+                meta: None,
+                entries: Vec::new(),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    assert!(cells.is_empty());
+}
+
+#[tokio::test]
 async fn after_compaction_app_server_hook_notifications_render_snapshot() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

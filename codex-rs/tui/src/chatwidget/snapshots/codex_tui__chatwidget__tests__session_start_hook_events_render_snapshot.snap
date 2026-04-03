@@ -5,5 +5,6 @@ expression: combined
 • Running SessionStart hook: warming the shell
 
 SessionStart hook (completed)
+  status: warming the shell
   warning: Heads up from the hook
   hook context: Remember the startup checklist.

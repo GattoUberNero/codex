@@ -4233,33 +4233,45 @@ impl ChatWidget {
         let codex_protocol::protocol::HookRunSummary {
             event_name,
             status,
+            status_message,
             meta,
             entries,
             ..
         } = event.run;
-        let is_runtime_status_event = matches!(
+        let is_after_agent_runtime_event = matches!(
             event_name,
             codex_protocol::protocol::HookEventName::AfterAgent
-                | codex_protocol::protocol::HookEventName::AfterCompaction
         );
         let status = format!("{status:?}").to_lowercase();
         let header = format!("{} hook ({status})", hook_event_label(event_name));
         let mut lines: Vec<ratatui::text::Line<'static>> = vec![header.into()];
+        let status_message = status_message.filter(|item| !item.is_empty());
+        if let Some(status_message) = &status_message {
+            lines.push(format!("  status: {status_message}").into());
+        }
         let runtime_status_prefix = hook_runtime_status_prefix(meta.as_ref());
-        let has_runtime_status_entry = is_runtime_status_event
+        let has_runtime_status_entry = is_after_agent_runtime_event
             && entries.iter().any(|entry| {
                 matches!(
                     entry.kind,
                     codex_protocol::protocol::HookOutputEntryKind::Context
                 )
             });
+        let runtime_meta_lines = hook_runtime_meta_lines(meta.as_ref(), has_runtime_status_entry);
+        if is_after_agent_runtime_event
+            && entries.is_empty()
+            && runtime_meta_lines.is_empty()
+            && status_message.is_none()
+        {
+            return;
+        }
         for entry in entries {
             let prefix = match entry.kind {
                 codex_protocol::protocol::HookOutputEntryKind::Warning => "warning: ",
                 codex_protocol::protocol::HookOutputEntryKind::Stop => "stop: ",
                 codex_protocol::protocol::HookOutputEntryKind::Feedback => "feedback: ",
                 codex_protocol::protocol::HookOutputEntryKind::Context
-                    if is_runtime_status_event =>
+                    if is_after_agent_runtime_event =>
                 {
                     runtime_status_prefix
                 }
@@ -4268,7 +4280,7 @@ impl ChatWidget {
             };
             lines.push(format!("  {prefix}{}", entry.text).into());
         }
-        for runtime_meta_line in hook_runtime_meta_lines(meta.as_ref(), has_runtime_status_entry) {
+        for runtime_meta_line in runtime_meta_lines {
             lines.push(runtime_meta_line.into());
         }
         self.add_to_history(PlainHistoryCell::new(lines));

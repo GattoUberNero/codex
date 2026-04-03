@@ -8771,19 +8771,32 @@ pub(crate) async fn run_turn(
                                 }),
                             )
                             .await;
-                            let runtime_summary_meta = Some(after_agent_runtime_hook_summary_meta(
-                                &hook_name,
-                                latest_runtime_status_kind_normalized,
-                                latest_runtime_status_meta,
-                                contract_status,
-                                hook_runtime_msg_expected,
-                                hook_runtime_msg_delivered,
-                                hook_delivery_contract_satisfied,
-                                hook_nero_msg_total,
-                                hook_nero_msg_throttled,
-                                hook_auto_user_replies_queued,
-                                hook_auto_user_replies_blocked,
-                            ));
+                            let has_runtime_signal = !legacy_after_agent_summary_entries.is_empty()
+                                || latest_runtime_status_kind_normalized.is_some()
+                                || latest_runtime_status_meta.is_some()
+                                || hook_runtime_msg_expected
+                                || hook_runtime_msg_delivered
+                                || !hook_delivery_contract_satisfied
+                                || hook_nero_msg_total > 0
+                                || hook_nero_msg_throttled > 0
+                                || hook_auto_user_replies_queued > 0
+                                || hook_auto_user_replies_blocked > 0
+                                || matches!(&result, HookResult::FailedContinue(_));
+                            let runtime_summary_meta = has_runtime_signal.then(|| {
+                                after_agent_runtime_hook_summary_meta(
+                                    &hook_name,
+                                    latest_runtime_status_kind_normalized,
+                                    latest_runtime_status_meta,
+                                    contract_status,
+                                    hook_runtime_msg_expected,
+                                    hook_runtime_msg_delivered,
+                                    hook_delivery_contract_satisfied,
+                                    hook_nero_msg_total,
+                                    hook_nero_msg_throttled,
+                                    hook_auto_user_replies_queued,
+                                    hook_auto_user_replies_blocked,
+                                )
+                            });
                             let (runtime_event_status, runtime_event_status_message) =
                                 if matches!(&result, HookResult::FailedContinue(_)) {
                                     (
