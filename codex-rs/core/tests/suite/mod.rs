@@ -93,6 +93,8 @@ mod exec_policy;
 mod fork_thread;
 mod hierarchical_agents;
 #[cfg(not(target_os = "windows"))]
+mod hook_actions_notify;
+#[cfg(not(target_os = "windows"))]
 mod hooks;
 mod image_rollout;
 mod items;

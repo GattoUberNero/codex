@@ -277,6 +277,19 @@ pub(crate) fn collect_user_messages(items: &[ResponseItem]) -> Vec<String> {
         .collect()
 }
 
+pub(crate) fn collect_hook_prompt_messages(items: &[ResponseItem]) -> Vec<ResponseItem> {
+    items
+        .iter()
+        .filter(|item| {
+            matches!(
+                crate::event_mapping::parse_turn_item(item),
+                Some(TurnItem::HookPrompt(_))
+            )
+        })
+        .cloned()
+        .collect()
+}
+
 pub(crate) fn is_summary_message(message: &str) -> bool {
     message.starts_with(format!("{SUMMARY_PREFIX}\n").as_str())
 }
@@ -451,3 +464,36 @@ async fn drain_to_completed(
 #[cfg(test)]
 #[path = "compact_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod hook_prompt_compaction_tests {
+    use super::collect_hook_prompt_messages;
+    use codex_protocol::items::HookPromptFragment;
+    use codex_protocol::items::build_hook_prompt_message;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseItem;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn collect_hook_prompt_messages_preserves_hook_prompt_messages_only() {
+        let user_message = ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "real user input".to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        };
+        let hook_prompt = build_hook_prompt_message(&[HookPromptFragment::from_single_hook(
+            "continue",
+            "hook-run-1",
+        )])
+        .expect("hook prompt message");
+        let input = vec![user_message, hook_prompt.clone()];
+
+        let collected = collect_hook_prompt_messages(&input);
+
+        assert_eq!(collected, vec![hook_prompt]);
+    }
+}

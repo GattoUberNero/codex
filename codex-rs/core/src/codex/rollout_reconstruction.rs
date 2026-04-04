@@ -83,6 +83,17 @@ fn finalize_active_segment<'a>(
     }
 }
 
+fn rebuild_legacy_compaction_history(items: &[ResponseItem], summary: &str) -> Vec<ResponseItem> {
+    let user_messages = crate::compact::collect_user_messages(items);
+    let mut rebuilt = compact::build_compacted_history(Vec::new(), &user_messages, summary);
+    let hook_prompts = compact::collect_hook_prompt_messages(items);
+    if !hook_prompts.is_empty() && !rebuilt.is_empty() {
+        let summary_index = rebuilt.len() - 1;
+        rebuilt.splice(summary_index..summary_index, hook_prompts);
+    }
+    rebuilt
+}
+
 impl Session {
     pub(super) async fn reconstruct_history_from_rollout(
         &self,
@@ -262,10 +273,8 @@ impl Session {
                         // prompt shape.
                         // TODO(ccunningham): if we drop support for None replacement_history compaction items,
                         // we can get rid of this second loop entirely and just build `history` directly in the first loop.
-                        let user_messages = collect_user_messages(history.raw_items());
-                        let rebuilt = compact::build_compacted_history(
-                            Vec::new(),
-                            &user_messages,
+                        let rebuilt = rebuild_legacy_compaction_history(
+                            history.raw_items(),
                             &compacted.message,
                         );
                         history.replace(rebuilt);
@@ -297,5 +306,48 @@ impl Session {
             previous_turn_settings,
             reference_context_item,
         }
+    }
+}
+
+#[cfg(test)]
+mod legacy_compaction_rebuild_tests {
+    use super::rebuild_legacy_compaction_history;
+    use codex_protocol::items::HookPromptFragment;
+    use codex_protocol::items::build_hook_prompt_message;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseItem;
+    use pretty_assertions::assert_eq;
+
+    fn user_message(text: &str) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: text.to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        }
+    }
+
+    #[test]
+    fn rebuild_legacy_compaction_history_preserves_hook_prompt_before_summary() {
+        let hook_prompt = build_hook_prompt_message(&[HookPromptFragment::from_single_hook(
+            "continue with fix",
+            "hook-run-1",
+        )])
+        .expect("hook prompt message");
+        let items = vec![user_message("first"), hook_prompt.clone()];
+
+        let rebuilt = rebuild_legacy_compaction_history(&items, "legacy summary");
+
+        assert_eq!(
+            rebuilt,
+            vec![
+                user_message("first"),
+                hook_prompt,
+                user_message("legacy summary"),
+            ]
+        );
     }
 }

@@ -14,6 +14,8 @@ use core_test_support::fs_wait;
 use core_test_support::responses;
 use core_test_support::test_codex::TestCodexHarness;
 use core_test_support::wait_for_event;
+use pretty_assertions::assert_eq;
+use serde_json::json;
 use tempfile::TempDir;
 use tracing_subscriber::EnvFilter;
 
@@ -65,6 +67,7 @@ async fn submit_user_turn_no_wait(test: &TestCodexHarness, text: &str) -> Result
             final_output_json_schema: None,
             cwd: test.cwd().to_path_buf(),
             approval_policy: AskForApproval::Never,
+            approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::DangerFullAccess,
             model: session_model,
             effort: None,
@@ -362,5 +365,314 @@ async fn after_agent_auto_user_reply_only_can_trigger_follow_up_turn_without_man
         second_complete.is_ok(),
         "expected second TurnComplete from auto_user_reply-only follow-up in no-race e2e test"
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_agent_runtime_delivery_contract_blocks_auto_enqueue_when_msg_is_tui_only()
+-> Result<()> {
+    init_test_tracing();
+    if skip_if_no_linux_sandbox_bin() {
+        return Ok(());
+    }
+    let script = write_notify_script(
+        r#"#!/bin/bash
+printf '%s' '{"actions":[{"type":"nero_hook_msg","mode":"tui-short","show":{"agent":false,"tui":true},"format":"block","status":{"kind":"warning","text":"runtime alert"},"msg":{"full":"runtime full","short":"runtime short"}},{"type":"auto_user_reply","message":"continue after tui-only"}]}'
+"#,
+    )?;
+
+    let test = TestCodexHarness::with_builder(
+        core_test_support::test_codex::test_codex().with_config(move |cfg| {
+            cfg.notify = Some(vec![script]);
+        }),
+    )
+    .await?;
+    let request_log = responses::mount_sse_sequence(
+        test.server(),
+        vec![sse(vec![
+            ev_assistant_message("m1", "Done"),
+            ev_completed("r1"),
+        ])],
+    )
+    .await;
+
+    submit_user_turn_no_wait(&test, "contract should block tui-only runtime message").await?;
+
+    let runtime_warning = tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_event(&test.test().codex, |ev| {
+            matches!(ev, EventMsg::Warning(w) if w.message.contains("content = runtime short"))
+        }),
+    )
+    .await;
+    assert!(
+        runtime_warning.is_ok(),
+        "expected tui-visible runtime hook warning before delivery contract check"
+    );
+
+    let contract_warning = tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_event(&test.test().codex, |ev| {
+            matches!(ev, EventMsg::Warning(w)
+                if w.message.contains("Auto delivery blocked: runtime hook message was not delivered in this turn."))
+        }),
+    )
+    .await;
+    assert!(
+        contract_warning.is_ok(),
+        "expected delivery-contract warning for blocked auto_user_reply"
+    );
+
+    let hook_completed = tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_event(&test.test().codex, |ev| {
+            matches!(ev, EventMsg::HookCompleted(event)
+                if event.run.event_name == codex_protocol::protocol::HookEventName::AfterAgent)
+        }),
+    )
+    .await
+    .expect("timed out waiting for after_agent HookCompleted event");
+    let EventMsg::HookCompleted(hook_completed) = hook_completed else {
+        panic!("expected HookCompleted event");
+    };
+    let meta = hook_completed
+        .run
+        .meta
+        .expect("after_agent runtime hook should include meta");
+    assert_eq!(meta["protocol"]["runtime_msg_expected"], json!(true));
+    assert_eq!(meta["protocol"]["runtime_msg_delivered"], json!(false));
+    assert_eq!(meta["protocol"]["contract_satisfied"], json!(false));
+    assert_eq!(meta["protocol"]["auto_user_replies_blocked"], json!(1));
+    assert_eq!(
+        meta["follow_up"],
+        json!({
+            "status": "blocked-delivery-contract",
+            "queued_count": 0,
+            "blocked_count": 1,
+        })
+    );
+
+    let _first_complete = wait_for_event(&test.test().codex, |ev| {
+        matches!(ev, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let second_complete = tokio::time::timeout(
+        Duration::from_millis(300),
+        wait_for_event(&test.test().codex, |ev| {
+            matches!(ev, EventMsg::TurnComplete(_))
+        }),
+    )
+    .await;
+    assert!(
+        second_complete.is_err(),
+        "did not expect follow-up turn completion when delivery contract is blocked"
+    );
+    assert_eq!(request_log.requests().len(), 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_agent_runtime_delivery_contract_allows_auto_enqueue_when_agent_delivery_is_true()
+-> Result<()> {
+    init_test_tracing();
+    if skip_if_no_linux_sandbox_bin() {
+        return Ok(());
+    }
+    let script = write_notify_script(
+        r#"#!/bin/bash
+printf '%s' '{"actions":[{"type":"nero_hook_msg","mode":"synced","show":{"agent":true,"tui":false},"format":"block","status":{"kind":"warning","text":"runtime agent relay"},"msg":{"full":"agent runtime full","short":"agent runtime short"}},{"type":"auto_user_reply","message":"continue after agent delivery"}]}'
+"#,
+    )?;
+
+    let test = TestCodexHarness::with_builder(
+        core_test_support::test_codex::test_codex().with_config(move |cfg| {
+            cfg.notify = Some(vec![script]);
+        }),
+    )
+    .await?;
+    let request_log = responses::mount_sse_sequence(
+        test.server(),
+        vec![
+            sse(vec![ev_assistant_message("m1", "Done"), ev_completed("r1")]),
+            sse(vec![
+                ev_assistant_message("m2", "Done 2"),
+                ev_completed("r2"),
+            ]),
+        ],
+    )
+    .await;
+
+    submit_user_turn_no_wait(
+        &test,
+        "contract should allow agent-delivered runtime message",
+    )
+    .await?;
+
+    let hook_completed = tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_event(&test.test().codex, |ev| {
+            matches!(ev, EventMsg::HookCompleted(event)
+                if event.run.event_name == codex_protocol::protocol::HookEventName::AfterAgent)
+        }),
+    )
+    .await
+    .expect("timed out waiting for after_agent HookCompleted event");
+    let EventMsg::HookCompleted(hook_completed) = hook_completed else {
+        panic!("expected HookCompleted event");
+    };
+    let meta = hook_completed
+        .run
+        .meta
+        .expect("after_agent runtime hook should include meta");
+    assert_eq!(meta["protocol"]["runtime_msg_expected"], json!(true));
+    assert_eq!(meta["protocol"]["runtime_msg_delivered"], json!(true));
+    assert_eq!(meta["protocol"]["contract_satisfied"], json!(true));
+    assert_eq!(meta["protocol"]["auto_user_replies_blocked"], json!(0));
+    assert_eq!(
+        meta["follow_up"],
+        json!({
+            "status": "queued",
+            "queued_count": 1,
+            "blocked_count": 0,
+        })
+    );
+
+    let blocked_warning = tokio::time::timeout(
+        Duration::from_millis(300),
+        wait_for_event(&test.test().codex, |ev| {
+            matches!(ev, EventMsg::Warning(w)
+                if w.message.contains("Auto delivery blocked: runtime hook message was not delivered in this turn."))
+        }),
+    )
+    .await;
+    assert!(
+        blocked_warning.is_err(),
+        "did not expect delivery-contract warning when runtime message is agent-delivered"
+    );
+
+    let _first_complete = wait_for_event(&test.test().codex, |ev| {
+        matches!(ev, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let second_complete = tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_event(&test.test().codex, |ev| {
+            matches!(ev, EventMsg::TurnComplete(_))
+        }),
+    )
+    .await;
+    assert!(
+        second_complete.is_ok(),
+        "expected second TurnComplete from delivery-contract-approved auto_user_reply"
+    );
+
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 2);
+    let second_user_texts = requests[1].message_input_texts("user");
+    assert!(
+        second_user_texts
+            .iter()
+            .any(|text| text.contains("continue after agent delivery")),
+        "expected follow-up request to include queued auto_user_reply message"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_agent_runtime_delivery_contract_observes_msg_auto_ordering_before_queueing()
+-> Result<()> {
+    init_test_tracing();
+    if skip_if_no_linux_sandbox_bin() {
+        return Ok(());
+    }
+    let script = write_notify_script(
+        r#"#!/bin/bash
+printf '%s' '{"actions":[{"type":"auto_user_reply","message":"continue despite ordering"},{"type":"nero_hook_msg","mode":"synced","show":{"agent":true,"tui":false},"format":"block","status":{"kind":"warning","text":"runtime after auto"},"msg":{"full":"agent runtime after auto","short":"agent runtime after auto short"}}]}'
+"#,
+    )?;
+
+    let test = TestCodexHarness::with_builder(
+        core_test_support::test_codex::test_codex().with_config(move |cfg| {
+            cfg.notify = Some(vec![script]);
+        }),
+    )
+    .await?;
+    let request_log = responses::mount_sse_sequence(
+        test.server(),
+        vec![
+            sse(vec![ev_assistant_message("m1", "Done"), ev_completed("r1")]),
+            sse(vec![
+                ev_assistant_message("m2", "Done 2"),
+                ev_completed("r2"),
+            ]),
+        ],
+    )
+    .await;
+
+    submit_user_turn_no_wait(&test, "ordering contract check").await?;
+
+    let hook_completed = tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_event(&test.test().codex, |ev| {
+            matches!(ev, EventMsg::HookCompleted(event)
+                if event.run.event_name == codex_protocol::protocol::HookEventName::AfterAgent)
+        }),
+    )
+    .await
+    .expect("timed out waiting for after_agent HookCompleted event");
+    let EventMsg::HookCompleted(hook_completed) = hook_completed else {
+        panic!("expected HookCompleted event");
+    };
+    let meta = hook_completed
+        .run
+        .meta
+        .expect("after_agent runtime hook should include meta");
+    assert_eq!(meta["protocol"]["runtime_msg_expected"], json!(true));
+    assert_eq!(meta["protocol"]["runtime_msg_delivered"], json!(true));
+    assert_eq!(meta["protocol"]["contract_satisfied"], json!(true));
+    assert_eq!(
+        meta["follow_up"],
+        json!({
+            "status": "queued",
+            "queued_count": 1,
+            "blocked_count": 0,
+        })
+    );
+
+    let _first_complete = wait_for_event(&test.test().codex, |ev| {
+        matches!(ev, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let second_complete = tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_event(&test.test().codex, |ev| {
+            matches!(ev, EventMsg::TurnComplete(_))
+        }),
+    )
+    .await;
+    assert!(
+        second_complete.is_ok(),
+        "expected second TurnComplete when auto_user_reply appears before runtime message action"
+    );
+
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 2);
+    let first_user_texts = requests[0].message_input_texts("user");
+    assert!(
+        first_user_texts
+            .iter()
+            .all(|text| !text.contains("continue despite ordering")),
+        "first request should not include auto_user_reply follow-up text"
+    );
+    let second_user_texts = requests[1].message_input_texts("user");
+    assert!(
+        second_user_texts
+            .iter()
+            .any(|text| text.contains("continue despite ordering")),
+        "second request should include queued auto_user_reply text"
+    );
+
     Ok(())
 }

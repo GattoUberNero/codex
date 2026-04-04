@@ -3,8 +3,10 @@ use crate::context_manager::normalize;
 use crate::event_mapping::has_non_contextual_dev_message_content;
 use crate::event_mapping::is_contextual_dev_message_content;
 use crate::event_mapping::is_contextual_user_message_content;
+use crate::event_mapping::parse_turn_item;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use codex_protocol::items::TurnItem;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
@@ -686,6 +688,7 @@ pub(crate) fn is_codex_generated_item(item: &ResponseItem) -> bool {
             | ResponseItem::ToolSearchOutput { .. }
             | ResponseItem::CustomToolCallOutput { .. }
     ) || matches!(item, ResponseItem::Message { role, .. } if role == "developer")
+        || matches!(parse_turn_item(item), Some(TurnItem::HookPrompt(_)))
 }
 
 pub(crate) fn is_user_turn_boundary(item: &ResponseItem) -> bool {
@@ -709,6 +712,24 @@ fn user_message_positions(items: &[ResponseItem]) -> Vec<usize> {
         }
     }
     positions
+}
+
+#[cfg(test)]
+mod hook_prompt_classification_tests {
+    use super::is_codex_generated_item;
+    use codex_protocol::items::HookPromptFragment;
+    use codex_protocol::items::build_hook_prompt_message;
+
+    #[test]
+    fn hook_prompt_is_codex_generated_item() {
+        let hook_prompt = build_hook_prompt_message(&[HookPromptFragment::from_single_hook(
+            "retry with safer command",
+            "hook-run-1",
+        )])
+        .expect("hook prompt message");
+
+        assert!(is_codex_generated_item(&hook_prompt));
+    }
 }
 
 #[cfg(test)]
