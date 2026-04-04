@@ -205,6 +205,13 @@ pub(crate) fn build_agent_spawn_config(
     turn: &TurnContext,
 ) -> Result<Config, FunctionCallError> {
     let mut config = build_agent_shared_config(turn)?;
+    crate::config::strip_codexn_fork_subagent_developer_instructions(&mut config).map_err(
+        |err| {
+            FunctionCallError::Fatal(format!(
+                "failed to prepare subagent developer instructions for spawn: {err}"
+            ))
+        },
+    )?;
     config.base_instructions = Some(base_instructions.text.clone());
     Ok(config)
 }
@@ -214,6 +221,13 @@ pub(crate) fn build_agent_resume_config(
     child_depth: i32,
 ) -> Result<Config, FunctionCallError> {
     let mut config = build_agent_shared_config(turn)?;
+    crate::config::strip_codexn_fork_subagent_developer_instructions(&mut config).map_err(
+        |err| {
+            FunctionCallError::Fatal(format!(
+                "failed to prepare subagent developer instructions for resume: {err}"
+            ))
+        },
+    )?;
     apply_spawn_agent_overrides(&mut config, child_depth);
     // For resume, keep base instructions sourced from rollout/session metadata.
     config.base_instructions = None;

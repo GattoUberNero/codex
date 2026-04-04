@@ -11,6 +11,7 @@ use crate::protocol::AgentStatus;
 use crate::protocol::AskForApproval;
 use crate::protocol::EventMsg;
 use crate::protocol::FileSystemSandboxPolicy;
+use crate::protocol::NeroAutoRuntimeConfig;
 use crate::protocol::NetworkSandboxPolicy;
 use crate::protocol::Op;
 use crate::protocol::SandboxPolicy;
@@ -44,7 +45,9 @@ use core_test_support::TempDirExt;
 use pretty_assertions::assert_eq;
 use serde::Deserialize;
 use serde_json::json;
+use serial_test::serial;
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -84,6 +87,43 @@ fn thread_manager() -> ThreadManager {
         CodexAuth::from_api_key("dummy"),
         built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone(),
     )
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set_os(key: &'static str, value: &OsStr) -> Self {
+        let original = std::env::var_os(key);
+        unsafe { std::env::set_var(key, value) };
+        Self { key, original }
+    }
+
+    fn clear(key: &'static str) -> Self {
+        let original = std::env::var_os(key);
+        unsafe { std::env::remove_var(key) };
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(value) => unsafe { std::env::set_var(self.key, value) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
+    }
+}
+
+fn clear_codexn_fork_env_for_test() -> Vec<EnvVarGuard> {
+    vec![
+        EnvVarGuard::clear("CODEXN_CONFIG_NERO_PATH"),
+        EnvVarGuard::clear("CODEXN_CONFIG_NERO_MSG_PATH"),
+        EnvVarGuard::clear("CODEXN_CONFIG_NERO_AUTO_PATH"),
+        EnvVarGuard::clear("CODEXN_CONFIG_NERO_DEV_PATH"),
+    ]
 }
 
 fn history_contains_inter_agent_communication(
@@ -2730,7 +2770,10 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
 }
 
 #[tokio::test]
+#[serial]
 async fn build_agent_spawn_config_uses_turn_context_values() {
+    let _env_guards = clear_codexn_fork_env_for_test();
+
     fn pick_allowed_sandbox_policy(
         constraint: &crate::config::Constrained<SandboxPolicy>,
         base: SandboxPolicy,
@@ -2803,7 +2846,10 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
 }
 
 #[tokio::test]
+#[serial]
 async fn build_agent_spawn_config_preserves_base_user_instructions() {
+    let _env_guards = clear_codexn_fork_env_for_test();
+
     let (_session, mut turn) = make_session_and_context().await;
     let mut base_config = (*turn.config).clone();
     base_config.user_instructions = Some("base-user".to_string());
@@ -2819,7 +2865,10 @@ async fn build_agent_spawn_config_preserves_base_user_instructions() {
 }
 
 #[tokio::test]
+#[serial]
 async fn build_agent_resume_config_clears_base_instructions() {
+    let _env_guards = clear_codexn_fork_env_for_test();
+
     let (_session, mut turn) = make_session_and_context().await;
     let mut base_config = (*turn.config).clone();
     base_config.base_instructions = Some("caller-base".to_string());
@@ -2852,4 +2901,130 @@ async fn build_agent_resume_config_clears_base_instructions() {
         .set(turn.sandbox_policy.get().clone())
         .expect("sandbox policy set");
     assert_eq!(config, expected);
+}
+
+#[tokio::test]
+#[serial]
+async fn build_agent_spawn_config_strips_main_agent_and_auto_for_subagent_children() {
+    let _env_guards = clear_codexn_fork_env_for_test();
+
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let extra_config_path = temp_dir.path().join("config-nero.toml");
+    std::fs::write(
+        &extra_config_path,
+        r####"
+            developer_instructions = "root instructions"
+
+            [nero.main_agent]
+            developer_instructions = "boss instructions"
+
+            [nero.hook.runtime.auto]
+            enabled = true
+            protocol_prefix = "NERO_AUTO_V1 "
+
+            [nero.hook.runtime.auto.scoring_system]
+            enabled = true
+
+            [nero.hook.runtime.auto.scoring_system.show]
+            agent = true
+            tui = false
+
+            [nero.hook.runtime.auto.system_text]
+            header = "## NERO-SYSTEM v1"
+            scoring_on_header = "### scoring_system: on"
+            rules_label = "SCORE_RULES:"
+            json_intro = "Emit the strict JSON block below."
+            legacy_notice = "Legacy prefix `{protocol_prefix}` is still supported."
+        "####,
+    )
+    .expect("write extra config");
+    let _extra_guard =
+        EnvVarGuard::set_os("CODEXN_CONFIG_NERO_PATH", extra_config_path.as_os_str());
+
+    let (_session, mut turn) = make_session_and_context().await;
+    let mut parent_config = (*turn.config).clone();
+    crate::config::refresh_codexn_fork_developer_instructions_with_runtime(
+        &mut parent_config,
+        NeroAutoRuntimeConfig {
+            enabled: true,
+            autonomy_level: 7,
+            max_auto_rounds: 4,
+        },
+        &SessionSource::default(),
+    )
+    .expect("parent refresh should succeed");
+    turn.config = Arc::new(parent_config.clone());
+    turn.developer_instructions = parent_config.developer_instructions.clone();
+
+    let base_instructions = BaseInstructions {
+        text: "base".to_string(),
+    };
+    let config = build_agent_spawn_config(&base_instructions, &turn).expect("spawn config");
+
+    assert_eq!(
+        config.developer_instructions,
+        Some("root instructions".to_string())
+    );
+    let rendered = config
+        .developer_instructions
+        .as_deref()
+        .expect("child instructions should exist");
+    assert!(!rendered.contains("boss instructions"));
+    assert!(!rendered.contains("## NERO-SYSTEM v1"));
+}
+
+#[tokio::test]
+#[serial]
+async fn build_agent_resume_config_strips_main_agent_and_auto_for_subagent_children() {
+    let _env_guards = clear_codexn_fork_env_for_test();
+
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let extra_config_path = temp_dir.path().join("config-nero.toml");
+    std::fs::write(
+        &extra_config_path,
+        r####"
+            [nero.main_agent]
+            developer_instructions = "boss instructions"
+
+            [nero.hook.runtime.auto]
+            enabled = true
+            protocol_prefix = "NERO_AUTO_V1 "
+
+            [nero.hook.runtime.auto.scoring_system]
+            enabled = true
+
+            [nero.hook.runtime.auto.scoring_system.show]
+            agent = true
+            tui = false
+
+            [nero.hook.runtime.auto.system_text]
+            header = "## NERO-SYSTEM v1"
+            scoring_on_header = "### scoring_system: on"
+            rules_label = "SCORE_RULES:"
+            json_intro = "Emit the strict JSON block below."
+            legacy_notice = "Legacy prefix `{protocol_prefix}` is still supported."
+        "####,
+    )
+    .expect("write extra config");
+    let _extra_guard =
+        EnvVarGuard::set_os("CODEXN_CONFIG_NERO_PATH", extra_config_path.as_os_str());
+
+    let (_session, mut turn) = make_session_and_context().await;
+    let mut parent_config = (*turn.config).clone();
+    crate::config::refresh_codexn_fork_developer_instructions_with_runtime(
+        &mut parent_config,
+        NeroAutoRuntimeConfig {
+            enabled: true,
+            autonomy_level: 7,
+            max_auto_rounds: 4,
+        },
+        &SessionSource::default(),
+    )
+    .expect("parent refresh should succeed");
+    turn.config = Arc::new(parent_config.clone());
+    turn.developer_instructions = parent_config.developer_instructions.clone();
+
+    let config = build_agent_resume_config(&turn, 0).expect("resume config");
+
+    assert_eq!(config.developer_instructions, None);
 }

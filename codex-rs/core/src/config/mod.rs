@@ -915,16 +915,20 @@ fn strip_codexn_fork_auto_developer_instructions(
     current_instructions: Option<&str>,
     extra_toml: &TomlValue,
 ) -> Option<String> {
-    let mut current = current_instructions
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?
-        .to_string();
-    let auto_instructions = codexn_fork_auto_developer_instructions(extra_toml)?;
+    let current_raw = current_instructions?;
+    if current_raw.trim().is_empty() {
+        return None;
+    }
+    let mut current = current_raw.to_string();
+    let Some(auto_instructions) = codexn_fork_auto_developer_instructions(extra_toml) else {
+        return Some(current_raw.to_string());
+    };
     let auto_instructions = auto_instructions.trim();
     if auto_instructions.is_empty() {
-        return Some(current);
+        return Some(current_raw.to_string());
     }
 
+    let mut changed = false;
     loop {
         if current == auto_instructions {
             return None;
@@ -938,6 +942,7 @@ fn strip_codexn_fork_auto_developer_instructions(
             return None;
         }
         current = stripped.to_string();
+        changed = true;
     }
 
     // Compatibility fallback: strip only a strict trailing legacy auto block.
@@ -955,7 +960,62 @@ fn strip_codexn_fork_auto_developer_instructions(
         }
     }
 
-    Some(current)
+    if changed {
+        Some(current)
+    } else {
+        Some(current_raw.to_string())
+    }
+}
+
+fn refresh_codexn_fork_developer_instructions(
+    current_instructions: Option<&str>,
+    combined_extra_toml: &mut TomlValue,
+    session_source: &SessionSource,
+) -> Option<String> {
+    let is_subagent = matches!(session_source, SessionSource::SubAgent(_));
+    let stripped_auto =
+        strip_codexn_fork_auto_developer_instructions(current_instructions, combined_extra_toml);
+    let stripped_main = strip_codexn_fork_main_agent_developer_instructions(
+        stripped_auto.as_deref(),
+        combined_extra_toml,
+    );
+
+    if is_subagent
+        && let Some(nero_table) = combined_extra_toml
+            .as_table_mut()
+            .and_then(|root| root.get_mut("nero"))
+            .and_then(TomlValue::as_table_mut)
+    {
+        nero_table.remove("main_agent");
+        nero_table.remove("agent");
+    }
+
+    let base_instructions = if is_subagent {
+        let mut sections = Vec::new();
+        if let Some(instructions) = codexn_fork_root_developer_instructions(combined_extra_toml) {
+            let trimmed = instructions.trim();
+            if !trimmed.is_empty() {
+                sections.push(trimmed.to_string());
+            }
+        }
+        if let Some(instructions) = stripped_main.or(stripped_auto) {
+            let trimmed = instructions.trim();
+            if !trimmed.is_empty() {
+                sections.retain(|existing| existing != trimmed);
+                sections.push(trimmed.to_string());
+            }
+        }
+
+        if sections.is_empty() {
+            None
+        } else {
+            Some(sections.join("\n\n"))
+        }
+    } else {
+        codexn_fork_root_developer_instructions(combined_extra_toml).or(stripped_auto)
+    };
+
+    compose_codexn_fork_developer_instructions(base_instructions.as_deref(), combined_extra_toml)
 }
 
 fn strip_codexn_fork_main_agent_developer_instructions(
@@ -1523,16 +1583,10 @@ pub(crate) fn refresh_codexn_fork_developer_instructions_with_runtime(
     let effective_runtime =
         effective_codexn_fork_nero_auto_runtime(nero_auto_runtime, session_source);
     apply_codexn_fork_nero_auto_runtime_to_toml(&mut combined_extra_toml, effective_runtime);
-    let base_instructions =
-        codexn_fork_root_developer_instructions(&combined_extra_toml).or_else(|| {
-            strip_codexn_fork_auto_developer_instructions(
-                config.developer_instructions.as_deref(),
-                &combined_extra_toml,
-            )
-        });
-    config.developer_instructions = compose_codexn_fork_developer_instructions(
-        base_instructions.as_deref(),
-        &combined_extra_toml,
+    config.developer_instructions = refresh_codexn_fork_developer_instructions(
+        config.developer_instructions.as_deref(),
+        &mut combined_extra_toml,
+        session_source,
     );
     Ok(())
 }

@@ -690,6 +690,85 @@ Protocol appendix: this section is user-authored and must be preserved.
 }
 
 #[test]
+fn strip_codexn_fork_auto_developer_instructions_keeps_current_when_auto_is_unavailable() {
+    let extra_toml: TomlValue = toml::from_str(
+        r#"
+            [nero.hook.runtime.auto]
+            enabled = false
+        "#,
+    )
+    .expect("parse extra toml");
+
+    assert_eq!(
+        strip_codexn_fork_auto_developer_instructions(Some("role instructions"), &extra_toml),
+        Some("role instructions".to_string())
+    );
+}
+
+#[test]
+fn refresh_codexn_fork_developer_instructions_preserves_subagent_role_instructions() {
+    let mut extra_toml: TomlValue = toml::from_str(
+        r####"
+            [nero.main_agent]
+            developer_instructions = "fork main instructions"
+
+            [nero.hook.runtime.auto]
+            enabled = true
+            protocol_prefix = "NERO_AUTO_V1 "
+
+            [nero.hook.runtime.auto.scoring_system]
+            enabled = true
+
+            [nero.hook.runtime.auto.scoring_system.show]
+            agent = true
+            tui = false
+        "####,
+    )
+    .expect("parse extra toml");
+    let subagent_source = SessionSource::SubAgent(codex_protocol::protocol::SubAgentSource::Other(
+        "explorer-fast".to_string(),
+    ));
+    apply_codexn_fork_nero_auto_runtime_to_toml(
+        &mut extra_toml,
+        effective_codexn_fork_nero_auto_runtime(
+            NeroAutoRuntimeConfig {
+                enabled: true,
+                autonomy_level: 7,
+                max_auto_rounds: 2,
+            },
+            &subagent_source,
+        ),
+    );
+
+    let refreshed = refresh_codexn_fork_developer_instructions(
+        Some("role instructions"),
+        &mut extra_toml,
+        &subagent_source,
+    );
+
+    assert_eq!(refreshed, Some("role instructions".to_string()));
+}
+
+#[test]
+fn refresh_codexn_fork_developer_instructions_keeps_main_agent_for_non_subagent() {
+    let mut extra_toml: TomlValue = toml::from_str(
+        r#"
+            [nero.main_agent]
+            developer_instructions = "fork main instructions"
+        "#,
+    )
+    .expect("parse extra toml");
+
+    let refreshed = refresh_codexn_fork_developer_instructions(
+        Some("role instructions"),
+        &mut extra_toml,
+        &SessionSource::Exec,
+    );
+
+    assert_eq!(refreshed, Some("fork main instructions".to_string()));
+}
+
+#[test]
 fn effective_codexn_fork_nero_auto_runtime_forces_subagent_sessions_off() {
     let runtime = effective_codexn_fork_nero_auto_runtime(
         NeroAutoRuntimeConfig {
