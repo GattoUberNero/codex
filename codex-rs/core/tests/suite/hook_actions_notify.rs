@@ -1,14 +1,18 @@
 #![cfg(not(target_os = "windows"))]
 
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Result;
+use codex_features::Feature;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::user_input::UserInput;
 use core_test_support::fs_wait;
 use core_test_support::responses;
@@ -16,6 +20,7 @@ use core_test_support::test_codex::TestCodexHarness;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use serial_test::serial;
 use tempfile::TempDir;
 use tracing_subscriber::EnvFilter;
 
@@ -43,6 +48,22 @@ fn write_notify_script(contents: &str) -> Result<String> {
     let path = script.to_string_lossy().to_string();
     let _leaked = Box::leak(Box::new(dir));
     Ok(path)
+}
+
+fn write_stop_hook(home: &Path, command: &str) -> Result<()> {
+    let hooks = json!({
+        "hooks": {
+            "Stop": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": command,
+                    "statusMessage": "running stop hook",
+                }]
+            }]
+        }
+    });
+    std::fs::write(home.join("hooks.json"), hooks.to_string())?;
+    Ok(())
 }
 
 fn init_test_tracing() {
@@ -261,14 +282,37 @@ async fn after_agent_both_actions_can_trigger_follow_up_turn_without_manual_inpu
     let hook_dir = TempDir::new()?;
     let marker = hook_dir.path().join("both.marker");
     let marker_str = marker.to_string_lossy().to_string();
+    let once_marker = hook_dir.path().join("both.once");
+    let once_marker_str = once_marker.to_string_lossy().to_string();
+    let stop_script = write_notify_script(
+        r#"#!/bin/bash
+set -euo pipefail
+payload="$(cat)"
+if printf '%s' "$payload" | grep -q '"stop_hook_active":true'; then
+  printf '%s' '{"decision":"continue"}'
+else
+  printf '%s' '{"decision":"block","reason":"both-actions checkpoint"}'
+fi
+"#,
+    )?;
     let script = write_notify_script(&format!(
-        "#!/bin/bash\n: > \"{marker_str}\"\nprintf '%s' '{{\"actions\":[{{\"type\":\"visible_note\",\"message\":\"e2e both\"}},{{\"type\":\"auto_user_reply\",\"message\":\"continue\"}}]}}'\n"
+        "#!/bin/bash\nset -euo pipefail\n: > \"{marker_str}\"\nif [ -f \"{once_marker_str}\" ]; then\n  printf '%s' '{{\"actions\":[{{\"type\":\"visible_note\",\"message\":\"e2e both\"}}]}}'\nelse\n  : > \"{once_marker_str}\"\n  printf '%s' '{{\"actions\":[{{\"type\":\"visible_note\",\"message\":\"e2e both\"}},{{\"type\":\"auto_user_reply\",\"message\":\"continue\"}}]}}'\nfi\n"
     ))?;
+    let stop_command = format!("bash {stop_script}");
 
     let test = TestCodexHarness::with_builder(
-        core_test_support::test_codex::test_codex().with_config(move |cfg| {
-            cfg.notify = Some(vec![script]);
-        }),
+        core_test_support::test_codex::test_codex()
+            .with_pre_build_hook(move |home| {
+                if let Err(error) = write_stop_hook(home, &stop_command) {
+                    panic!("failed to write stop hook fixture: {error}");
+                }
+            })
+            .with_config(move |cfg| {
+                cfg.notify = Some(vec![script]);
+                cfg.features
+                    .enable(Feature::CodexHooks)
+                    .expect("test config should allow feature update");
+            }),
     )
     .await?;
     responses::mount_sse_once(
@@ -281,6 +325,14 @@ async fn after_agent_both_actions_can_trigger_follow_up_turn_without_manual_inpu
         sse(vec![
             ev_assistant_message("m2", "Done 2"),
             ev_completed("r2"),
+        ]),
+    )
+    .await;
+    responses::mount_sse_once(
+        test.server(),
+        sse(vec![
+            ev_assistant_message("m3", "Done 3"),
+            ev_completed("r3"),
         ]),
     )
     .await;
@@ -323,14 +375,37 @@ async fn after_agent_auto_user_reply_only_can_trigger_follow_up_turn_without_man
     let hook_dir = TempDir::new()?;
     let marker = hook_dir.path().join("auto_only.marker");
     let marker_str = marker.to_string_lossy().to_string();
+    let once_marker = hook_dir.path().join("auto_only.once");
+    let once_marker_str = once_marker.to_string_lossy().to_string();
+    let stop_script = write_notify_script(
+        r#"#!/bin/bash
+set -euo pipefail
+payload="$(cat)"
+if printf '%s' "$payload" | grep -q '"stop_hook_active":true'; then
+  printf '%s' '{"decision":"continue"}'
+else
+  printf '%s' '{"decision":"block","reason":"auto-only checkpoint"}'
+fi
+"#,
+    )?;
     let script = write_notify_script(&format!(
-        "#!/bin/bash\n: > \"{marker_str}\"\nprintf '%s' '{{\"actions\":[{{\"type\":\"auto_user_reply\",\"message\":\"continue\"}}]}}'\n"
+        "#!/bin/bash\nset -euo pipefail\n: > \"{marker_str}\"\nif [ -f \"{once_marker_str}\" ]; then\n  printf '%s' '{{\"actions\":[]}}'\nelse\n  : > \"{once_marker_str}\"\n  printf '%s' '{{\"actions\":[{{\"type\":\"auto_user_reply\",\"message\":\"continue\"}}]}}'\nfi\n"
     ))?;
+    let stop_command = format!("bash {stop_script}");
 
     let test = TestCodexHarness::with_builder(
-        core_test_support::test_codex::test_codex().with_config(move |cfg| {
-            cfg.notify = Some(vec![script]);
-        }),
+        core_test_support::test_codex::test_codex()
+            .with_pre_build_hook(move |home| {
+                if let Err(error) = write_stop_hook(home, &stop_command) {
+                    panic!("failed to write stop hook fixture: {error}");
+                }
+            })
+            .with_config(move |cfg| {
+                cfg.notify = Some(vec![script]);
+                cfg.features
+                    .enable(Feature::CodexHooks)
+                    .expect("test config should allow feature update");
+            }),
     )
     .await?;
     responses::mount_sse_once(
@@ -343,6 +418,14 @@ async fn after_agent_auto_user_reply_only_can_trigger_follow_up_turn_without_man
         sse(vec![
             ev_assistant_message("m2", "Done 2"),
             ev_completed("r2"),
+        ]),
+    )
+    .await;
+    responses::mount_sse_once(
+        test.server(),
+        sse(vec![
+            ev_assistant_message("m3", "Done 3"),
+            ev_completed("r3"),
         ]),
     )
     .await;
@@ -473,22 +556,44 @@ printf '%s' '{"actions":[{"type":"nero_hook_msg","mode":"tui-short","show":{"age
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn after_agent_runtime_delivery_contract_allows_auto_enqueue_when_agent_delivery_is_true()
+async fn after_agent_runtime_delivery_contract_allows_auto_enqueue_when_stop_delivery_is_true()
 -> Result<()> {
     init_test_tracing();
     if skip_if_no_linux_sandbox_bin() {
         return Ok(());
     }
-    let script = write_notify_script(
+    let hook_dir = TempDir::new()?;
+    let once_marker = hook_dir.path().join("delivery-contract.once");
+    let once_marker_str = once_marker.to_string_lossy().to_string();
+    let stop_script = write_notify_script(
         r#"#!/bin/bash
-printf '%s' '{"actions":[{"type":"nero_hook_msg","mode":"synced","show":{"agent":true,"tui":false},"format":"block","status":{"kind":"warning","text":"runtime agent relay"},"msg":{"full":"agent runtime full","short":"agent runtime short"}},{"type":"auto_user_reply","message":"continue after agent delivery"}]}'
+set -euo pipefail
+payload="$(cat)"
+if printf '%s' "$payload" | grep -q '"stop_hook_active":true'; then
+  printf '%s' '{"decision":"continue"}'
+else
+  printf '%s' '{"decision":"block","reason":"runtime auto command checkpoint"}'
+fi
 "#,
     )?;
+    let script = write_notify_script(&format!(
+        "#!/bin/bash\nset -euo pipefail\nif [ -f \"{once_marker_str}\" ]; then\n  printf '%s' '{{\"actions\":[]}}'\nelse\n  : > \"{once_marker_str}\"\n  printf '%s' '{{\"actions\":[{{\"type\":\"auto_user_reply\",\"message\":\"continue after stop delivery\"}}]}}'\nfi\n"
+    ))?;
+    let stop_command = format!("bash {stop_script}");
 
     let test = TestCodexHarness::with_builder(
-        core_test_support::test_codex::test_codex().with_config(move |cfg| {
-            cfg.notify = Some(vec![script]);
-        }),
+        core_test_support::test_codex::test_codex()
+            .with_pre_build_hook(move |home| {
+                if let Err(error) = write_stop_hook(home, &stop_command) {
+                    panic!("failed to write stop hook fixture: {error}");
+                }
+            })
+            .with_config(move |cfg| {
+                cfg.notify = Some(vec![script]);
+                cfg.features
+                    .enable(Feature::CodexHooks)
+                    .expect("test config should allow feature update");
+            }),
     )
     .await?;
     let request_log = responses::mount_sse_sequence(
@@ -499,13 +604,17 @@ printf '%s' '{"actions":[{"type":"nero_hook_msg","mode":"synced","show":{"agent"
                 ev_assistant_message("m2", "Done 2"),
                 ev_completed("r2"),
             ]),
+            sse(vec![
+                ev_assistant_message("m3", "Done 3"),
+                ev_completed("r3"),
+            ]),
         ],
     )
     .await;
 
     submit_user_turn_no_wait(
         &test,
-        "contract should allow agent-delivered runtime message",
+        "contract should allow stop-delivered runtime message",
     )
     .await?;
 
@@ -548,7 +657,7 @@ printf '%s' '{"actions":[{"type":"nero_hook_msg","mode":"synced","show":{"agent"
     .await;
     assert!(
         blocked_warning.is_err(),
-        "did not expect delivery-contract warning when runtime message is agent-delivered"
+        "did not expect delivery-contract warning when runtime message is stop-delivered"
     );
 
     let _first_complete = wait_for_event(&test.test().codex, |ev| {
@@ -568,12 +677,12 @@ printf '%s' '{"actions":[{"type":"nero_hook_msg","mode":"synced","show":{"agent"
     );
 
     let requests = request_log.requests();
-    assert_eq!(requests.len(), 2);
-    let second_user_texts = requests[1].message_input_texts("user");
+    assert_eq!(requests.len(), 3);
+    let third_user_texts = requests[2].message_input_texts("user");
     assert!(
-        second_user_texts
+        third_user_texts
             .iter()
-            .any(|text| text.contains("continue after agent delivery")),
+            .any(|text| text.contains("continue after stop delivery")),
         "expected follow-up request to include queued auto_user_reply message"
     );
 
@@ -587,16 +696,38 @@ async fn after_agent_runtime_delivery_contract_observes_msg_auto_ordering_before
     if skip_if_no_linux_sandbox_bin() {
         return Ok(());
     }
-    let script = write_notify_script(
+    let hook_dir = TempDir::new()?;
+    let once_marker = hook_dir.path().join("ordering-contract.once");
+    let once_marker_str = once_marker.to_string_lossy().to_string();
+    let stop_script = write_notify_script(
         r#"#!/bin/bash
-printf '%s' '{"actions":[{"type":"auto_user_reply","message":"continue despite ordering"},{"type":"nero_hook_msg","mode":"synced","show":{"agent":true,"tui":false},"format":"block","status":{"kind":"warning","text":"runtime after auto"},"msg":{"full":"agent runtime after auto","short":"agent runtime after auto short"}}]}'
+set -euo pipefail
+payload="$(cat)"
+if printf '%s' "$payload" | grep -q '"stop_hook_active":true'; then
+  printf '%s' '{"decision":"continue"}'
+else
+  printf '%s' '{"decision":"block","reason":"ordering checkpoint"}'
+fi
 "#,
     )?;
+    let script = write_notify_script(&format!(
+        "#!/bin/bash\nset -euo pipefail\nif [ -f \"{once_marker_str}\" ]; then\n  printf '%s' '{{\"actions\":[]}}'\nelse\n  : > \"{once_marker_str}\"\n  printf '%s' '{{\"actions\":[{{\"type\":\"auto_user_reply\",\"message\":\"continue despite ordering\"}},{{\"type\":\"nero_hook_msg\",\"mode\":\"synced\",\"show\":{{\"agent\":true,\"tui\":false}},\"format\":\"block\",\"status\":{{\"kind\":\"warning\",\"text\":\"runtime after auto\"}},\"msg\":{{\"full\":\"agent runtime after auto\",\"short\":\"agent runtime after auto short\"}}}}]}}'\nfi\n"
+    ))?;
+    let stop_command = format!("bash {stop_script}");
 
     let test = TestCodexHarness::with_builder(
-        core_test_support::test_codex::test_codex().with_config(move |cfg| {
-            cfg.notify = Some(vec![script]);
-        }),
+        core_test_support::test_codex::test_codex()
+            .with_pre_build_hook(move |home| {
+                if let Err(error) = write_stop_hook(home, &stop_command) {
+                    panic!("failed to write stop hook fixture: {error}");
+                }
+            })
+            .with_config(move |cfg| {
+                cfg.notify = Some(vec![script]);
+                cfg.features
+                    .enable(Feature::CodexHooks)
+                    .expect("test config should allow feature update");
+            }),
     )
     .await?;
     let request_log = responses::mount_sse_sequence(
@@ -606,6 +737,10 @@ printf '%s' '{"actions":[{"type":"auto_user_reply","message":"continue despite o
             sse(vec![
                 ev_assistant_message("m2", "Done 2"),
                 ev_completed("r2"),
+            ]),
+            sse(vec![
+                ev_assistant_message("m3", "Done 3"),
+                ev_completed("r3"),
             ]),
         ],
     )
@@ -658,7 +793,7 @@ printf '%s' '{"actions":[{"type":"auto_user_reply","message":"continue despite o
     );
 
     let requests = request_log.requests();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     let first_user_texts = requests[0].message_input_texts("user");
     assert!(
         first_user_texts
@@ -670,9 +805,300 @@ printf '%s' '{"actions":[{"type":"auto_user_reply","message":"continue despite o
     assert!(
         second_user_texts
             .iter()
-            .any(|text| text.contains("continue despite ordering")),
-        "second request should include queued auto_user_reply text"
+            .all(|text| !text.contains("continue despite ordering")),
+        "second request should only carry stop-hook continuation prompt context"
     );
+    let third_user_texts = requests[2].message_input_texts("user");
+    assert!(
+        third_user_texts
+            .iter()
+            .any(|text| text.contains("continue despite ordering")),
+        "third request should include queued auto_user_reply text"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(nero_hook_subagent_env)]
+async fn subagent_session_runs_stop_and_after_agent_but_filters_nero_actions() -> Result<()> {
+    init_test_tracing();
+    if skip_if_no_linux_sandbox_bin() {
+        return Ok(());
+    }
+
+    let hook_dir = TempDir::new()?;
+    let stop_marker = hook_dir.path().join("subagent-stop.marker");
+    let stop_marker_str = stop_marker.to_string_lossy().to_string();
+    let stop_script = write_notify_script(&format!(
+        "#!/bin/bash\n: > \"{stop_marker_str}\"\nprintf '%s' '{{\"systemMessage\":\"stop hook ran\"}}'\n"
+    ))?;
+
+    let after_agent_marker = hook_dir.path().join("subagent-after-agent.marker");
+    let after_agent_marker_str = after_agent_marker.to_string_lossy().to_string();
+    let notify_script = write_notify_script(&format!(
+        "#!/bin/bash\n: > \"{after_agent_marker_str}\"\nprintf '%s' '{{\"actions\":[{{\"type\":\"visible_note\",\"message\":\"subagent visible note\"}},{{\"type\":\"context_note\",\"message\":\"SUBAGENT_CONTEXT_NOTE_BLOCKED\"}},{{\"type\":\"dual_note\",\"tui_message\":\"SUBAGENT_DUAL_TUI_BLOCKED\",\"agent_message\":\"SUBAGENT_DUAL_AGENT_BLOCKED\"}},{{\"type\":\"nero_hook_msg\",\"mode\":\"synced\",\"show\":{{\"agent\":true,\"tui\":true}},\"format\":\"block\",\"msg\":{{\"full\":\"SUBAGENT_NERO_FULL_BLOCKED\",\"short\":\"SUBAGENT_NERO_SHORT_BLOCKED\"}}}},{{\"type\":\"auto_user_reply\",\"message\":\"continue from subagent\"}}]}}'\n"
+    ))?;
+
+    let stop_command = format!("bash {stop_script}");
+    let test = TestCodexHarness::with_builder(
+        core_test_support::test_codex::test_codex()
+            .with_pre_build_hook(move |home| {
+                if let Err(error) = write_stop_hook(home, &stop_command) {
+                    panic!("failed to write stop hook fixture: {error}");
+                }
+            })
+            .with_session_source(SessionSource::SubAgent(SubAgentSource::Other(
+                "hook-msg-v2".to_string(),
+            )))
+            .with_config(move |cfg| {
+                cfg.notify = Some(vec![notify_script]);
+                cfg.features
+                    .enable(Feature::CodexHooks)
+                    .expect("test config should allow feature update");
+            }),
+    )
+    .await?;
+
+    let request_log = responses::mount_sse_once(
+        test.server(),
+        sse(vec![ev_assistant_message("m1", "Done"), ev_completed("r1")]),
+    )
+    .await;
+
+    submit_user_turn_no_wait(&test, "subagent stop and filter check").await?;
+    fs_wait::wait_for_path_exists(&stop_marker, Duration::from_secs(5)).await?;
+    fs_wait::wait_for_path_exists(&after_agent_marker, Duration::from_secs(5)).await?;
+
+    let after_agent_completed = tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_event(&test.test().codex, |ev| {
+            matches!(ev, EventMsg::HookCompleted(event)
+                if event.run.event_name == codex_protocol::protocol::HookEventName::AfterAgent)
+        }),
+    )
+    .await;
+    assert!(
+        after_agent_completed.is_ok(),
+        "expected after_agent hook completion for subagent session"
+    );
+
+    let visible_warning = tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_event(&test.test().codex, |ev| {
+            matches!(ev, EventMsg::Warning(w)
+                if w.message.contains("[nero-hook] subagent visible note"))
+        }),
+    )
+    .await;
+    assert!(
+        visible_warning.is_ok(),
+        "expected visible_note to remain active for subagent after_agent hooks"
+    );
+
+    let _complete = wait_for_event(&test.test().codex, |ev| {
+        matches!(ev, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(300),
+            wait_for_event(&test.test().codex, |ev| {
+                matches!(ev, EventMsg::TurnComplete(_))
+            }),
+        )
+        .await
+        .is_err(),
+        "did not expect follow-up turn completion from subagent auto_user_reply"
+    );
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(300),
+            wait_for_event(&test.test().codex, |ev| {
+                matches!(ev, EventMsg::Warning(w)
+                    if w.message.contains("SUBAGENT_DUAL_TUI_BLOCKED")
+                        || w.message.contains("SUBAGENT_NERO_FULL_BLOCKED")
+                        || w.message.contains("SUBAGENT_NERO_SHORT_BLOCKED"))
+            }),
+        )
+        .await
+        .is_err(),
+        "did not expect filtered subagent Nero actions to emit warnings"
+    );
+    assert_eq!(request_log.requests().len(), 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_agent_msg_context_dual_note_do_not_inject_agent_hook_prompts() -> Result<()> {
+    init_test_tracing();
+    if skip_if_no_linux_sandbox_bin() {
+        return Ok(());
+    }
+    let hook_dir = TempDir::new()?;
+    let once_marker = hook_dir.path().join("injection-check.once");
+    let once_marker_str = once_marker.to_string_lossy().to_string();
+    let stop_script = write_notify_script(
+        r#"#!/bin/bash
+set -euo pipefail
+payload="$(cat)"
+if printf '%s' "$payload" | grep -q '"stop_hook_active":true'; then
+  printf '%s' '{"decision":"continue"}'
+else
+  printf '%s' '{"decision":"block","reason":"injection-checkpoint"}'
+fi
+"#,
+    )?;
+    let script = write_notify_script(&format!(
+        "#!/bin/bash\nset -euo pipefail\nif [ -f \"{once_marker_str}\" ]; then\n  printf '%s' '{{\"actions\":[]}}'\nelse\n  : > \"{once_marker_str}\"\n  printf '%s' '{{\"actions\":[{{\"type\":\"context_note\",\"message\":\"CTX_STOP_CENTRIC_TOKEN\"}},{{\"type\":\"dual_note\",\"tui_message\":\"DUAL_TUI_TOKEN\",\"agent_message\":\"DUAL_AGENT_TOKEN\"}},{{\"type\":\"nero_hook_msg\",\"mode\":\"synced\",\"show\":{{\"agent\":true,\"tui\":false}},\"format\":\"inline\",\"msg\":{{\"full\":\"NERO_AGENT_TOKEN\",\"short\":\"NERO_SHORT_TOKEN\"}}}},{{\"type\":\"auto_user_reply\",\"message\":\"continue stop-centric\"}}]}}'\nfi\n"
+    ))?;
+    let stop_command = format!("bash {stop_script}");
+
+    let test = TestCodexHarness::with_builder(
+        core_test_support::test_codex::test_codex()
+            .with_pre_build_hook(move |home| {
+                if let Err(error) = write_stop_hook(home, &stop_command) {
+                    panic!("failed to write stop hook fixture: {error}");
+                }
+            })
+            .with_config(move |cfg| {
+                cfg.notify = Some(vec![script]);
+                cfg.features
+                    .enable(Feature::CodexHooks)
+                    .expect("test config should allow feature update");
+            }),
+    )
+    .await?;
+
+    let request_log = responses::mount_sse_sequence(
+        test.server(),
+        vec![
+            sse(vec![ev_assistant_message("m1", "Done"), ev_completed("r1")]),
+            sse(vec![
+                ev_assistant_message("m2", "Done 2"),
+                ev_completed("r2"),
+            ]),
+            sse(vec![
+                ev_assistant_message("m3", "Done 3"),
+                ev_completed("r3"),
+            ]),
+        ],
+    )
+    .await;
+
+    submit_user_turn_no_wait(&test, "stop-centric injection check").await?;
+
+    let _first_complete = wait_for_event(&test.test().codex, |ev| {
+        matches!(ev, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let second_complete = tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_event(&test.test().codex, |ev| {
+            matches!(ev, EventMsg::TurnComplete(_))
+        }),
+    )
+    .await;
+    assert!(
+        second_complete.is_ok(),
+        "expected second TurnComplete from auto_user_reply follow-up"
+    );
+
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 3);
+    let developer_texts: Vec<String> = requests
+        .iter()
+        .flat_map(|request| request.message_input_texts("developer"))
+        .collect();
+    assert!(
+        developer_texts
+            .iter()
+            .all(|text| !text.contains("CTX_STOP_CENTRIC_TOKEN")),
+        "context_note must not inject hook prompt into developer history"
+    );
+    assert!(
+        developer_texts
+            .iter()
+            .all(|text| !text.contains("DUAL_AGENT_TOKEN")),
+        "dual_note agent message must not inject hook prompt into developer history"
+    );
+    assert!(
+        developer_texts
+            .iter()
+            .all(|text| !text.contains("NERO_AGENT_TOKEN")),
+        "nero_hook_msg agent delivery must not inject hook prompt into developer history"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(nero_hook_subagent_env)]
+async fn after_agent_auto_user_reply_stays_blocked_for_subagent_session() -> Result<()> {
+    init_test_tracing();
+    if skip_if_no_linux_sandbox_bin() {
+        return Ok(());
+    }
+
+    let script = write_notify_script(
+        r#"#!/bin/bash
+printf '%s' '{"actions":[{"type":"auto_user_reply","message":"continue from subagent"}]}'
+"#,
+    )?;
+
+    let test = TestCodexHarness::with_builder(
+        core_test_support::test_codex::test_codex()
+            .with_session_source(SessionSource::SubAgent(SubAgentSource::Other(
+                "hook-msg-v2".to_string(),
+            )))
+            .with_config(move |cfg| {
+                cfg.notify = Some(vec![script]);
+            }),
+    )
+    .await?;
+
+    let request_log = responses::mount_sse_sequence(
+        test.server(),
+        vec![sse(vec![
+            ev_assistant_message("m1", "Done"),
+            ev_completed("r1"),
+        ])],
+    )
+    .await;
+
+    submit_user_turn_no_wait(&test, "subagent auto block check").await?;
+
+    let hook_completed = tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_event(&test.test().codex, |ev| {
+            matches!(ev, EventMsg::HookCompleted(event)
+                if event.run.event_name == codex_protocol::protocol::HookEventName::AfterAgent)
+        }),
+    )
+    .await;
+    assert!(
+        hook_completed.is_ok(),
+        "expected after_agent hook execution for subagent session"
+    );
+
+    let _first_complete = wait_for_event(&test.test().codex, |ev| {
+        matches!(ev, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let second_complete = tokio::time::timeout(
+        Duration::from_millis(300),
+        wait_for_event(&test.test().codex, |ev| {
+            matches!(ev, EventMsg::TurnComplete(_))
+        }),
+    )
+    .await;
+    assert!(
+        second_complete.is_err(),
+        "did not expect follow-up turn completion for subagent auto_user_reply"
+    );
+    assert_eq!(request_log.requests().len(), 1);
 
     Ok(())
 }

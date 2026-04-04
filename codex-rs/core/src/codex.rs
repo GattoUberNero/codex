@@ -96,7 +96,6 @@ use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::dynamic_tools::DynamicToolResponse;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
-use codex_protocol::items::HookPromptFragment;
 use codex_protocol::items::PlanItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
@@ -506,16 +505,6 @@ fn nero_hook_prefixed_message(message: String) -> String {
     }
 }
 
-fn after_agent_hook_prompt_message(
-    hook_name: &str,
-    turn_id: &str,
-    action_seq: usize,
-    text: String,
-) -> Option<ResponseItem> {
-    let hook_run_id = format!("after-agent:{hook_name}:{turn_id}:{action_seq}");
-    build_hook_prompt_message(&[HookPromptFragment::from_single_hook(text, hook_run_id)])
-}
-
 fn nero_hook_tui_warning_message(
     content: &str,
     format: NeroHookMsgFormat,
@@ -565,10 +554,6 @@ fn normalized_nero_hook_status_kind(
     status: Option<&codex_hooks::NeroHookMsgStatus>,
 ) -> Option<String> {
     status.map(|item| item.kind.trim().to_ascii_lowercase())
-}
-
-fn is_runtime_delivery_status_kind(status_kind: Option<&str>) -> bool {
-    !matches!(status_kind, Some("state") | Some("auto"))
 }
 
 struct LegacyNeroHookTuiDelivery {
@@ -1709,18 +1694,6 @@ fn clamp_nero_auto_runtime(runtime: NeroAutoRuntimeConfig) -> NeroAutoRuntimeCon
 
 fn session_source_disables_nero_auto(session_source: &SessionSource) -> bool {
     matches!(session_source, SessionSource::SubAgent(_))
-}
-
-fn session_source_allows_after_agent_hooks(session_source: &SessionSource) -> bool {
-    if !matches!(session_source, SessionSource::SubAgent(_)) {
-        return true;
-    }
-    matches!(
-        std::env::var("CODEXN_NERO_HOOK_ALLOW_SUBAGENT")
-            .ok()
-            .map(|value| value.trim().to_ascii_lowercase()),
-        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on")
-    )
 }
 
 fn effective_nero_auto_runtime(
@@ -7999,6 +7972,7 @@ pub(crate) async fn run_turn(
         .await;
     let mut last_agent_message: Option<String> = None;
     let mut stop_hook_active = false;
+    let mut stop_runtime_command_delivered_for_turn = false;
     // Although from the perspective of codex.rs, TurnDiffTracker has the lifecycle of a Task which contains
     // many turns, from the perspective of the user, it is a single turn.
     let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
@@ -8177,8 +8151,6 @@ pub(crate) async fn run_turn(
                         .join("log")
                         .join(NERO_HOOK_DELIVERY_LOG_FILENAME);
                     let configured_after_agent_hooks = sess.hooks().after_agent_hook_count();
-                    let after_agent_hooks_skipped_for_subagent =
-                        !session_source_allows_after_agent_hooks(&turn_context.session_source);
                     let (hook_thread_name, hook_nero_auto_runtime) = {
                         let state = sess.state.lock().await;
                         (
@@ -8197,98 +8169,83 @@ pub(crate) async fn run_turn(
                         | AskForApproval::Granular(_) => "default",
                     }
                     .to_string();
-                    if after_agent_hooks_skipped_for_subagent {
-                        debug!(
-                            turn_id = %turn_context.sub_id,
-                            session_source = %turn_context.session_source,
-                            "skipping stop hooks for subagent session source"
-                        );
-                    } else {
-                        let stop_request = codex_hooks::StopRequest {
-                            session_id: sess.conversation_id,
-                            turn_id: turn_context.sub_id.clone(),
-                            cwd: turn_context.cwd.to_path_buf(),
-                            transcript_path: sess.hook_transcript_path().await,
-                            model: turn_context.model_info.slug.clone(),
-                            permission_mode: stop_hook_permission_mode,
-                            stop_hook_active,
-                            last_assistant_message: last_agent_message.clone(),
-                        };
-                        for run in sess.hooks().preview_stop(&stop_request) {
+                    let stop_request = codex_hooks::StopRequest {
+                        session_id: sess.conversation_id,
+                        turn_id: turn_context.sub_id.clone(),
+                        cwd: turn_context.cwd.to_path_buf(),
+                        transcript_path: sess.hook_transcript_path().await,
+                        model: turn_context.model_info.slug.clone(),
+                        permission_mode: stop_hook_permission_mode,
+                        stop_hook_active,
+                        last_assistant_message: last_agent_message.clone(),
+                    };
+                    for run in sess.hooks().preview_stop(&stop_request) {
+                        sess.send_event(
+                            &turn_context,
+                            EventMsg::HookStarted(crate::protocol::HookStartedEvent {
+                                turn_id: Some(turn_context.sub_id.clone()),
+                                run,
+                            }),
+                        )
+                        .await;
+                    }
+                    let stop_outcome = sess.hooks().run_stop(stop_request).await;
+                    for completed in stop_outcome.hook_events {
+                        sess.send_event(&turn_context, EventMsg::HookCompleted(completed))
+                            .await;
+                    }
+                    if stop_outcome.should_block {
+                        if let Some(hook_prompt_message) =
+                            build_hook_prompt_message(&stop_outcome.continuation_fragments)
+                        {
+                            sess.record_conversation_items(
+                                &turn_context,
+                                std::slice::from_ref(&hook_prompt_message),
+                            )
+                            .await;
+                            stop_runtime_command_delivered_for_turn = true;
+                            stop_hook_active = true;
+                            continue;
+                        } else {
+                            warn!(
+                                turn_id = %turn_context.sub_id,
+                                "stop hook requested continuation but no prompt could be built; aborting turn (fail-closed)"
+                            );
                             sess.send_event(
                                 &turn_context,
-                                EventMsg::HookStarted(crate::protocol::HookStartedEvent {
-                                    turn_id: Some(turn_context.sub_id.clone()),
-                                    run,
+                                EventMsg::Error(ErrorEvent {
+                                    message: "Stop hook requested continuation without a prompt; aborting turn.".to_string(),
+                                    codex_error_info: None,
                                 }),
                             )
                             .await;
-                        }
-                        let stop_outcome = sess.hooks().run_stop(stop_request).await;
-                        for completed in stop_outcome.hook_events {
-                            sess.send_event(&turn_context, EventMsg::HookCompleted(completed))
-                                .await;
-                        }
-                        if stop_outcome.should_block {
-                            if let Some(hook_prompt_message) =
-                                build_hook_prompt_message(&stop_outcome.continuation_fragments)
-                            {
-                                sess.record_conversation_items(
-                                    &turn_context,
-                                    std::slice::from_ref(&hook_prompt_message),
-                                )
-                                .await;
-                                stop_hook_active = true;
-                                continue;
-                            } else {
-                                warn!(
-                                    turn_id = %turn_context.sub_id,
-                                    "stop hook requested continuation but no prompt could be built; aborting turn (fail-closed)"
-                                );
-                                sess.send_event(
-                                    &turn_context,
-                                    EventMsg::Error(ErrorEvent {
-                                        message: "Stop hook requested continuation without a prompt; aborting turn.".to_string(),
-                                        codex_error_info: None,
-                                    }),
-                                )
-                                .await;
-                                return None;
-                            }
-                        }
-                        if stop_outcome.should_stop {
-                            break;
+                            return None;
                         }
                     }
-                    let hook_outcomes = if after_agent_hooks_skipped_for_subagent {
-                        debug!(
-                            turn_id = %turn_context.sub_id,
-                            session_source = %turn_context.session_source,
-                            "skipping after_agent hooks for subagent session source"
-                        );
-                        Vec::new()
-                    } else {
-                        sess.hooks()
-                            .dispatch(HookPayload {
-                                session_id: sess.conversation_id,
-                                cwd: turn_context.cwd.to_path_buf(),
-                                client: turn_context.app_server_client_name.clone(),
-                                session_source: Some(turn_context.session_source.to_string()),
-                                session_agent_role: turn_context.session_source.get_agent_role(),
-                                nero_auto_runtime: Some(hook_nero_auto_runtime),
-                                triggered_at: chrono::Utc::now(),
-                                hook_event: HookEvent::AfterAgent {
-                                    event: HookEventAfterAgent {
-                                        thread_id: sess.conversation_id,
-                                        thread_name: hook_thread_name,
-                                        turn_id: turn_context.sub_id.clone(),
-                                        input_messages: sampling_request_input_messages,
-                                        last_assistant_message: last_agent_message.clone(),
-                                    },
+                    if stop_outcome.should_stop {
+                        break;
+                    }
+                    let hook_outcomes = sess
+                        .hooks()
+                        .dispatch(HookPayload {
+                            session_id: sess.conversation_id,
+                            cwd: turn_context.cwd.to_path_buf(),
+                            client: turn_context.app_server_client_name.clone(),
+                            session_source: Some(turn_context.session_source.to_string()),
+                            session_agent_role: turn_context.session_source.get_agent_role(),
+                            nero_auto_runtime: Some(hook_nero_auto_runtime),
+                            triggered_at: chrono::Utc::now(),
+                            hook_event: HookEvent::AfterAgent {
+                                event: HookEventAfterAgent {
+                                    thread_id: sess.conversation_id,
+                                    thread_name: hook_thread_name,
+                                    turn_id: turn_context.sub_id.clone(),
+                                    input_messages: sampling_request_input_messages,
+                                    last_assistant_message: last_agent_message.clone(),
                                 },
-                            })
-                            .await
-                    };
+                            },
+                        })
+                        .await;
                     debug!(
                         turn_id = %turn_context.sub_id,
                         hook_outcomes = hook_outcomes.len(),
@@ -8307,9 +8264,7 @@ pub(crate) async fn run_turn(
                         });
                     let all_after_agent_hooks_failed = configured_after_agent_hooks > 0
                         && failed_hook_outcomes == hook_outcomes.len();
-                    let hook_dispatch_status = if after_agent_hooks_skipped_for_subagent {
-                        "skipped_subagent_session"
-                    } else if configured_after_agent_hooks == 0 {
+                    let hook_dispatch_status = if configured_after_agent_hooks == 0 {
                         "no_hooks_configured"
                     } else if hook_outcomes.is_empty() {
                         "no_outcomes"
@@ -8333,7 +8288,6 @@ pub(crate) async fn run_turn(
                             "configured_after_agent_hooks": configured_after_agent_hooks,
                             "hook_outcomes": hook_outcomes.len(),
                             "failed_hook_outcomes": failed_hook_outcomes,
-                            "after_agent_hooks_skipped_for_subagent": after_agent_hooks_skipped_for_subagent,
                             "session_source": turn_context.session_source.to_string(),
                             "hook_runtime_auto_enabled": hook_nero_auto_runtime.enabled,
                             "hook_runtime_auto_autonomy_level": hook_nero_auto_runtime.autonomy_level,
@@ -8357,6 +8311,7 @@ pub(crate) async fn run_turn(
 
                     let mut abort_message = None;
                     let mut deferred_auto_user_replies: Vec<(String, String)> = Vec::new();
+                    let mut auto_user_reply_selected_for_turn = false;
                     for hook_outcome in hook_outcomes {
                         let hook_name = hook_outcome.hook_name;
                         let result = hook_outcome.result;
@@ -8369,13 +8324,13 @@ pub(crate) async fn run_turn(
                                 "processing after_agent hook actions"
                             );
                             let mut hook_runtime_msg_expected = false;
-                            let mut hook_runtime_msg_delivered = false;
+                            let hook_runtime_msg_delivered =
+                                stop_runtime_command_delivered_for_turn;
                             let mut hook_nero_msg_total = 0usize;
                             let mut hook_nero_msg_throttled = 0usize;
                             let mut hook_auto_user_replies_pending: Vec<String> = Vec::new();
                             let mut hook_auto_user_replies_blocked = 0usize;
                             let mut hook_auto_user_replies_queued = 0usize;
-                            let mut hook_prompt_action_seq = 0usize;
                             let mut latest_runtime_status_kind_normalized = None::<String>;
                             let mut latest_runtime_status_meta = None::<Value>;
                             let mut legacy_after_agent_summary_entries =
@@ -8390,6 +8345,48 @@ pub(crate) async fn run_turn(
                                         status,
                                         msg,
                                     } => {
+                                        if session_source_disables_nero_auto(
+                                            &turn_context.session_source,
+                                        ) {
+                                            debug!(
+                                                turn_id = %turn_context.sub_id,
+                                                hook_name = %hook_name,
+                                                session_source = %turn_context.session_source,
+                                                "ignored nero_hook_msg hook action for subagent session"
+                                            );
+                                            append_nero_hook_delivery_audit(
+                                                &hook_delivery_log_path,
+                                                &sess.conversation_id,
+                                                turn_context.as_ref(),
+                                                &hook_name,
+                                                "nero_hook_msg",
+                                                "ignored-subagent-session",
+                                                false,
+                                                false,
+                                                json!({
+                                                    "mode": nero_hook_mode_label(&mode),
+                                                    "format": nero_hook_format_label(&format),
+                                                    "freq_seconds": freq,
+                                                    "show": {
+                                                        "agent": show.agent,
+                                                        "tui": show.tui,
+                                                    },
+                                                    "message_len": {
+                                                        "full": msg.full.len(),
+                                                        "short": msg.short.len(),
+                                                    },
+                                                    "status": {
+                                                        "kind": status.as_ref().map(|item| item.kind.clone()),
+                                                        "text": status.as_ref().map(|item| item.text.clone()),
+                                                        "meta": sanitize_nero_hook_status_meta_for_audit(
+                                                            status.as_ref().and_then(|item| item.meta.clone()),
+                                                        ),
+                                                    },
+                                                }),
+                                            )
+                                            .await;
+                                            continue;
+                                        }
                                         hook_nero_msg_total = hook_nero_msg_total.saturating_add(1);
                                         let msg_full_len = msg.full.len();
                                         let msg_short_len = msg.short.len();
@@ -8402,10 +8399,6 @@ pub(crate) async fn run_turn(
                                         );
                                         let status_kind_normalized =
                                             normalized_nero_hook_status_kind(status.as_ref());
-                                        let runtime_delivery_candidate =
-                                            is_runtime_delivery_status_kind(
-                                                status_kind_normalized.as_deref(),
-                                            );
                                         if let Some(remaining) = sess
                                             .nero_hook_msg_throttle_remaining(
                                                 &hook_name,
@@ -8476,22 +8469,19 @@ pub(crate) async fn run_turn(
                                                         "meta": status_meta,
                                                     },
                                                     "delivery_contract": {
-                                                        "runtime_candidate": runtime_delivery_candidate,
                                                         "status_kind_normalized": status_kind_normalized,
+                                                        "stop_runtime_command_delivered": stop_runtime_command_delivered_for_turn,
                                                     },
                                                 }),
                                             )
                                             .await;
                                             continue;
                                         }
-                                        if runtime_delivery_candidate {
-                                            hook_runtime_msg_expected = true;
-                                            latest_runtime_status_kind_normalized =
-                                                status_kind_normalized.clone();
-                                            latest_runtime_status_meta = status_meta.clone();
-                                        }
+                                        latest_runtime_status_kind_normalized =
+                                            status_kind_normalized.clone();
+                                        latest_runtime_status_meta = status_meta.clone();
                                         let mut delivered_tui = false;
-                                        let mut delivered_agent = false;
+                                        let delivered_agent = false;
                                         if show.tui {
                                             let tui_body = match mode {
                                                 NeroHookMsgMode::Synced => msg.full.clone(),
@@ -8516,34 +8506,11 @@ pub(crate) async fn run_turn(
                                             delivered_tui = true;
                                         }
                                         if show.agent {
-                                            let text = nero_hook_prefixed_message(msg.full);
-                                            if let Some(hook_prompt_message) =
-                                                after_agent_hook_prompt_message(
-                                                    &hook_name,
-                                                    &turn_context.sub_id,
-                                                    hook_prompt_action_seq,
-                                                    text,
-                                                )
-                                            {
-                                                hook_prompt_action_seq =
-                                                    hook_prompt_action_seq.saturating_add(1);
-                                                sess.record_conversation_items(
-                                                    &turn_context,
-                                                    std::slice::from_ref(&hook_prompt_message),
-                                                )
-                                                .await;
-                                                delivered_agent = true;
-                                            } else {
-                                                warn!(
-                                                    turn_id = %turn_context.sub_id,
-                                                    hook_name = %hook_name,
-                                                    action_seq = hook_prompt_action_seq,
-                                                    "failed to build after_agent hook prompt for nero_hook_msg"
-                                                );
-                                            }
-                                        }
-                                        if runtime_delivery_candidate && delivered_agent {
-                                            hook_runtime_msg_delivered = true;
+                                            debug!(
+                                                turn_id = %turn_context.sub_id,
+                                                hook_name = %hook_name,
+                                                "ignored agent-facing nero_hook_msg injection in stop-centric flow"
+                                            );
                                         }
                                         debug!(
                                             turn_id = %turn_context.sub_id,
@@ -8554,13 +8521,18 @@ pub(crate) async fn run_turn(
                                             freq,
                                             "executed nero_hook_msg"
                                         );
+                                        let nero_hook_msg_status = if show.agent {
+                                            "executed-agent-ignored-stop-centric"
+                                        } else {
+                                            "executed"
+                                        };
                                         append_nero_hook_delivery_audit(
                                             &hook_delivery_log_path,
                                             &sess.conversation_id,
                                             turn_context.as_ref(),
                                             &hook_name,
                                             "nero_hook_msg",
-                                            "executed",
+                                            nero_hook_msg_status,
                                             delivered_agent,
                                             delivered_tui,
                                             json!({
@@ -8581,9 +8553,9 @@ pub(crate) async fn run_turn(
                                                     "meta": status_meta,
                                                 },
                                                 "delivery_contract": {
-                                                    "runtime_candidate": runtime_delivery_candidate,
                                                     "status_kind_normalized": status_kind_normalized,
                                                     "runtime_delivered_so_far": hook_runtime_msg_delivered,
+                                                    "stop_runtime_command_delivered": stop_runtime_command_delivered_for_turn,
                                                 },
                                             }),
                                         )
@@ -8623,40 +8595,36 @@ pub(crate) async fn run_turn(
                                     }
                                     HookAction::ContextNote { message } => {
                                         let message_len = message.len();
-                                        let text = if message.starts_with("[nero-hook]") {
-                                            message
-                                        } else {
-                                            format!("[nero-hook] {message}")
-                                        };
-                                        let mut delivered_agent = false;
-                                        if let Some(hook_prompt_message) =
-                                            after_agent_hook_prompt_message(
-                                                &hook_name,
-                                                &turn_context.sub_id,
-                                                hook_prompt_action_seq,
-                                                text,
-                                            )
-                                        {
-                                            hook_prompt_action_seq =
-                                                hook_prompt_action_seq.saturating_add(1);
-                                            sess.record_conversation_items(
-                                                &turn_context,
-                                                std::slice::from_ref(&hook_prompt_message),
-                                            )
-                                            .await;
-                                            delivered_agent = true;
-                                        } else {
-                                            warn!(
+                                        if session_source_disables_nero_auto(
+                                            &turn_context.session_source,
+                                        ) {
+                                            debug!(
                                                 turn_id = %turn_context.sub_id,
                                                 hook_name = %hook_name,
-                                                action_seq = hook_prompt_action_seq,
-                                                "failed to build after_agent hook prompt for context_note"
+                                                session_source = %turn_context.session_source,
+                                                "ignored context_note hook action for subagent session"
                                             );
+                                            append_nero_hook_delivery_audit(
+                                                &hook_delivery_log_path,
+                                                &sess.conversation_id,
+                                                turn_context.as_ref(),
+                                                &hook_name,
+                                                "context_note",
+                                                "ignored-subagent-session",
+                                                false,
+                                                false,
+                                                json!({
+                                                    "message_len": message_len,
+                                                }),
+                                            )
+                                            .await;
+                                            continue;
                                         }
+                                        let delivered_agent = false;
                                         debug!(
                                             turn_id = %turn_context.sub_id,
                                             hook_name = %hook_name,
-                                            "recorded context_note hook prompt"
+                                            "ignored context_note agent-facing injection in stop-centric flow"
                                         );
                                         append_nero_hook_delivery_audit(
                                             &hook_delivery_log_path,
@@ -8664,7 +8632,7 @@ pub(crate) async fn run_turn(
                                             turn_context.as_ref(),
                                             &hook_name,
                                             "context_note",
-                                            "executed",
+                                            "ignored-stop-centric",
                                             delivered_agent,
                                             false,
                                             json!({
@@ -8679,8 +8647,36 @@ pub(crate) async fn run_turn(
                                     } => {
                                         let tui_message_len = tui_message.len();
                                         let agent_message_len = agent_message.len();
+                                        if session_source_disables_nero_auto(
+                                            &turn_context.session_source,
+                                        ) {
+                                            debug!(
+                                                turn_id = %turn_context.sub_id,
+                                                hook_name = %hook_name,
+                                                session_source = %turn_context.session_source,
+                                                "ignored dual_note hook action for subagent session"
+                                            );
+                                            append_nero_hook_delivery_audit(
+                                                &hook_delivery_log_path,
+                                                &sess.conversation_id,
+                                                turn_context.as_ref(),
+                                                &hook_name,
+                                                "dual_note",
+                                                "ignored-subagent-session",
+                                                false,
+                                                false,
+                                                json!({
+                                                    "message_len": {
+                                                        "tui": tui_message_len,
+                                                        "agent": agent_message_len,
+                                                    },
+                                                }),
+                                            )
+                                            .await;
+                                            continue;
+                                        }
                                         let delivered_tui = true;
-                                        let mut delivered_agent = false;
+                                        let delivered_agent = false;
                                         let tui_message = if tui_message.starts_with("[nero-hook]")
                                         {
                                             tui_message
@@ -8694,48 +8690,30 @@ pub(crate) async fn run_turn(
                                             }),
                                         )
                                         .await;
-                                        let agent_text = if agent_message.starts_with("[nero-hook]")
-                                        {
-                                            agent_message
-                                        } else {
-                                            format!("[nero-hook] {agent_message}")
-                                        };
-                                        if let Some(hook_prompt_message) =
-                                            after_agent_hook_prompt_message(
-                                                &hook_name,
-                                                &turn_context.sub_id,
-                                                hook_prompt_action_seq,
-                                                agent_text,
-                                            )
-                                        {
-                                            hook_prompt_action_seq =
-                                                hook_prompt_action_seq.saturating_add(1);
-                                            sess.record_conversation_items(
-                                                &turn_context,
-                                                std::slice::from_ref(&hook_prompt_message),
-                                            )
-                                            .await;
-                                            delivered_agent = true;
-                                        } else {
-                                            warn!(
+                                        if !agent_message.is_empty() {
+                                            debug!(
                                                 turn_id = %turn_context.sub_id,
                                                 hook_name = %hook_name,
-                                                action_seq = hook_prompt_action_seq,
-                                                "failed to build after_agent hook prompt for dual_note"
+                                                "ignored dual_note agent-facing injection in stop-centric flow"
                                             );
                                         }
                                         debug!(
                                             turn_id = %turn_context.sub_id,
                                             hook_name = %hook_name,
-                                            "executed dual_note (tui warning + hook prompt)"
+                                            "executed dual_note tui warning"
                                         );
+                                        let dual_note_status = if agent_message.is_empty() {
+                                            "executed"
+                                        } else {
+                                            "executed-agent-ignored-stop-centric"
+                                        };
                                         append_nero_hook_delivery_audit(
                                             &hook_delivery_log_path,
                                             &sess.conversation_id,
                                             turn_context.as_ref(),
                                             &hook_name,
                                             "dual_note",
-                                            "executed",
+                                            dual_note_status,
                                             delivered_agent,
                                             delivered_tui,
                                             json!({
@@ -8776,6 +8754,33 @@ pub(crate) async fn run_turn(
                                             .await;
                                             continue;
                                         }
+                                        if auto_user_reply_selected_for_turn {
+                                            debug!(
+                                                turn_id = %turn_context.sub_id,
+                                                hook_name = %hook_name,
+                                                "ignored duplicate auto_user_reply hook action for current turn"
+                                            );
+                                            append_nero_hook_delivery_audit(
+                                                &hook_delivery_log_path,
+                                                &sess.conversation_id,
+                                                turn_context.as_ref(),
+                                                &hook_name,
+                                                "auto_user_reply",
+                                                "ignored-duplicate-turn",
+                                                false,
+                                                false,
+                                                json!({
+                                                    "message_len": message.len(),
+                                                    "auto_stage": {
+                                                        "stage": "follow_up",
+                                                    },
+                                                }),
+                                            )
+                                            .await;
+                                            continue;
+                                        }
+                                        auto_user_reply_selected_for_turn = true;
+                                        hook_runtime_msg_expected = true;
                                         debug!(
                                             turn_id = %turn_context.sub_id,
                                             hook_name = %hook_name,
@@ -14481,7 +14486,7 @@ mod tests {
     }
 
     #[test]
-    fn normalized_nero_hook_status_kind_marks_state_and_auto_as_non_runtime_delivery() {
+    fn normalized_nero_hook_status_kind_normalizes_case_and_spacing() {
         let state_status = codex_hooks::NeroHookMsgStatus {
             kind: " State ".to_string(),
             text: "healthy".to_string(),
@@ -14505,10 +14510,6 @@ mod tests {
         assert_eq!(state_kind.as_deref(), Some("state"));
         assert_eq!(auto_kind.as_deref(), Some("auto"));
         assert_eq!(warning_kind.as_deref(), Some("warning"));
-        assert!(!is_runtime_delivery_status_kind(state_kind.as_deref()));
-        assert!(!is_runtime_delivery_status_kind(auto_kind.as_deref()));
-        assert!(is_runtime_delivery_status_kind(warning_kind.as_deref()));
-        assert!(is_runtime_delivery_status_kind(None));
     }
 
     #[test]
@@ -14555,31 +14556,6 @@ mod tests {
             })
         );
         assert!(delivery.warning.is_none());
-    }
-
-    #[test]
-    fn after_agent_hook_prompt_message_builds_single_fragment() {
-        let response = after_agent_hook_prompt_message(
-            "nero-hook-runtime",
-            "turn-1",
-            2,
-            "[nero-hook] runtime command".to_string(),
-        )
-        .expect("hook prompt response item");
-
-        let ResponseItem::Message { id, content, .. } = response else {
-            panic!("expected hook prompt response message");
-        };
-        let parsed = codex_protocol::items::parse_hook_prompt_message(id.as_ref(), &content)
-            .expect("parse hook prompt content");
-
-        assert_eq!(
-            parsed.fragments,
-            vec![codex_protocol::items::HookPromptFragment {
-                text: "[nero-hook] runtime command".to_string(),
-                hook_run_id: "after-agent:nero-hook-runtime:turn-1:2".to_string(),
-            }]
-        );
     }
 
     #[test]
