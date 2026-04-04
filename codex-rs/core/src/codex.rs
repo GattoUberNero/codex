@@ -556,7 +556,7 @@ fn normalized_nero_hook_status_kind(
     status.map(|item| item.kind.trim().to_ascii_lowercase())
 }
 
-struct LegacyNeroHookTuiDelivery {
+struct NeroHookTuiDelivery {
     warning: Option<String>,
     hook_summary: Option<codex_protocol::protocol::HookOutputEntry>,
 }
@@ -593,20 +593,20 @@ fn nero_hook_summary_entry_text(
     }
 }
 
-fn legacy_nero_hook_tui_delivery(
+fn nero_hook_tui_delivery(
     tui_body: &str,
     format: NeroHookMsgFormat,
     status: Option<&codex_hooks::NeroHookMsgStatus>,
     status_kind_normalized: Option<&str>,
-) -> LegacyNeroHookTuiDelivery {
+) -> NeroHookTuiDelivery {
     if let Some(status_entry) = status {
         let hook_summary = codex_protocol::protocol::HookOutputEntry {
             kind: nero_hook_summary_entry_kind(status_kind_normalized),
             text: nero_hook_summary_entry_text(tui_body, status_entry),
         };
         let (warning, hook_summary) = match format {
-            // In block mode preserve legacy user-facing block delivery and avoid
-            // duplicate status rendering through the hook summary lane.
+            // In block mode emit the warning payload and avoid duplicate status
+            // rendering through the hook summary lane.
             NeroHookMsgFormat::Block => (
                 Some(nero_hook_tui_warning_message(
                     tui_body,
@@ -617,13 +617,13 @@ fn legacy_nero_hook_tui_delivery(
             ),
             NeroHookMsgFormat::Inline => (None, Some(hook_summary)),
         };
-        return LegacyNeroHookTuiDelivery {
+        return NeroHookTuiDelivery {
             warning,
             hook_summary,
         };
     }
 
-    LegacyNeroHookTuiDelivery {
+    NeroHookTuiDelivery {
         warning: Some(nero_hook_tui_warning_message(
             tui_body,
             format,
@@ -634,13 +634,13 @@ fn legacy_nero_hook_tui_delivery(
 }
 
 fn runtime_delivery_contract_satisfied(
-    runtime_msg_expected: bool,
-    runtime_msg_delivered: bool,
+    stop_checkpoint_required: bool,
+    stop_checkpoint_delivered: bool,
 ) -> bool {
-    !runtime_msg_expected || runtime_msg_delivered
+    !stop_checkpoint_required || stop_checkpoint_delivered
 }
 
-fn runtime_delivery_contract_status(
+fn stop_delivery_contract_status(
     contract_satisfied: bool,
     auto_user_replies_blocked: usize,
 ) -> &'static str {
@@ -649,7 +649,7 @@ fn runtime_delivery_contract_status(
     } else if auto_user_replies_blocked > 0 {
         "fail-closed-blocked"
     } else {
-        "failed-runtime-message-missing"
+        "failed-stop-checkpoint-missing"
     }
 }
 
@@ -674,7 +674,7 @@ fn after_agent_runtime_hook_completed_event(
             handler_type: codex_protocol::protocol::HookHandlerType::Agent,
             execution_mode: codex_protocol::protocol::HookExecutionMode::Sync,
             scope: codex_protocol::protocol::HookScope::Turn,
-            source_path: PathBuf::from(format!("legacy://after_agent/{hook_name}")),
+            source_path: PathBuf::from(format!("hook://after_agent/{hook_name}")),
             display_order: 0,
             status,
             status_message,
@@ -838,8 +838,8 @@ fn after_agent_runtime_hook_summary_meta(
     status_kind_normalized: Option<String>,
     status_meta: Option<Value>,
     protocol_status: &str,
-    runtime_msg_expected: bool,
-    runtime_msg_delivered: bool,
+    stop_checkpoint_required: bool,
+    stop_checkpoint_delivered: bool,
     contract_satisfied: bool,
     nero_hook_msg_total: usize,
     nero_hook_msg_throttled: usize,
@@ -863,8 +863,8 @@ fn after_agent_runtime_hook_summary_meta(
         },
         "protocol": {
             "status": protocol_status,
-            "runtime_msg_expected": runtime_msg_expected,
-            "runtime_msg_delivered": runtime_msg_delivered,
+            "runtime_msg_expected": stop_checkpoint_required,
+            "runtime_msg_delivered": stop_checkpoint_delivered,
             "contract_satisfied": contract_satisfied,
             "nero_hook_msg_total": nero_hook_msg_total,
             "nero_hook_msg_throttled": nero_hook_msg_throttled,
@@ -8333,7 +8333,7 @@ pub(crate) async fn run_turn(
                             let mut hook_auto_user_replies_queued = 0usize;
                             let mut latest_runtime_status_kind_normalized = None::<String>;
                             let mut latest_runtime_status_meta = None::<Value>;
-                            let mut legacy_after_agent_summary_entries =
+                            let mut after_agent_summary_entries =
                                 Vec::<codex_protocol::protocol::HookOutputEntry>::new();
                             for action in actions {
                                 match action {
@@ -8487,7 +8487,7 @@ pub(crate) async fn run_turn(
                                                 NeroHookMsgMode::Synced => msg.full.clone(),
                                                 NeroHookMsgMode::TuiShort => msg.short.clone(),
                                             };
-                                            let delivery = legacy_nero_hook_tui_delivery(
+                                            let delivery = nero_hook_tui_delivery(
                                                 &tui_body,
                                                 format,
                                                 status.as_ref(),
@@ -8501,7 +8501,7 @@ pub(crate) async fn run_turn(
                                                 .await;
                                             }
                                             if let Some(entry) = delivery.hook_summary {
-                                                legacy_after_agent_summary_entries.push(entry);
+                                                after_agent_summary_entries.push(entry);
                                             }
                                             delivered_tui = true;
                                         }
@@ -8891,7 +8891,7 @@ pub(crate) async fn run_turn(
                                     }
                                 }
                             }
-                            let contract_status = runtime_delivery_contract_status(
+                            let contract_status = stop_delivery_contract_status(
                                 hook_delivery_contract_satisfied,
                                 hook_auto_user_replies_blocked,
                             );
@@ -8917,7 +8917,7 @@ pub(crate) async fn run_turn(
                                 }),
                             )
                             .await;
-                            let has_runtime_signal = !legacy_after_agent_summary_entries.is_empty()
+                            let has_runtime_signal = !after_agent_summary_entries.is_empty()
                                 || latest_runtime_status_kind_normalized.is_some()
                                 || latest_runtime_status_meta.is_some()
                                 || hook_runtime_msg_expected
@@ -8964,7 +8964,7 @@ pub(crate) async fn run_turn(
                                 runtime_event_status,
                                 runtime_event_status_message,
                                 runtime_summary_meta,
-                                legacy_after_agent_summary_entries,
+                                after_agent_summary_entries,
                             ) {
                                 sess.send_event(&turn_context, EventMsg::HookCompleted(event))
                                     .await;
@@ -14520,7 +14520,7 @@ mod tests {
             meta: None,
         };
 
-        let delivery = legacy_nero_hook_tui_delivery(
+        let delivery = nero_hook_tui_delivery(
             "NERO HOOK SYSTEM",
             NeroHookMsgFormat::Block,
             Some(&status),
@@ -14541,7 +14541,7 @@ mod tests {
             meta: None,
         };
 
-        let delivery = legacy_nero_hook_tui_delivery(
+        let delivery = nero_hook_tui_delivery(
             "NERO HOOK SYSTEM",
             NeroHookMsgFormat::Inline,
             Some(&status),
@@ -14611,7 +14611,7 @@ mod tests {
         assert_eq!(event.run.scope, codex_protocol::protocol::HookScope::Turn);
         assert_eq!(
             event.run.source_path,
-            PathBuf::from("legacy://after_agent/nero-hook-runtime")
+            PathBuf::from("hook://after_agent/nero-hook-runtime")
         );
         assert_eq!(
             event.run.status,
