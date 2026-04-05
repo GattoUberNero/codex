@@ -99,7 +99,7 @@ Key areas:
 - `codex-rs/hooks/src/engine/dispatcher.rs`
 - `codex-rs/hooks/src/events/*.rs`
 - `codex-rs/hooks/src/response.rs`
-- `codex-rs/hooks/src/legacy_notify.rs`
+- `codex-rs/hooks/src/user_notification.rs`
 
 Structural split:
 
