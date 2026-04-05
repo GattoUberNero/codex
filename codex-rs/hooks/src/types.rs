@@ -11,7 +11,7 @@ use futures::future::BoxFuture;
 use serde::Serialize;
 use serde::Serializer;
 
-use crate::response::HookAction;
+use crate::response::NeroHookAction;
 
 pub type HookFn =
     Arc<dyn for<'a> Fn(&'a HookPayload) -> BoxFuture<'a, HookExecution> + Send + Sync>;
@@ -19,7 +19,7 @@ pub type HookFn =
 #[derive(Debug)]
 pub struct HookExecution {
     pub result: HookResult,
-    pub actions: Vec<HookAction>,
+    pub actions: Vec<NeroHookAction>,
 }
 
 #[derive(Debug, Default)]
@@ -45,7 +45,7 @@ impl HookResult {
 pub struct HookResponse {
     pub hook_name: String,
     pub result: HookResult,
-    pub actions: Vec<HookAction>,
+    pub actions: Vec<NeroHookAction>,
 }
 
 #[derive(Clone)]

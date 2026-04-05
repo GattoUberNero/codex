@@ -28,9 +28,9 @@ use crate::compact::InitialContextInjection;
 use crate::compact::run_inline_auto_compact_task;
 use crate::compact::should_use_remote_compact_task;
 use crate::compact_remote::run_inline_remote_auto_compact_task;
-use crate::config::CodexnForkModelFallbackConfig;
-use crate::config::CodexnForkModelFallbackStep;
 use crate::config::ManagedFeatures;
+use crate::config::NeroModelFallbackConfig;
+use crate::config::NeroModelFallbackStep;
 use crate::connectors;
 use crate::exec_policy::ExecPolicyManager;
 #[cfg(test)]
@@ -71,13 +71,13 @@ use codex_exec_server::EnvironmentManager;
 use codex_features::FEATURES;
 use codex_features::Feature;
 use codex_features::unstable_features_warning_event;
-use codex_hooks::HookAction;
 use codex_hooks::HookEvent;
 use codex_hooks::HookEventAfterAgent;
 use codex_hooks::HookPayload;
 use codex_hooks::HookResult;
 use codex_hooks::Hooks;
 use codex_hooks::HooksConfig;
+use codex_hooks::NeroHookAction;
 use codex_hooks::NeroHookMsgFormat;
 use codex_network_proxy::NetworkProxy;
 use codex_network_proxy::NetworkProxyAuditMetadata;
@@ -1101,13 +1101,13 @@ impl Codex {
         };
 
         let model_fallback_resolution =
-            crate::config::resolve_codexn_fork_model_fallback_from_env(&session_source)
+            crate::config::resolve_nero_model_fallback_from_env(&session_source)
                 .unwrap_or_else(|err| {
                     warn!(
                         error = %err,
-                        "failed to resolve codexn fork model fallback from env; disabling feature"
+                        "failed to resolve nero model fallback from env; disabling feature"
                     );
-                    crate::config::CodexnForkModelFallbackResolution {
+                    crate::config::NeroModelFallbackResolution {
                         config: None,
                         warning: Some(
                             "Failed to load [nero.model_fallback] from CODEXN_CONFIG_NERO_* overlays; fallback is disabled for this session.".to_string(),
@@ -1471,7 +1471,7 @@ pub(crate) struct TurnContext {
     pub(crate) compact_prompt: Option<String>,
     pub(crate) user_instructions: Option<String>,
     pub(crate) collaboration_mode: CollaborationMode,
-    pub(crate) model_fallback: Option<CodexnForkModelFallbackConfig>,
+    pub(crate) model_fallback: Option<NeroModelFallbackConfig>,
     pub(crate) personality: Option<Personality>,
     pub(crate) approval_policy: Constrained<AskForApproval>,
     pub(crate) sandbox_policy: Constrained<SandboxPolicy>,
@@ -1710,7 +1710,7 @@ fn effective_nero_auto_runtime(
 fn model_fallback_rotated_indices(
     ladder_len: usize,
     start_model: Option<&str>,
-    ladder: &[CodexnForkModelFallbackStep],
+    ladder: &[NeroModelFallbackStep],
 ) -> Vec<usize> {
     if ladder_len == 0 {
         return Vec::new();
@@ -1729,11 +1729,11 @@ fn model_fallback_rotated_indices(
 }
 
 fn next_available_model_fallback_step(
-    ladder: &[CodexnForkModelFallbackStep],
+    ladder: &[NeroModelFallbackStep],
     start_after_model: Option<&str>,
     now: StdInstant,
     cooldown_remaining: impl Fn(&str, StdInstant) -> Option<StdDuration>,
-) -> Option<CodexnForkModelFallbackStep> {
+) -> Option<NeroModelFallbackStep> {
     let indices = model_fallback_rotated_indices(ladder.len(), start_after_model, ladder);
     let skip_current_model = start_after_model.map(str::to_string);
     for index in indices {
@@ -1781,7 +1781,7 @@ fn model_fallback_reasoning_label(effort: Option<ReasoningEffortConfig>) -> Opti
 
 enum ModelFallbackAfterErrorOutcome {
     Noop,
-    Switched(Arc<TurnContext>, CodexnForkModelFallbackStep),
+    Switched(Arc<TurnContext>, NeroModelFallbackStep),
     Exhausted,
     DisabledOverflow,
 }
@@ -1834,7 +1834,7 @@ pub(crate) struct SessionConfiguration {
     /// Source of the session (cli, vscode, exec, mcp, ...)
     session_source: SessionSource,
     nero_auto_runtime: NeroAutoRuntimeConfig,
-    nero_model_fallback: Option<CodexnForkModelFallbackConfig>,
+    nero_model_fallback: Option<NeroModelFallbackConfig>,
     dynamic_tools: Vec<DynamicToolSpec>,
     persist_extended_history: bool,
     inherited_shell_snapshot: Option<Arc<ShellSnapshot>>,
@@ -3733,8 +3733,8 @@ impl Session {
 
     async fn mark_model_fallback_success(
         &self,
-        model_fallback: &CodexnForkModelFallbackConfig,
-        step: &CodexnForkModelFallbackStep,
+        model_fallback: &NeroModelFallbackConfig,
+        step: &NeroModelFallbackStep,
     ) {
         let mut state = self.state.lock().await;
         let runtime = &mut state.model_fallback_runtime;
@@ -7980,7 +7980,7 @@ pub(crate) async fn run_turn(
     let mut fallback_wait_deadline: Option<StdInstant> = None;
     let mut pending_fallback_success_step: Option<(
         String,
-        CodexnForkModelFallbackStep,
+        NeroModelFallbackStep,
         Option<ReasoningEffortConfig>,
         String,
     )> = None;
@@ -8337,7 +8337,7 @@ pub(crate) async fn run_turn(
                                 Vec::<codex_protocol::protocol::HookOutputEntry>::new();
                             for action in actions {
                                 match action {
-                                    HookAction::NeroHookMsg {
+                                    NeroHookAction::NeroHookMsg {
                                         mode,
                                         show,
                                         freq,
@@ -8561,7 +8561,7 @@ pub(crate) async fn run_turn(
                                         )
                                         .await;
                                     }
-                                    HookAction::VisibleNote { message } => {
+                                    NeroHookAction::VisibleNote { message } => {
                                         let message_len = message.len();
                                         let message = if message.starts_with("[nero-hook]") {
                                             message
@@ -8593,7 +8593,7 @@ pub(crate) async fn run_turn(
                                         )
                                         .await;
                                     }
-                                    HookAction::AutoUserReply { message } => {
+                                    NeroHookAction::AutoUserReply { message } => {
                                         if session_source_blocks_nero_msg_auto_lane(
                                             &turn_context.session_source,
                                         ) {
@@ -15059,15 +15059,15 @@ mod tests {
     #[test]
     fn next_available_model_fallback_step_respects_rotation_and_cooldown() {
         let ladder = vec![
-            CodexnForkModelFallbackStep {
+            NeroModelFallbackStep {
                 model: "model-a".to_string(),
                 reasoning_effort: ReasoningEffortConfig::High,
             },
-            CodexnForkModelFallbackStep {
+            NeroModelFallbackStep {
                 model: "model-b".to_string(),
                 reasoning_effort: ReasoningEffortConfig::Medium,
             },
-            CodexnForkModelFallbackStep {
+            NeroModelFallbackStep {
                 model: "model-c".to_string(),
                 reasoning_effort: ReasoningEffortConfig::Low,
             },

@@ -238,7 +238,7 @@ fn collab_receiver_thread_ids(notification: &ServerNotification) -> Option<&[Str
     }
 }
 
-fn nero_auto_runtime_from_session_auto_state(
+fn nero_auto_runtime_from_authority_state(
     state: &ThreadSessionAutoState,
 ) -> codex_protocol::protocol::NeroAutoRuntimeConfig {
     codex_protocol::protocol::NeroAutoRuntimeConfig {
@@ -248,13 +248,15 @@ fn nero_auto_runtime_from_session_auto_state(
     }
 }
 
-fn session_auto_authority_mode_label(authority: ThreadSessionAutoAuthorityMode) -> &'static str {
+fn nero_session_auto_authority_mode_label(
+    authority: ThreadSessionAutoAuthorityMode,
+) -> &'static str {
     match authority {
         ThreadSessionAutoAuthorityMode::BridgeProxy => "bridgeProxy",
     }
 }
 
-fn session_auto_authority_context(
+fn nero_session_auto_authority_context(
     thread_id: &str,
     authority: ThreadSessionAutoAuthorityMode,
     state: &ThreadSessionAutoState,
@@ -262,18 +264,18 @@ fn session_auto_authority_context(
     let session_source: SessionSource = state.session_source.clone().into();
     format!(
         "Authority context: thread-id={thread_id}, authority={}, session-source={}, config-path={}, state-path={}",
-        session_auto_authority_mode_label(authority),
+        nero_session_auto_authority_mode_label(authority),
         session_source,
         state.config_path.display(),
         state.state_path.display()
     )
 }
 
-fn session_auto_state_matches_requested_target(
+fn nero_session_auto_state_matches_requested_target(
     state: &ThreadSessionAutoState,
     requested_next: codex_protocol::protocol::NeroAutoRuntimeConfig,
 ) -> bool {
-    nero_auto_runtime_from_session_auto_state(state) == requested_next
+    nero_auto_runtime_from_authority_state(state) == requested_next
 }
 
 fn convert_via_json<T, U>(value: T) -> Option<U>
@@ -3124,7 +3126,7 @@ impl App {
         }
         let session_source: SessionSource = response.state.session_source.clone().into();
         self.chat_widget.set_nero_auto_runtime_context(
-            nero_auto_runtime_from_session_auto_state(&response.state),
+            nero_auto_runtime_from_authority_state(&response.state),
             session_source,
         );
         Ok(response)
@@ -3209,11 +3211,11 @@ impl App {
             }
         };
         let session_source: SessionSource = current.state.session_source.clone().into();
-        let confirmed_previous = nero_auto_runtime_from_session_auto_state(&current.state);
+        let confirmed_previous = nero_auto_runtime_from_authority_state(&current.state);
 
         if matches!(action, NeroAutoHotkeyAction::ShowStatus) {
             let (message, hint) = nero_auto_status_message(confirmed_previous);
-            let context_hint = session_auto_authority_context(
+            let context_hint = nero_session_auto_authority_context(
                 &current.thread_id,
                 current.authority,
                 &current.state,
@@ -3268,7 +3270,7 @@ impl App {
                     .await
                 {
                     self.chat_widget.set_nero_auto_runtime_context(
-                        nero_auto_runtime_from_session_auto_state(&refreshed.state),
+                        nero_auto_runtime_from_authority_state(&refreshed.state),
                         session_source.clone(),
                     );
                 }
@@ -3287,16 +3289,16 @@ impl App {
         if !apply_result.applied {
             if let Some(refreshed) = apply_result.state.as_ref() {
                 self.chat_widget.set_nero_auto_runtime_context(
-                    nero_auto_runtime_from_session_auto_state(refreshed),
+                    nero_auto_runtime_from_authority_state(refreshed),
                     session_source.clone(),
                 );
-                if session_auto_state_matches_requested_target(refreshed, requested_next) {
+                if nero_session_auto_state_matches_requested_target(refreshed, requested_next) {
                     let (message, hint) =
                         nero_auto_action_message(action, confirmed_previous, requested_next);
                     let resolved_hint = match hint {
                         Some(base) => format!(
                             "{base}\nThe authority reported the requested target state after a compare-and-swap refresh.\n{}",
-                            session_auto_authority_context(
+                            nero_session_auto_authority_context(
                                 &apply_result.thread_id,
                                 apply_result.authority,
                                 refreshed,
@@ -3304,7 +3306,7 @@ impl App {
                         ),
                         None => format!(
                             "The authority reported the requested target state after a compare-and-swap refresh.\n{}",
-                            session_auto_authority_context(
+                            nero_session_auto_authority_context(
                                 &apply_result.thread_id,
                                 apply_result.authority,
                                 refreshed,
@@ -3321,7 +3323,7 @@ impl App {
                 .await
             {
                 self.chat_widget.set_nero_auto_runtime_context(
-                    nero_auto_runtime_from_session_auto_state(&refreshed.state),
+                    nero_auto_runtime_from_authority_state(&refreshed.state),
                     session_source.clone(),
                 );
             }
@@ -3358,12 +3360,12 @@ impl App {
             return;
         };
         self.chat_widget.set_nero_auto_runtime_context(
-            nero_auto_runtime_from_session_auto_state(confirmed_state),
+            nero_auto_runtime_from_authority_state(confirmed_state),
             session_source.clone(),
         );
-        let confirmed_next = nero_auto_runtime_from_session_auto_state(confirmed_state);
+        let confirmed_next = nero_auto_runtime_from_authority_state(confirmed_state);
         let (message, hint) = nero_auto_action_message(action, confirmed_previous, confirmed_next);
-        let context_hint = session_auto_authority_context(
+        let context_hint = nero_session_auto_authority_context(
             &apply_result.thread_id,
             apply_result.authority,
             confirmed_state,
@@ -6370,7 +6372,7 @@ mod tests {
     use tempfile::tempdir;
     use tokio::time;
 
-    fn sample_thread_session_auto_state() -> ThreadSessionAutoState {
+    fn sample_nero_thread_session_auto_state() -> ThreadSessionAutoState {
         ThreadSessionAutoState {
             thread_name: Some("main-thread".to_string()),
             session_source: codex_app_server_protocol::SessionSource::Cli,
@@ -6408,11 +6410,11 @@ mod tests {
     }
 
     #[test]
-    fn nero_auto_runtime_from_session_auto_state_uses_effective_runtime() {
-        let state = sample_thread_session_auto_state();
+    fn nero_auto_runtime_from_authority_state_uses_effective_runtime() {
+        let state = sample_nero_thread_session_auto_state();
 
         assert_eq!(
-            nero_auto_runtime_from_session_auto_state(&state),
+            nero_auto_runtime_from_authority_state(&state),
             NeroAutoRuntimeConfig {
                 enabled: true,
                 autonomy_level: 8,
@@ -6422,11 +6424,11 @@ mod tests {
     }
 
     #[test]
-    fn session_auto_authority_context_reports_native_authority_fields() {
-        let state = sample_thread_session_auto_state();
+    fn nero_session_auto_authority_context_reports_native_authority_fields() {
+        let state = sample_nero_thread_session_auto_state();
 
         assert_eq!(
-            session_auto_authority_context(
+            nero_session_auto_authority_context(
                 "thread-123",
                 ThreadSessionAutoAuthorityMode::BridgeProxy,
                 &state,
@@ -6436,11 +6438,11 @@ mod tests {
     }
 
     #[test]
-    fn session_auto_state_matches_requested_target_uses_effective_runtime() {
-        let state = sample_thread_session_auto_state();
+    fn nero_session_auto_state_matches_requested_target_uses_effective_runtime() {
+        let state = sample_nero_thread_session_auto_state();
 
         assert_eq!(
-            session_auto_state_matches_requested_target(
+            nero_session_auto_state_matches_requested_target(
                 &state,
                 NeroAutoRuntimeConfig {
                     enabled: true,
@@ -6451,7 +6453,7 @@ mod tests {
             true
         );
         assert_eq!(
-            session_auto_state_matches_requested_target(
+            nero_session_auto_state_matches_requested_target(
                 &state,
                 NeroAutoRuntimeConfig {
                     enabled: false,

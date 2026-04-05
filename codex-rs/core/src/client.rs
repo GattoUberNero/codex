@@ -24,7 +24,6 @@
 //! fails, normal stream retry/fallback logic handles recovery on the same turn.
 
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
@@ -113,9 +112,14 @@ use crate::response_debug_context::extract_response_debug_context;
 use crate::response_debug_context::extract_response_debug_context_from_api_error;
 use crate::response_debug_context::telemetry_api_error_message;
 use crate::response_debug_context::telemetry_transport_error_message;
+use crate::spawn::SpawnChildCwdPolicy;
+use crate::spawn::SpawnChildRequest;
+use crate::spawn::StdioPolicy;
+use crate::spawn::spawn_child_async;
 use crate::util::FeedbackRequestTags;
 use crate::util::emit_feedback_auth_recovery_tags;
 use crate::util::emit_feedback_request_tags_with_auth_env;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 
 pub const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 pub const X_CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
@@ -1731,7 +1735,7 @@ async fn try_recover_usage_limit_or_quota(
             Ok(_) => Ok(true),
             Err(RefreshTokenError::Permanent(failed)) => Err(CodexErr::RefreshTokenFailed(failed)),
             Err(RefreshTokenError::Transient(other)) => {
-                if try_recover_with_auth_rotate_command(
+                if try_recover_with_nero_auth_rotate_command(
                     auth_manager,
                     command_recovery_attempted,
                     rotation_reason,
@@ -1746,11 +1750,15 @@ async fn try_recover_usage_limit_or_quota(
         };
     }
 
-    try_recover_with_auth_rotate_command(auth_manager, command_recovery_attempted, rotation_reason)
-        .await
+    try_recover_with_nero_auth_rotate_command(
+        auth_manager,
+        command_recovery_attempted,
+        rotation_reason,
+    )
+    .await
 }
 
-async fn try_recover_with_auth_rotate_command(
+async fn try_recover_with_nero_auth_rotate_command(
     auth_manager: Option<&Arc<AuthManager>>,
     command_recovery_attempted: &mut bool,
     rotation_reason: &str,
@@ -1768,17 +1776,29 @@ async fn try_recover_with_auth_rotate_command(
     };
 
     *command_recovery_attempted = true;
-    warn!("attempting auth rotation via command fallback");
+    warn!("attempting nero auth rotation via command fallback");
 
-    let (program, args) = parse_auth_rotate_command(&rotate_cmd)?;
-    let mut command = tokio::process::Command::new(program);
-    command.args(args);
-    command.env("CODEXN_ROTATION_REASON", rotation_reason);
-    command.stderr(std::process::Stdio::piped());
-    command.stdout(std::process::Stdio::null());
+    let (program, args) = parse_nero_auth_rotate_command(&rotate_cmd)?;
+    let mut env = std::env::vars().collect::<HashMap<String, String>>();
+    env.insert(
+        "CODEXN_ROTATION_REASON".to_string(),
+        rotation_reason.to_string(),
+    );
+    let child = spawn_child_async(SpawnChildRequest {
+        program: std::path::PathBuf::from(program),
+        args,
+        arg0: None,
+        cwd: SpawnChildCwdPolicy::Inherit,
+        network_sandbox_policy: NetworkSandboxPolicy::Enabled,
+        network: None,
+        stdio_policy: StdioPolicy::AuthRotationCommand,
+        env,
+    })
+    .await
+    .map_err(CodexErr::Io)?;
 
-    let command_timeout = auth_rotate_command_timeout();
-    let output = timeout(command_timeout, command.output())
+    let command_timeout = nero_auth_rotate_command_timeout();
+    let output = timeout(command_timeout, child.wait_with_output())
         .await
         .map_err(|_| {
             CodexErr::Io(std::io::Error::new(
@@ -1810,7 +1830,7 @@ async fn try_recover_with_auth_rotate_command(
     Ok(true)
 }
 
-fn auth_rotate_command_timeout() -> Duration {
+fn nero_auth_rotate_command_timeout() -> Duration {
     let timeout_ms = std::env::var(CODEXN_AUTH_ROTATE_CMD_TIMEOUT_MS_ENV)
         .ok()
         .map(|value| value.trim().to_string())
@@ -1821,7 +1841,7 @@ fn auth_rotate_command_timeout() -> Duration {
     Duration::from_millis(timeout_ms)
 }
 
-fn parse_auth_rotate_command(raw: &str) -> Result<(OsString, Vec<OsString>)> {
+fn parse_nero_auth_rotate_command(raw: &str) -> Result<(String, Vec<String>)> {
     let parts = shlex::split(raw).ok_or_else(|| {
         CodexErr::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -1836,8 +1856,8 @@ fn parse_auth_rotate_command(raw: &str) -> Result<(OsString, Vec<OsString>)> {
             "auth rotation command is empty",
         ))
     })?;
-    let args = iter.map(OsString::from).collect::<Vec<_>>();
-    Ok((OsString::from(program), args))
+    let args = iter.collect::<Vec<_>>();
+    Ok((program, args))
 }
 
 fn api_error_http_status(error: &ApiError) -> Option<u16> {

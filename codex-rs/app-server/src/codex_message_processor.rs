@@ -20,7 +20,7 @@ use crate::thread_rollout_trim::analyze_rollout;
 use crate::thread_rollout_trim::delete_rollout_backup;
 use crate::thread_rollout_trim::restore_rollout_backup;
 use crate::thread_rollout_trim::trim_rollout;
-use crate::thread_session_auto::ThreadSessionAutoContext;
+use crate::thread_session_auto::NeroThreadSessionAutoContext;
 use crate::thread_session_auto::read_thread_session_auto;
 use crate::thread_session_auto::update_thread_session_auto;
 use crate::thread_status::ThreadWatchManager;
@@ -3598,10 +3598,10 @@ impl CodexMessageProcessor {
         self.outgoing.send_response(request_id, response).await;
     }
 
-    async fn resolve_thread_session_auto_context(
+    async fn resolve_nero_thread_session_auto_context(
         &self,
         thread_uuid: ThreadId,
-    ) -> Result<ThreadSessionAutoContext, String> {
+    ) -> Result<NeroThreadSessionAutoContext, String> {
         let loaded_thread = self.thread_manager.get_thread(thread_uuid).await.ok();
         let thread_name = match find_thread_name_by_id(&self.config.codex_home, &thread_uuid).await
         {
@@ -3616,7 +3616,7 @@ impl CodexMessageProcessor {
         };
         if let Some(thread) = loaded_thread {
             let config_snapshot = thread.config_snapshot().await;
-            return Ok(ThreadSessionAutoContext {
+            return Ok(NeroThreadSessionAutoContext {
                 thread_id: thread_uuid.to_string(),
                 thread_name,
                 session_source: config_snapshot.session_source.into(),
@@ -3651,7 +3651,7 @@ impl CodexMessageProcessor {
             summary_to_thread(summary)
         };
 
-        Ok(ThreadSessionAutoContext {
+        Ok(NeroThreadSessionAutoContext {
             thread_id: thread_uuid.to_string(),
             thread_name,
             session_source: thread.source,
@@ -3674,7 +3674,10 @@ impl CodexMessageProcessor {
                 return;
             }
         };
-        let context = match self.resolve_thread_session_auto_context(thread_uuid).await {
+        let context = match self
+            .resolve_nero_thread_session_auto_context(thread_uuid)
+            .await
+        {
             Ok(context) => context,
             Err(err) => {
                 self.send_invalid_request_error(request_id, err).await;
@@ -3711,7 +3714,10 @@ impl CodexMessageProcessor {
                 return;
             }
         };
-        let context = match self.resolve_thread_session_auto_context(thread_uuid).await {
+        let context = match self
+            .resolve_nero_thread_session_auto_context(thread_uuid)
+            .await
+        {
             Ok(context) => context,
             Err(err) => {
                 self.send_invalid_request_error(request_id, err).await;

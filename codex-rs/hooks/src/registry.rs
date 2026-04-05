@@ -236,7 +236,7 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
-    use crate::HookAction;
+    use crate::NeroHookAction;
     use crate::types::HookEventAfterAgent;
     use crate::types::HookEventAfterToolUse;
     use crate::types::HookExecution;
@@ -329,7 +329,7 @@ mod tests {
         }
     }
 
-    fn success_hook_with_actions(name: &str, actions: Vec<HookAction>) -> Hook {
+    fn success_hook_with_actions(name: &str, actions: Vec<NeroHookAction>) -> Hook {
         let hook_name = name.to_string();
         Hook {
             name: hook_name,
@@ -501,10 +501,10 @@ mod tests {
             after_agent: vec![success_hook_with_actions(
                 "actions",
                 vec![
-                    HookAction::VisibleNote {
+                    NeroHookAction::VisibleNote {
                         message: "note".to_string(),
                     },
-                    HookAction::AutoUserReply {
+                    NeroHookAction::AutoUserReply {
                         message: "continue".to_string(),
                     },
                 ],
@@ -517,10 +517,10 @@ mod tests {
         assert_eq!(
             outcomes[0].actions,
             vec![
-                HookAction::VisibleNote {
+                NeroHookAction::VisibleNote {
                     message: "note".to_string()
                 },
-                HookAction::AutoUserReply {
+                NeroHookAction::AutoUserReply {
                     message: "continue".to_string()
                 }
             ]

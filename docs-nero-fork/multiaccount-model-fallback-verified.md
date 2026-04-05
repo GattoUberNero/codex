@@ -36,10 +36,13 @@ Obie capability sa dodatkami forka. Nie wyglada to na upstreamowy mechanizm z `0
 Konfiguracja jest czytana z nakladek Nero ladowanych z `CODEXN_CONFIG_NERO_*`:
 
 - `codex-rs/core/src/config/mod.rs`
-  - `read_codexn_fork_model_fallback()`
-  - `resolve_codexn_fork_model_fallback_from_env()`
-  - `CodexnForkModelFallbackConfig`
-  - `CodexnForkModelFallbackStep`
+  - `load_nero_extra_config_from_env()`
+  - `merge_nero_extra_config_from_env()`
+  - `apply_nero_extra_config_overlays()`
+  - `read_nero_model_fallback()`
+  - `resolve_nero_model_fallback_from_env()`
+  - `NeroModelFallbackConfig`
+  - `NeroModelFallbackStep`
 
 Konfiguracja zawiera:
 
@@ -53,14 +56,14 @@ Walidacja juz istnieje:
 
 - fallback wlacza sie tylko przy jawnie ustawionym `enabled = true`,
 - `ladder` nie moze byc puste,
-- duplikaty modelu sa wykrywane przez `codexn_fork_model_fallback_identity()`.
+- duplikaty modelu sa wykrywane przez `nero_model_fallback_identity()`.
 
 ### Gdzie jest podlaczony do runtime
 
 Glowne punkty integracji sa w `codex-rs/core/src/codex.rs`:
 
 - przy starcie sesji:
-  - `resolve_codexn_fork_model_fallback_from_env()` jest wpinany do `SessionConfiguration`,
+  - `resolve_nero_model_fallback_from_env()` jest wpinany do `SessionConfiguration`,
 - przed utworzeniem `TurnContext`:
   - `apply_model_fallback_pre_turn()`,
 - po bledzie tury:
@@ -71,7 +74,7 @@ Glowne punkty integracji sa w `codex-rs/core/src/codex.rs`:
 Stan runtime trzymany jest w:
 
 - `codex-rs/core/src/state/session.rs`
-  - `ModelFallbackRuntimeState`
+  - `NeroModelFallbackRuntimeState`
   - `cooldown_by_model`
   - `sticky_step`
   - `last_requested_model`
@@ -141,7 +144,7 @@ Najwazniejsze elementy:
 - `try_recover_stream_usage_limit_or_quota()`
 - `reset_usage_limit_recovery_budget()`
 - `try_recover_usage_limit_or_quota()`
-- `try_recover_with_auth_rotate_command()`
+- `try_recover_with_nero_auth_rotate_command()`
 
 ### Jak to dziala
 
@@ -255,7 +258,7 @@ Lokalizacja:
 
 Opis:
 
-- runtime cooldownow i walidacja duplikatow uzywaja `codexn_fork_model_fallback_identity()`,
+- runtime cooldownow i walidacja duplikatow uzywaja `nero_model_fallback_identity()`,
 - ale czesc decyzji rotacyjnych i porownan dalej opiera sie na surowym `step.model` albo `requested_model`,
 - to moze prowadzic do niespojnego zachowania dla:
   - aliasow,

@@ -1,4 +1,5 @@
 use crate::protocol::SandboxPolicy;
+use crate::spawn::SpawnChildCwdPolicy;
 use crate::spawn::SpawnChildRequest;
 use crate::spawn::StdioPolicy;
 use crate::spawn::spawn_child_async;
@@ -67,7 +68,7 @@ where
         program: codex_linux_sandbox_exe.to_path_buf(),
         args,
         arg0: Some(&arg0),
-        cwd: command_cwd,
+        cwd: SpawnChildCwdPolicy::Explicit(command_cwd),
         network_sandbox_policy,
         network,
         stdio_policy,

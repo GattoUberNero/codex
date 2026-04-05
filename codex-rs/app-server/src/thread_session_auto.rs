@@ -34,7 +34,7 @@ const NERO_RUNTIME_STATE_CONTROL_DEFAULT_TIMEOUT_MS: u64 = 2_500;
 const NERO_AUTO_RUNTIME_CONFIG_ENV: &str = "CODEXN_CONFIG_NERO_AUTO_PATH";
 
 #[derive(Debug, Clone)]
-pub(crate) struct ThreadSessionAutoContext {
+pub(crate) struct NeroThreadSessionAutoContext {
     pub(crate) thread_id: String,
     pub(crate) thread_name: Option<String>,
     pub(crate) session_source: SessionSource,
@@ -43,7 +43,7 @@ pub(crate) struct ThreadSessionAutoContext {
 }
 
 #[derive(Debug, Clone)]
-struct RuntimeBridgeSettings {
+struct NeroRuntimeBridgeSettings {
     cwd: PathBuf,
     module: String,
     python_bin: String,
@@ -52,7 +52,7 @@ struct RuntimeBridgeSettings {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct BridgeReadRequest {
+struct NeroBridgeReadRequest {
     thread_id: String,
     session_source: String,
     config_path: String,
@@ -60,7 +60,7 @@ struct BridgeReadRequest {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct BridgeApplyRequest {
+struct NeroBridgeApplyRequest {
     path: String,
     config_path: String,
     expected_version: String,
@@ -86,7 +86,7 @@ struct BridgeApplyRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct BridgeRuntimeDefaults {
+struct NeroBridgeRuntimeDefaults {
     enabled: bool,
     autonomy_level: i64,
     autonomy_step_per_round: f64,
@@ -95,7 +95,7 @@ struct BridgeRuntimeDefaults {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct BridgeAppliedPolicyOverride {
+struct NeroBridgeAppliedPolicyOverride {
     #[serde(rename = "autonomy_level")]
     autonomy_level: Option<i64>,
     #[serde(rename = "autonomy_step_per_round")]
@@ -108,16 +108,16 @@ struct BridgeAppliedPolicyOverride {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct BridgeAppliedState {
+struct NeroBridgeAppliedState {
     enabled: Option<bool>,
-    policy_override: Option<BridgeAppliedPolicyOverride>,
+    policy_override: Option<NeroBridgeAppliedPolicyOverride>,
     auto_rounds: i64,
     updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct BridgeEffectiveState {
+struct NeroBridgeEffectiveState {
     enabled: bool,
     autonomy_level: i64,
     autonomy_step_per_round: f64,
@@ -129,7 +129,7 @@ struct BridgeEffectiveState {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct BridgeReadResponse {
+struct NeroBridgeReadResponse {
     ok: bool,
     error: Option<String>,
     message: Option<String>,
@@ -139,14 +139,14 @@ struct BridgeReadResponse {
     thread_id: String,
     session_source: Option<String>,
     is_subagent: bool,
-    defaults: BridgeRuntimeDefaults,
-    applied: BridgeAppliedState,
-    effective: BridgeEffectiveState,
+    defaults: NeroBridgeRuntimeDefaults,
+    applied: NeroBridgeAppliedState,
+    effective: NeroBridgeEffectiveState,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct BridgeConflictCurrent {
+struct NeroBridgeConflictCurrent {
     #[serde(rename = "path")]
     _path: Option<String>,
     version: Option<String>,
@@ -154,7 +154,7 @@ struct BridgeConflictCurrent {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct BridgeApplyResponse {
+struct NeroBridgeApplyResponse {
     ok: bool,
     error: Option<String>,
     message: Option<String>,
@@ -165,9 +165,9 @@ struct BridgeApplyResponse {
     path: Option<String>,
     #[serde(rename = "version")]
     _version: Option<String>,
-    applied: Option<BridgeAppliedState>,
+    applied: Option<NeroBridgeAppliedState>,
     conflict: Option<bool>,
-    current: Option<BridgeConflictCurrent>,
+    current: Option<NeroBridgeConflictCurrent>,
 }
 
 fn first_non_empty_env(names: &[&str]) -> Option<String> {
@@ -190,22 +190,22 @@ fn normalize_runtime_state_control_module(module: String) -> String {
     module
 }
 
-fn resolve_runtime_bridge_module(raw_module: Option<String>) -> (String, bool) {
+fn resolve_nero_runtime_bridge_module(raw_module: Option<String>) -> (String, bool) {
     match raw_module {
         Some(module) => (normalize_runtime_state_control_module(module), true),
         None => (NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE.to_string(), false),
     }
 }
 
-fn resolve_runtime_bridge_module_from_env() -> (String, bool) {
+fn resolve_nero_runtime_bridge_module_from_env() -> (String, bool) {
     let raw_module = first_non_empty_env(&[
         NERO_RUNTIME_STATE_CONTROL_MODULE_ENV,
         NERO_RUNTIME_STATE_CONTROL_MODULE_ENV_COMPAT,
     ]);
-    resolve_runtime_bridge_module(raw_module)
+    resolve_nero_runtime_bridge_module(raw_module)
 }
 
-fn resolve_runtime_bridge_default_cwd_with_inputs(
+fn resolve_nero_runtime_bridge_default_cwd_with_inputs(
     current_dir: &Path,
     codexn_root: Option<&str>,
 ) -> Result<PathBuf, String> {
@@ -244,17 +244,17 @@ fn resolve_runtime_bridge_default_cwd_with_inputs(
     ))
 }
 
-fn resolve_runtime_bridge_default_cwd() -> Result<PathBuf, String> {
+fn resolve_nero_runtime_bridge_default_cwd() -> Result<PathBuf, String> {
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    resolve_runtime_bridge_default_cwd_with_inputs(
+    resolve_nero_runtime_bridge_default_cwd_with_inputs(
         &current_dir,
         first_non_empty_env(&[CODEXN_ROOT_ENV]).as_deref(),
     )
 }
 
-fn resolve_runtime_bridge_settings() -> Result<RuntimeBridgeSettings, String> {
+fn resolve_nero_runtime_bridge_settings() -> Result<NeroRuntimeBridgeSettings, String> {
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let (module, module_overridden) = resolve_runtime_bridge_module_from_env();
+    let (module, module_overridden) = resolve_nero_runtime_bridge_module_from_env();
     let cwd = first_non_empty_env(&[
         NERO_RUNTIME_STATE_CONTROL_CWD_ENV,
         NERO_RUNTIME_STATE_CONTROL_CWD_ENV_COMPAT,
@@ -266,7 +266,7 @@ fn resolve_runtime_bridge_settings() -> Result<RuntimeBridgeSettings, String> {
             if module_overridden {
                 current_dir
             } else {
-                resolve_runtime_bridge_default_cwd()?
+                resolve_nero_runtime_bridge_default_cwd()?
             }
         }
     };
@@ -282,7 +282,7 @@ fn resolve_runtime_bridge_settings() -> Result<RuntimeBridgeSettings, String> {
     .and_then(|value| value.parse::<u64>().ok())
     .filter(|value| *value > 0)
     .unwrap_or(NERO_RUNTIME_STATE_CONTROL_DEFAULT_TIMEOUT_MS);
-    Ok(RuntimeBridgeSettings {
+    Ok(NeroRuntimeBridgeSettings {
         cwd,
         module,
         python_bin,
@@ -290,7 +290,7 @@ fn resolve_runtime_bridge_settings() -> Result<RuntimeBridgeSettings, String> {
     })
 }
 
-fn runtime_bridge_config_path_from_env(
+fn nero_runtime_bridge_config_path_from_env(
     codex_home: &Path,
     configured_path: Option<&std::ffi::OsStr>,
 ) -> PathBuf {
@@ -302,19 +302,19 @@ fn runtime_bridge_config_path_from_env(
     codex_home.join("config-nero-hook-auto.toml")
 }
 
-fn runtime_bridge_config_path(codex_home: &Path) -> PathBuf {
-    runtime_bridge_config_path_from_env(
+fn nero_runtime_bridge_config_path(codex_home: &Path) -> PathBuf {
+    nero_runtime_bridge_config_path_from_env(
         codex_home,
         std::env::var_os(NERO_AUTO_RUNTIME_CONFIG_ENV).as_deref(),
     )
 }
 
-async fn run_runtime_bridge<T, U>(command_name: &str, payload: &T) -> Result<U, String>
+async fn run_nero_runtime_bridge<T, U>(command_name: &str, payload: &T) -> Result<U, String>
 where
     T: Serialize,
     U: for<'de> Deserialize<'de>,
 {
-    let settings = resolve_runtime_bridge_settings()?;
+    let settings = resolve_nero_runtime_bridge_settings()?;
     let bridge_input =
         serde_json::to_vec(payload).map_err(|err| format!("serialize bridge payload: {err}"))?;
     let mut command = Command::new(&settings.python_bin);
@@ -379,9 +379,9 @@ where
     })
 }
 
-fn validate_bridge_apply_identity(
-    response: &BridgeApplyResponse,
-    context: &ThreadSessionAutoContext,
+fn validate_nero_bridge_apply_identity(
+    response: &NeroBridgeApplyResponse,
+    context: &NeroThreadSessionAutoContext,
     expected_config_path: &Path,
 ) -> Result<(), String> {
     let thread_id = response
@@ -423,7 +423,7 @@ fn validate_bridge_apply_identity(
     Ok(())
 }
 
-fn bridge_failure_detail(response: &BridgeReadResponse) -> String {
+fn nero_bridge_failure_detail(response: &NeroBridgeReadResponse) -> String {
     response
         .message
         .clone()
@@ -431,7 +431,7 @@ fn bridge_failure_detail(response: &BridgeReadResponse) -> String {
         .unwrap_or_else(|| "runtime bridge read failed".to_string())
 }
 
-fn bridge_update_failure_detail(response: &BridgeApplyResponse) -> String {
+fn nero_bridge_update_failure_detail(response: &NeroBridgeApplyResponse) -> String {
     response
         .message
         .clone()
@@ -459,9 +459,9 @@ fn session_source_wire_value(session_source: &SessionSource) -> &str {
     }
 }
 
-fn map_bridge_state(
-    response: BridgeReadResponse,
-    context: &ThreadSessionAutoContext,
+fn map_nero_bridge_state(
+    response: NeroBridgeReadResponse,
+    context: &NeroThreadSessionAutoContext,
     expected_config_path: &Path,
 ) -> Result<ThreadSessionAutoState, String> {
     if response.thread_id.trim() != context.thread_id {
@@ -541,12 +541,12 @@ fn map_bridge_state(
 
 pub(crate) async fn read_thread_session_auto(
     codex_home: &Path,
-    context: &ThreadSessionAutoContext,
+    context: &NeroThreadSessionAutoContext,
 ) -> Result<ThreadSessionAutoReadResponse, String> {
-    let config_path = runtime_bridge_config_path(codex_home);
-    let response: BridgeReadResponse = run_runtime_bridge(
+    let config_path = nero_runtime_bridge_config_path(codex_home);
+    let response: NeroBridgeReadResponse = run_nero_runtime_bridge(
         "read-session-auto",
-        &BridgeReadRequest {
+        &NeroBridgeReadRequest {
             thread_id: context.thread_id.clone(),
             session_source: session_source_wire_value(&context.session_source).to_string(),
             config_path: config_path.to_string_lossy().to_string(),
@@ -554,18 +554,18 @@ pub(crate) async fn read_thread_session_auto(
     )
     .await?;
     if !response.ok {
-        return Err(bridge_failure_detail(&response));
+        return Err(nero_bridge_failure_detail(&response));
     }
     Ok(ThreadSessionAutoReadResponse {
         thread_id: context.thread_id.clone(),
         authority: ThreadSessionAutoAuthorityMode::BridgeProxy,
-        state: map_bridge_state(response, context, &config_path)?,
+        state: map_nero_bridge_state(response, context, &config_path)?,
     })
 }
 
 pub(crate) async fn update_thread_session_auto(
     codex_home: &Path,
-    context: &ThreadSessionAutoContext,
+    context: &NeroThreadSessionAutoContext,
     params: &ThreadSessionAutoUpdateParams,
 ) -> Result<ThreadSessionAutoUpdateResponse, String> {
     let current = read_thread_session_auto(codex_home, context).await?;
@@ -606,9 +606,9 @@ pub(crate) async fn update_thread_session_auto(
             state: Some(current.state),
         });
     }
-    let response: BridgeApplyResponse = run_runtime_bridge(
+    let response: NeroBridgeApplyResponse = run_nero_runtime_bridge(
         "apply-session-auto",
-        &BridgeApplyRequest {
+        &NeroBridgeApplyRequest {
             path: current.state.state_path.to_string_lossy().to_string(),
             config_path: current.state.config_path.to_string_lossy().to_string(),
             expected_version: params.expected_version.clone(),
@@ -640,7 +640,7 @@ pub(crate) async fn update_thread_session_auto(
     )
     .await?;
     if response.ok {
-        validate_bridge_apply_identity(&response, context, &current.state.config_path)?;
+        validate_nero_bridge_apply_identity(&response, context, &current.state.config_path)?;
         let applied_version = response
             ._version
             .clone()
@@ -692,7 +692,7 @@ pub(crate) async fn update_thread_session_auto(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
-    let message = bridge_update_failure_detail(&response);
+    let message = nero_bridge_update_failure_detail(&response);
     let state = read_thread_session_auto(codex_home, context)
         .await
         .ok()
@@ -737,10 +737,10 @@ pub(crate) async fn update_thread_session_auto(
 mod tests {
     use super::NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE;
     use super::NERO_RUNTIME_STATE_CONTROL_RETIRED_MODULE;
+    use super::nero_runtime_bridge_config_path_from_env;
     use super::normalize_runtime_state_control_module;
-    use super::resolve_runtime_bridge_default_cwd_with_inputs;
-    use super::resolve_runtime_bridge_module;
-    use super::runtime_bridge_config_path_from_env;
+    use super::resolve_nero_runtime_bridge_default_cwd_with_inputs;
+    use super::resolve_nero_runtime_bridge_module;
     use pretty_assertions::assert_eq;
     use std::ffi::OsStr;
     use std::path::Path;
@@ -767,9 +767,9 @@ mod tests {
     }
 
     #[test]
-    fn runtime_bridge_config_path_uses_explicit_override_when_present() {
+    fn nero_runtime_bridge_config_path_uses_explicit_override_when_present() {
         assert_eq!(
-            runtime_bridge_config_path_from_env(
+            nero_runtime_bridge_config_path_from_env(
                 Path::new("/tmp/codex-home"),
                 Some(OsStr::new("/tmp/explicit-nero-auto.toml"))
             ),
@@ -778,21 +778,24 @@ mod tests {
     }
 
     #[test]
-    fn runtime_bridge_config_path_falls_back_for_empty_override() {
+    fn nero_runtime_bridge_config_path_falls_back_for_empty_override() {
         assert_eq!(
-            runtime_bridge_config_path_from_env(Path::new("/tmp/codex-home"), Some(OsStr::new(""))),
+            nero_runtime_bridge_config_path_from_env(
+                Path::new("/tmp/codex-home"),
+                Some(OsStr::new("")),
+            ),
             Path::new("/tmp/codex-home/config-nero-hook-auto.toml")
         );
     }
 
     #[test]
-    fn resolve_runtime_bridge_default_cwd_uses_codexn_root_sdk_when_available() {
+    fn resolve_nero_runtime_bridge_default_cwd_uses_codexn_root_sdk_when_available() {
         let root = tempdir().expect("tempdir root");
         let sdk_dir = root.path().join("apps/codex-nero-sdk/nero_hook_runtime");
         std::fs::create_dir_all(&sdk_dir).expect("create sdk package");
         let cwd = tempdir().expect("tempdir cwd");
         assert_eq!(
-            resolve_runtime_bridge_default_cwd_with_inputs(
+            resolve_nero_runtime_bridge_default_cwd_with_inputs(
                 cwd.path(),
                 Some(root.path().to_string_lossy().as_ref()),
             ),
@@ -801,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_runtime_bridge_default_cwd_uses_codexn_root_parent_sdk_when_available() {
+    fn resolve_nero_runtime_bridge_default_cwd_uses_codexn_root_parent_sdk_when_available() {
         let workspace = tempdir().expect("tempdir workspace");
         let app_root = workspace.path().join("apps/codex-nero");
         std::fs::create_dir_all(&app_root).expect("create app root");
@@ -811,7 +814,7 @@ mod tests {
         std::fs::create_dir_all(&cwd).expect("create cwd");
         let expected_sdk_root = workspace.path().join("codex-nero-sdk");
         assert_eq!(
-            resolve_runtime_bridge_default_cwd_with_inputs(
+            resolve_nero_runtime_bridge_default_cwd_with_inputs(
                 &cwd,
                 Some(app_root.to_string_lossy().as_ref()),
             ),
@@ -820,19 +823,19 @@ mod tests {
     }
 
     #[test]
-    fn resolve_runtime_bridge_module_uses_default_when_unset() {
+    fn resolve_nero_runtime_bridge_module_uses_default_when_unset() {
         assert_eq!(
-            resolve_runtime_bridge_module(None),
+            resolve_nero_runtime_bridge_module(None),
             (NERO_RUNTIME_STATE_CONTROL_DEFAULT_MODULE.to_string(), false)
         );
     }
 
     #[test]
-    fn resolve_runtime_bridge_default_cwd_fails_when_no_candidate_contains_package() {
+    fn resolve_nero_runtime_bridge_default_cwd_fails_when_no_candidate_contains_package() {
         let workspace = tempdir().expect("tempdir workspace");
         let cwd = workspace.path().join("sandbox/cwd");
         std::fs::create_dir_all(&cwd).expect("create cwd");
-        let err = resolve_runtime_bridge_default_cwd_with_inputs(&cwd, None)
+        let err = resolve_nero_runtime_bridge_default_cwd_with_inputs(&cwd, None)
             .expect_err("expected bootstrap failure");
         assert!(err.contains("runtime bridge bootstrap failed"));
         assert!(err.contains("set NERO_RUNTIME_STATE_CONTROL_CWD or CODEXN_ROOT"));

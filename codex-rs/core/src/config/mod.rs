@@ -655,7 +655,7 @@ impl ConfigBuilder {
         )
         .await?;
         let mut merged_toml = config_layer_stack.effective_config();
-        merge_codexn_extra_config_from_env(&mut merged_toml)?;
+        merge_nero_extra_config_from_env(&mut merged_toml)?;
 
         // Note that each layer in ConfigLayerStack should have resolved
         // relative paths to absolute paths based on the parent folder of the
@@ -756,7 +756,7 @@ pub async fn load_config_as_toml_with_cli_overrides(
     .await?;
 
     let mut merged_toml = config_layer_stack.effective_config();
-    merge_codexn_extra_config_from_env(&mut merged_toml)?;
+    merge_nero_extra_config_from_env(&mut merged_toml)?;
     let cfg = deserialize_config_toml_with_base(merged_toml, codex_home).map_err(|e| {
         tracing::error!("Failed to deserialize overridden config: {e}");
         e
@@ -783,22 +783,22 @@ const CODEXN_CONFIG_NERO_AUTO_PATH_ENV: &str = "CODEXN_CONFIG_NERO_AUTO_PATH";
 const CODEXN_CONFIG_NERO_DEV_PATH_ENV: &str = "CODEXN_CONFIG_NERO_DEV_PATH";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CodexnForkModelFallbackStep {
+pub struct NeroModelFallbackStep {
     pub model: String,
     pub reasoning_effort: ReasoningEffort,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CodexnForkModelFallbackConfig {
+pub struct NeroModelFallbackConfig {
     pub cooldown_seconds: u64,
     pub max_wait_seconds: u64,
     pub sticky: bool,
-    pub ladder: Vec<CodexnForkModelFallbackStep>,
+    pub ladder: Vec<NeroModelFallbackStep>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct CodexnForkModelFallbackResolution {
-    pub config: Option<CodexnForkModelFallbackConfig>,
+pub struct NeroModelFallbackResolution {
+    pub config: Option<NeroModelFallbackConfig>,
     pub warning: Option<String>,
 }
 
@@ -1041,7 +1041,7 @@ fn strip_codexn_fork_main_agent_developer_instructions(
 pub(crate) fn strip_codexn_fork_subagent_developer_instructions(
     config: &mut Config,
 ) -> std::io::Result<()> {
-    let Some(combined_extra_toml) = load_codexn_extra_config_from_env()? else {
+    let Some(combined_extra_toml) = load_nero_extra_config_from_env()? else {
         return Ok(());
     };
 
@@ -1191,7 +1191,7 @@ fn parse_codexn_fork_reasoning_effort(value: &TomlValue) -> Option<ReasoningEffo
     }
 }
 
-pub(crate) fn codexn_fork_model_fallback_identity(model: &str) -> String {
+pub(crate) fn nero_model_fallback_identity(model: &str) -> String {
     let normalized = model.trim().to_ascii_lowercase();
     // Keep identity rules aligned with model-manager lookup behavior for one-segment namespaces
     // like `custom/gpt-5.3-codex`.
@@ -1211,20 +1211,20 @@ pub(crate) fn codexn_fork_model_fallback_identity(model: &str) -> String {
     }
 }
 
-fn read_codexn_fork_model_fallback(extra_toml: &TomlValue) -> CodexnForkModelFallbackResolution {
+fn read_nero_model_fallback(extra_toml: &TomlValue) -> NeroModelFallbackResolution {
     let Some(model_fallback) = extra_toml
         .get("nero")
         .and_then(|v| v.get("model_fallback"))
         .and_then(TomlValue::as_table)
     else {
-        return CodexnForkModelFallbackResolution::default();
+        return NeroModelFallbackResolution::default();
     };
 
     let enabled = match model_fallback.get("enabled") {
         Some(value) => match value.as_bool() {
             Some(enabled) => enabled,
             None => {
-                return CodexnForkModelFallbackResolution {
+                return NeroModelFallbackResolution {
                     config: None,
                     warning: Some(
                         "[nero.model_fallback] has non-boolean `enabled`; disabling fallback for this session."
@@ -1236,7 +1236,7 @@ fn read_codexn_fork_model_fallback(extra_toml: &TomlValue) -> CodexnForkModelFal
         None => {
             let has_non_enabled_keys = model_fallback.keys().any(|key| key.as_str() != "enabled");
             if has_non_enabled_keys {
-                return CodexnForkModelFallbackResolution {
+                return NeroModelFallbackResolution {
                     config: None,
                     warning: Some(
                         "[nero.model_fallback] is present but missing explicit boolean `enabled`; disabling fallback for this session."
@@ -1248,7 +1248,7 @@ fn read_codexn_fork_model_fallback(extra_toml: &TomlValue) -> CodexnForkModelFal
         }
     };
     if !enabled {
-        return CodexnForkModelFallbackResolution::default();
+        return NeroModelFallbackResolution::default();
     }
 
     let mut issues = Vec::<String>::new();
@@ -1291,7 +1291,7 @@ fn read_codexn_fork_model_fallback(extra_toml: &TomlValue) -> CodexnForkModelFal
         }
     };
 
-    let mut ladder = Vec::<CodexnForkModelFallbackStep>::new();
+    let mut ladder = Vec::<NeroModelFallbackStep>::new();
     let mut seen_models = std::collections::HashSet::<String>::new();
     match model_fallback.get("ladder").and_then(TomlValue::as_array) {
         Some(entries) => {
@@ -1310,7 +1310,7 @@ fn read_codexn_fork_model_fallback(extra_toml: &TomlValue) -> CodexnForkModelFal
                     issues.push(format!("ladder[{index}].model is required"));
                     continue;
                 }
-                let identity = codexn_fork_model_fallback_identity(model.as_str());
+                let identity = nero_model_fallback_identity(model.as_str());
                 if !seen_models.insert(identity.clone()) {
                     issues.push(format!(
                         "ladder contains duplicate model identity `{identity}` (index {index})"
@@ -1326,7 +1326,7 @@ fn read_codexn_fork_model_fallback(extra_toml: &TomlValue) -> CodexnForkModelFal
                     ));
                     continue;
                 };
-                ladder.push(CodexnForkModelFallbackStep {
+                ladder.push(NeroModelFallbackStep {
                     model,
                     reasoning_effort,
                 });
@@ -1340,7 +1340,7 @@ fn read_codexn_fork_model_fallback(extra_toml: &TomlValue) -> CodexnForkModelFal
     }
 
     if !issues.is_empty() {
-        return CodexnForkModelFallbackResolution {
+        return NeroModelFallbackResolution {
             config: None,
             warning: Some(format!(
                 "[nero.model_fallback] is enabled but invalid ({}); disabling fallback for this session.",
@@ -1349,8 +1349,8 @@ fn read_codexn_fork_model_fallback(extra_toml: &TomlValue) -> CodexnForkModelFal
         };
     }
 
-    CodexnForkModelFallbackResolution {
-        config: Some(CodexnForkModelFallbackConfig {
+    NeroModelFallbackResolution {
+        config: Some(NeroModelFallbackConfig {
             cooldown_seconds: cooldown_seconds.expect("validated cooldown_seconds"),
             max_wait_seconds: max_wait_seconds.expect("validated max_wait_seconds"),
             sticky: sticky.expect("validated sticky"),
@@ -1360,15 +1360,15 @@ fn read_codexn_fork_model_fallback(extra_toml: &TomlValue) -> CodexnForkModelFal
     }
 }
 
-fn session_source_disables_codexn_fork_model_fallback(session_source: &SessionSource) -> bool {
+fn session_source_disables_nero_model_fallback(session_source: &SessionSource) -> bool {
     matches!(session_source, SessionSource::SubAgent(_))
 }
 
-fn effective_codexn_fork_model_fallback_resolution(
-    mut resolution: CodexnForkModelFallbackResolution,
+fn effective_nero_model_fallback_resolution(
+    mut resolution: NeroModelFallbackResolution,
     session_source: &SessionSource,
-) -> CodexnForkModelFallbackResolution {
-    if session_source_disables_codexn_fork_model_fallback(session_source) {
+) -> NeroModelFallbackResolution {
+    if session_source_disables_nero_model_fallback(session_source) {
         resolution.config = None;
     }
     resolution
@@ -1470,7 +1470,7 @@ fn codexn_fork_auto_developer_instructions(extra_toml: &TomlValue) -> Option<Str
     Some(sections.join("\n"))
 }
 
-fn load_codexn_extra_config_from_env() -> std::io::Result<Option<TomlValue>> {
+fn load_nero_extra_config_from_env() -> std::io::Result<Option<TomlValue>> {
     let extra_paths: Vec<(&str, PathBuf)> = [
         CODEXN_CONFIG_NERO_PATH_ENV,
         CODEXN_CONFIG_NERO_MSG_PATH_ENV,
@@ -1494,7 +1494,7 @@ fn load_codexn_extra_config_from_env() -> std::io::Result<Option<TomlValue>> {
             tracing::warn!(
                 env_name,
                 path = %extra_path.display(),
-                "codexn extra config path is set but file does not exist; skipping overlay"
+                "nero extra config path is set but file does not exist; skipping overlay"
             );
             continue;
         }
@@ -1522,7 +1522,7 @@ fn load_codexn_extra_config_from_env() -> std::io::Result<Option<TomlValue>> {
         tracing::debug!(
             env_name,
             path = %extra_path.display(),
-            "merging codexn extra config overlay from env path"
+            "merging nero extra config overlay from env path"
         );
         crate::config_loader::merge_toml_values(&mut combined_extra_toml, &extra_toml);
     }
@@ -1530,8 +1530,8 @@ fn load_codexn_extra_config_from_env() -> std::io::Result<Option<TomlValue>> {
     Ok(Some(combined_extra_toml))
 }
 
-fn merge_codexn_extra_config_from_env(merged_toml: &mut TomlValue) -> std::io::Result<()> {
-    let Some(combined_extra_toml) = load_codexn_extra_config_from_env()? else {
+fn merge_nero_extra_config_from_env(merged_toml: &mut TomlValue) -> std::io::Result<()> {
+    let Some(combined_extra_toml) = load_nero_extra_config_from_env()? else {
         return Ok(());
     };
     crate::config_loader::merge_toml_values(merged_toml, &combined_extra_toml);
@@ -1539,16 +1539,14 @@ fn merge_codexn_extra_config_from_env(merged_toml: &mut TomlValue) -> std::io::R
     Ok(())
 }
 
-pub(crate) fn apply_codexn_extra_config_overlays(
-    merged_toml: &mut TomlValue,
-) -> std::io::Result<()> {
-    merge_codexn_extra_config_from_env(merged_toml)
+pub(crate) fn apply_nero_extra_config_overlays(merged_toml: &mut TomlValue) -> std::io::Result<()> {
+    merge_nero_extra_config_from_env(merged_toml)
 }
 
 pub(crate) fn resolve_codexn_fork_nero_auto_runtime_from_env(
     session_source: &SessionSource,
 ) -> std::io::Result<NeroAutoRuntimeConfig> {
-    let Some(combined_extra_toml) = load_codexn_extra_config_from_env()? else {
+    let Some(combined_extra_toml) = load_nero_extra_config_from_env()? else {
         return Ok(effective_codexn_fork_nero_auto_runtime(
             NeroAutoRuntimeConfig::default(),
             session_source,
@@ -1560,14 +1558,14 @@ pub(crate) fn resolve_codexn_fork_nero_auto_runtime_from_env(
     ))
 }
 
-pub(crate) fn resolve_codexn_fork_model_fallback_from_env(
+pub(crate) fn resolve_nero_model_fallback_from_env(
     session_source: &SessionSource,
-) -> std::io::Result<CodexnForkModelFallbackResolution> {
-    let Some(combined_extra_toml) = load_codexn_extra_config_from_env()? else {
-        return Ok(CodexnForkModelFallbackResolution::default());
+) -> std::io::Result<NeroModelFallbackResolution> {
+    let Some(combined_extra_toml) = load_nero_extra_config_from_env()? else {
+        return Ok(NeroModelFallbackResolution::default());
     };
-    Ok(effective_codexn_fork_model_fallback_resolution(
-        read_codexn_fork_model_fallback(&combined_extra_toml),
+    Ok(effective_nero_model_fallback_resolution(
+        read_nero_model_fallback(&combined_extra_toml),
         session_source,
     ))
 }
@@ -1577,7 +1575,7 @@ pub(crate) fn refresh_codexn_fork_developer_instructions_with_runtime(
     nero_auto_runtime: NeroAutoRuntimeConfig,
     session_source: &SessionSource,
 ) -> std::io::Result<()> {
-    let Some(mut combined_extra_toml) = load_codexn_extra_config_from_env()? else {
+    let Some(mut combined_extra_toml) = load_nero_extra_config_from_env()? else {
         return Ok(());
     };
     let effective_runtime =
@@ -1740,7 +1738,7 @@ pub async fn load_global_mcp_servers(
     )
     .await?;
     let mut merged_toml = config_layer_stack.effective_config();
-    merge_codexn_extra_config_from_env(&mut merged_toml)?;
+    merge_nero_extra_config_from_env(&mut merged_toml)?;
     let Some(servers_value) = merged_toml.get("mcp_servers") else {
         return Ok(BTreeMap::new());
     };

@@ -26,7 +26,14 @@ pub const CODEX_SANDBOX_ENV_VAR: &str = "CODEX_SANDBOX";
 #[derive(Debug, Clone, Copy)]
 pub enum StdioPolicy {
     RedirectForShellTool,
+    AuthRotationCommand,
     Inherit,
+}
+
+#[derive(Debug, Clone)]
+pub enum SpawnChildCwdPolicy {
+    Inherit,
+    Explicit(PathBuf),
 }
 
 /// Spawns the appropriate child process for the ExecParams and SandboxPolicy,
@@ -40,7 +47,7 @@ pub(crate) struct SpawnChildRequest<'a> {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub arg0: Option<&'a str>,
-    pub cwd: PathBuf,
+    pub cwd: SpawnChildCwdPolicy,
     pub network_sandbox_policy: NetworkSandboxPolicy,
     pub network: Option<&'a NetworkProxy>,
     pub stdio_policy: StdioPolicy,
@@ -67,7 +74,12 @@ pub(crate) async fn spawn_child_async(request: SpawnChildRequest<'_>) -> std::io
     #[cfg(unix)]
     cmd.arg0(arg0.map_or_else(|| program.to_string_lossy().to_string(), String::from));
     cmd.args(args);
-    cmd.current_dir(cwd);
+    match cwd {
+        SpawnChildCwdPolicy::Inherit => {}
+        SpawnChildCwdPolicy::Explicit(cwd) => {
+            cmd.current_dir(cwd);
+        }
+    }
     if let Some(network) = network {
         network.apply_to_env(&mut env);
     }
@@ -112,6 +124,14 @@ pub(crate) async fn spawn_child_async(request: SpawnChildRequest<'_>) -> std::io
             cmd.stdin(Stdio::null());
 
             cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        }
+        StdioPolicy::AuthRotationCommand => {
+            // Keep historical auth-rotation semantics: inherit stdin so command
+            // launch behavior remains unchanged, and capture stdout/stderr as
+            // Command::output() did before hardening.
+            cmd.stdin(Stdio::inherit())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
         }
         StdioPolicy::Inherit => {
             // Inherit stdin, stdout, and stderr from the parent process.

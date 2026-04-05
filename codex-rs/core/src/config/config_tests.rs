@@ -842,7 +842,7 @@ fn codexn_fork_auto_developer_instructions_disappear_when_runtime_overlay_disabl
 }
 
 #[test]
-fn read_codexn_fork_model_fallback_accepts_valid_enabled_config() {
+fn read_nero_model_fallback_accepts_valid_enabled_config() {
     let extra_toml: TomlValue = toml::from_str(
         r####"
             [nero.model_fallback]
@@ -866,24 +866,24 @@ fn read_codexn_fork_model_fallback_accepts_valid_enabled_config() {
     )
     .expect("parse extra toml");
 
-    let resolution = read_codexn_fork_model_fallback(&extra_toml);
+    let resolution = read_nero_model_fallback(&extra_toml);
     assert!(resolution.warning.is_none(), "no warning expected");
     assert_eq!(
         resolution.config,
-        Some(CodexnForkModelFallbackConfig {
+        Some(NeroModelFallbackConfig {
             cooldown_seconds: 30,
             max_wait_seconds: 120,
             sticky: true,
             ladder: vec![
-                CodexnForkModelFallbackStep {
+                NeroModelFallbackStep {
                     model: "gpt-5.4-mini".to_string(),
                     reasoning_effort: ReasoningEffort::XHigh,
                 },
-                CodexnForkModelFallbackStep {
+                NeroModelFallbackStep {
                     model: "gpt-5.3-codex".to_string(),
                     reasoning_effort: ReasoningEffort::High,
                 },
-                CodexnForkModelFallbackStep {
+                NeroModelFallbackStep {
                     model: "gpt-5.4".to_string(),
                     reasoning_effort: ReasoningEffort::Medium,
                 },
@@ -893,7 +893,7 @@ fn read_codexn_fork_model_fallback_accepts_valid_enabled_config() {
 }
 
 #[test]
-fn read_codexn_fork_model_fallback_disables_invalid_enabled_config() {
+fn read_nero_model_fallback_disables_invalid_enabled_config() {
     let extra_toml: TomlValue = toml::from_str(
         r####"
             [nero.model_fallback]
@@ -908,7 +908,7 @@ fn read_codexn_fork_model_fallback_disables_invalid_enabled_config() {
     )
     .expect("parse extra toml");
 
-    let resolution = read_codexn_fork_model_fallback(&extra_toml);
+    let resolution = read_nero_model_fallback(&extra_toml);
     assert!(
         resolution.config.is_none(),
         "invalid config must be disabled"
@@ -919,7 +919,7 @@ fn read_codexn_fork_model_fallback_disables_invalid_enabled_config() {
 }
 
 #[test]
-fn read_codexn_fork_model_fallback_warns_when_enabled_is_missing() {
+fn read_nero_model_fallback_warns_when_enabled_is_missing() {
     let extra_toml: TomlValue = toml::from_str(
         r####"
             [nero.model_fallback]
@@ -930,7 +930,7 @@ fn read_codexn_fork_model_fallback_warns_when_enabled_is_missing() {
     )
     .expect("parse extra toml");
 
-    let resolution = read_codexn_fork_model_fallback(&extra_toml);
+    let resolution = read_nero_model_fallback(&extra_toml);
     assert!(
         resolution.config.is_none(),
         "missing enabled should disable config"
@@ -945,7 +945,7 @@ fn read_codexn_fork_model_fallback_warns_when_enabled_is_missing() {
 }
 
 #[test]
-fn read_codexn_fork_model_fallback_warns_when_enabled_is_not_bool() {
+fn read_nero_model_fallback_warns_when_enabled_is_not_bool() {
     let extra_toml: TomlValue = toml::from_str(
         r####"
             [nero.model_fallback]
@@ -954,7 +954,7 @@ fn read_codexn_fork_model_fallback_warns_when_enabled_is_not_bool() {
     )
     .expect("parse extra toml");
 
-    let resolution = read_codexn_fork_model_fallback(&extra_toml);
+    let resolution = read_nero_model_fallback(&extra_toml);
     assert!(
         resolution.config.is_none(),
         "non-boolean enabled should disable config"
@@ -969,7 +969,7 @@ fn read_codexn_fork_model_fallback_warns_when_enabled_is_not_bool() {
 }
 
 #[test]
-fn read_codexn_fork_model_fallback_rejects_namespaced_duplicate_identity() {
+fn read_nero_model_fallback_rejects_namespaced_duplicate_identity() {
     let extra_toml: TomlValue = toml::from_str(
         r####"
             [nero.model_fallback]
@@ -989,7 +989,7 @@ fn read_codexn_fork_model_fallback_rejects_namespaced_duplicate_identity() {
     )
     .expect("parse extra toml");
 
-    let resolution = read_codexn_fork_model_fallback(&extra_toml);
+    let resolution = read_nero_model_fallback(&extra_toml);
     assert!(
         resolution.config.is_none(),
         "duplicate normalized identity should disable config"
@@ -1004,13 +1004,13 @@ fn read_codexn_fork_model_fallback_rejects_namespaced_duplicate_identity() {
 }
 
 #[test]
-fn effective_codexn_fork_model_fallback_resolution_disables_for_subagents() {
-    let resolution = CodexnForkModelFallbackResolution {
-        config: Some(CodexnForkModelFallbackConfig {
+fn effective_nero_model_fallback_resolution_disables_for_subagents() {
+    let resolution = NeroModelFallbackResolution {
+        config: Some(NeroModelFallbackConfig {
             cooldown_seconds: 10,
             max_wait_seconds: 20,
             sticky: true,
-            ladder: vec![CodexnForkModelFallbackStep {
+            ladder: vec![NeroModelFallbackStep {
                 model: "gpt-5.3-codex".to_string(),
                 reasoning_effort: ReasoningEffort::High,
             }],
@@ -1018,7 +1018,7 @@ fn effective_codexn_fork_model_fallback_resolution_disables_for_subagents() {
         warning: None,
     };
 
-    let effective = effective_codexn_fork_model_fallback_resolution(
+    let effective = effective_nero_model_fallback_resolution(
         resolution,
         &SessionSource::SubAgent(codex_protocol::protocol::SubAgentSource::Other(
             "reviewer".to_string(),

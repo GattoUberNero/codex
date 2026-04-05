@@ -1448,16 +1448,16 @@ fn hook_runtime_meta_lines(
     if let Some(protocol) = protocol
         && let Some(status) = protocol.get("status").and_then(serde_json::Value::as_str)
     {
-        let runtime_msg_expected = protocol
-            .get("runtime_msg_expected")
+        let stop_checkpoint_expected = protocol
+            .get("stop_checkpoint_expected")
             .and_then(serde_json::Value::as_bool);
-        let runtime_msg_delivered = protocol
-            .get("runtime_msg_delivered")
+        let stop_checkpoint_delivered = protocol
+            .get("stop_checkpoint_delivered")
             .and_then(serde_json::Value::as_bool);
         lines.push(format!(
             "  hook-auto protocol: {status} (expected={}, delivered={})",
-            runtime_msg_expected.unwrap_or(false),
-            runtime_msg_delivered.unwrap_or(false),
+            stop_checkpoint_expected.unwrap_or(false),
+            stop_checkpoint_delivered.unwrap_or(false),
         ));
     }
 

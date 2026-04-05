@@ -13810,8 +13810,8 @@ async fn after_agent_app_server_hook_notifications_render_snapshot() {
                     },
                     "protocol": {
                         "status": "ok",
-                        "runtime_msg_expected": true,
-                        "runtime_msg_delivered": true,
+                        "stop_checkpoint_expected": true,
+                        "stop_checkpoint_delivered": true,
                     },
                     "follow_up": {
                         "status": "queued",
@@ -13866,8 +13866,8 @@ async fn after_agent_app_server_hook_notifications_render_meta_only_snapshot() {
                     },
                     "protocol": {
                         "status": "ok",
-                        "runtime_msg_expected": true,
-                        "runtime_msg_delivered": true,
+                        "stop_checkpoint_expected": true,
+                        "stop_checkpoint_delivered": true,
                     },
                     "follow_up": {
                         "status": "queued",

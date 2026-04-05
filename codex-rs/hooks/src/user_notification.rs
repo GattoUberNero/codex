@@ -16,7 +16,7 @@ use crate::HookExecution;
 use crate::HookPayload;
 use crate::HookResult;
 use crate::command_from_argv;
-use crate::parse_hook_actions_from_stdout;
+use crate::parse_nero_hook_actions_from_stdout;
 
 const LEGACY_NOTIFY_TIMEOUT: Duration = Duration::from_millis(1500);
 const LEGACY_NOTIFY_KILL_REAP_TIMEOUT: Duration = Duration::from_millis(250);
@@ -71,9 +71,11 @@ async fn collect_stdout_bytes(
     }
 }
 
-fn parse_legacy_notify_stdout(stdout_bytes: Vec<u8>) -> Result<Vec<crate::HookAction>, io::Error> {
+fn parse_legacy_notify_stdout(
+    stdout_bytes: Vec<u8>,
+) -> Result<Vec<crate::NeroHookAction>, io::Error> {
     match String::from_utf8(stdout_bytes) {
-        Ok(stdout) => match parse_hook_actions_from_stdout(&stdout) {
+        Ok(stdout) => match parse_nero_hook_actions_from_stdout(&stdout) {
             Ok(parsed) => {
                 debug!(
                     hook_name = "legacy_notify",
@@ -672,7 +674,7 @@ mod tests {
         assert!(matches!(outcome.result, HookResult::Success));
         assert_eq!(
             outcome.actions,
-            vec![crate::HookAction::VisibleNote {
+            vec![crate::NeroHookAction::VisibleNote {
                 message: "hello".to_string()
             }]
         );
@@ -711,7 +713,7 @@ mod tests {
         assert!(matches!(outcome.result, HookResult::Success));
         assert_eq!(
             outcome.actions,
-            vec![crate::HookAction::VisibleNote {
+            vec![crate::NeroHookAction::VisibleNote {
                 message: "example-A-".to_string()
             }]
         );
@@ -750,7 +752,7 @@ mod tests {
         assert!(matches!(outcome.result, HookResult::Success));
         assert_eq!(
             outcome.actions,
-            vec![crate::HookAction::VisibleNote {
+            vec![crate::NeroHookAction::VisibleNote {
                 message: "legacy-argv".to_string()
             }]
         );
@@ -790,7 +792,7 @@ mod tests {
         assert!(matches!(outcome.result, HookResult::Success));
         assert_eq!(
             outcome.actions,
-            vec![crate::HookAction::VisibleNote {
+            vec![crate::NeroHookAction::VisibleNote {
                 message: large_message.len().to_string()
             }]
         );
@@ -831,7 +833,7 @@ mod tests {
         assert!(matches!(outcome.result, HookResult::Success));
         assert_eq!(
             outcome.actions,
-            vec![crate::HookAction::VisibleNote {
+            vec![crate::NeroHookAction::VisibleNote {
                 message: huge_message.len().to_string()
             }]
         );
@@ -1079,7 +1081,7 @@ mod tests {
         assert!(matches!(outcome.result, HookResult::Success));
         assert_eq!(
             outcome.actions,
-            vec![crate::HookAction::VisibleNote {
+            vec![crate::NeroHookAction::VisibleNote {
                 message: "late-but-buffered".to_string()
             }]
         );

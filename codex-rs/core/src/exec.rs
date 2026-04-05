@@ -28,6 +28,7 @@ use crate::protocol::SandboxPolicy;
 use crate::sandboxing::ExecOptions;
 use crate::sandboxing::ExecRequest;
 use crate::sandboxing::SandboxPermissions;
+use crate::spawn::SpawnChildCwdPolicy;
 use crate::spawn::SpawnChildRequest;
 use crate::spawn::StdioPolicy;
 use crate::spawn::spawn_child_async;
@@ -871,7 +872,7 @@ async fn exec(
         program: PathBuf::from(program),
         args: args.into(),
         arg0: arg0_ref,
-        cwd,
+        cwd: SpawnChildCwdPolicy::Explicit(cwd),
         network_sandbox_policy,
         // The environment already has attempt-scoped proxy settings from
         // apply_to_env_for_attempt above. Passing network here would reapply

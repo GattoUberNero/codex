@@ -1,7 +1,6 @@
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
-use serde::de::Error as _;
 use tracing::warn;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,7 +94,7 @@ where
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum HookAction {
+pub enum NeroHookAction {
     NeroHookMsg {
         mode: NeroHookMsgMode,
         show: NeroHookMsgShow,
@@ -122,30 +121,25 @@ pub enum HookAction {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ParsedHookActions {
-    pub actions: Vec<HookAction>,
+pub struct ParsedNeroHookActions {
+    pub actions: Vec<NeroHookAction>,
     pub ignored_unknown_actions: usize,
 }
 
 #[derive(Debug, Deserialize)]
-struct HookActionEnvelope {
+struct NeroHookActionEnvelope {
     #[serde(default)]
     actions: Vec<serde_json::Value>,
 }
 
-fn parse_hook_action_envelope(json_payload: &str) -> Result<ParsedHookActions, serde_json::Error> {
-    let envelope: HookActionEnvelope = serde_json::from_str(json_payload)?;
-    let mut parsed = ParsedHookActions::default();
+fn parse_nero_hook_action_envelope(
+    json_payload: &str,
+) -> Result<ParsedNeroHookActions, serde_json::Error> {
+    let envelope: NeroHookActionEnvelope = serde_json::from_str(json_payload)?;
+    let mut parsed = ParsedNeroHookActions::default();
 
     for raw_action in envelope.actions {
-        if let Some(kind) = action_type(&raw_action)
-            && is_retired_action_type(kind)
-        {
-            return Err(serde_json::Error::custom(format!(
-                "hook action type `{kind}` has been retired; use `nero_hook_msg`/`visible_note`/`auto_user_reply`"
-            )));
-        }
-        match serde_json::from_value::<HookAction>(raw_action.clone()) {
+        match serde_json::from_value::<NeroHookAction>(raw_action.clone()) {
             Ok(action) => parsed.actions.push(action),
             Err(_) if is_unknown_action_type(&raw_action) => {
                 warn!(raw_action = %raw_action, "ignoring unknown hook action type");
@@ -158,15 +152,15 @@ fn parse_hook_action_envelope(json_payload: &str) -> Result<ParsedHookActions, s
     Ok(parsed)
 }
 
-pub fn parse_hook_actions_from_stdout(
+pub fn parse_nero_hook_actions_from_stdout(
     stdout: &str,
-) -> Result<ParsedHookActions, serde_json::Error> {
+) -> Result<ParsedNeroHookActions, serde_json::Error> {
     let trimmed = stdout.trim();
     if trimmed.is_empty() {
-        return Ok(ParsedHookActions::default());
+        return Ok(ParsedNeroHookActions::default());
     }
 
-    let strict_err = match parse_hook_action_envelope(trimmed) {
+    let strict_err = match parse_nero_hook_action_envelope(trimmed) {
         Ok(parsed) => return Ok(parsed),
         Err(err) => err,
     };
@@ -188,7 +182,7 @@ pub fn parse_hook_actions_from_stdout(
             && candidate.starts_with('{')
             && candidate.ends_with('}')
             && (candidate.starts_with("{\"actions\"") || candidate.starts_with("{ \"actions\""))
-            && let Ok(parsed) = parse_hook_action_envelope(candidate)
+            && let Ok(parsed) = parse_nero_hook_action_envelope(candidate)
         {
             warn!(
                 stdout_len = trimmed.len(),
@@ -207,11 +201,6 @@ fn is_unknown_action_type(value: &serde_json::Value) -> bool {
         return false;
     };
     !matches!(kind, "nero_hook_msg" | "visible_note" | "auto_user_reply")
-        && !is_retired_action_type(kind)
-}
-
-fn is_retired_action_type(kind: &str) -> bool {
-    matches!(kind, "context_note" | "dual_note")
 }
 
 fn action_type(value: &serde_json::Value) -> Option<&str> {
@@ -228,19 +217,19 @@ mod tests {
 
     #[test]
     fn parse_empty_stdout_returns_no_actions() {
-        let parsed = parse_hook_actions_from_stdout("   \n").expect("parse");
-        assert_eq!(parsed, ParsedHookActions::default());
+        let parsed = parse_nero_hook_actions_from_stdout("   \n").expect("parse");
+        assert_eq!(parsed, ParsedNeroHookActions::default());
     }
 
     #[test]
     fn missing_actions_field_defaults_to_no_actions() {
-        let parsed = parse_hook_actions_from_stdout("{}").expect("parse");
-        assert_eq!(parsed, ParsedHookActions::default());
+        let parsed = parse_nero_hook_actions_from_stdout("{}").expect("parse");
+        assert_eq!(parsed, ParsedNeroHookActions::default());
     }
 
     #[test]
     fn parse_valid_actions() {
-        let parsed = parse_hook_actions_from_stdout(
+        let parsed = parse_nero_hook_actions_from_stdout(
             r#"{
               "actions": [
                 {"type": "visible_note", "message": "[nero-hook] ok"},
@@ -254,10 +243,10 @@ mod tests {
         assert_eq!(
             parsed.actions,
             vec![
-                HookAction::VisibleNote {
+                NeroHookAction::VisibleNote {
                     message: "[nero-hook] ok".to_string()
                 },
-                HookAction::NeroHookMsg {
+                NeroHookAction::NeroHookMsg {
                     mode: NeroHookMsgMode::TuiShort,
                     show: NeroHookMsgShow {
                         agent: true,
@@ -271,7 +260,7 @@ mod tests {
                         short: "SHORT".to_string()
                     }
                 },
-                HookAction::AutoUserReply {
+                NeroHookAction::AutoUserReply {
                     message: "continue".to_string()
                 }
             ]
@@ -281,14 +270,14 @@ mod tests {
 
     #[test]
     fn parse_invalid_json_errors() {
-        let err = parse_hook_actions_from_stdout("{not-json").expect_err("invalid json");
+        let err = parse_nero_hook_actions_from_stdout("{not-json").expect_err("invalid json");
         let msg = err.to_string();
         assert!(msg.contains("expected") || msg.contains("key"));
     }
 
     #[test]
     fn parse_recovers_json_after_plaintext_prefix_line() {
-        let parsed = parse_hook_actions_from_stdout(
+        let parsed = parse_nero_hook_actions_from_stdout(
             r#"legacy warning line
 {"actions":[{"type":"visible_note","message":"ok"}]}"#,
         )
@@ -296,7 +285,7 @@ mod tests {
 
         assert_eq!(
             parsed.actions,
-            vec![HookAction::VisibleNote {
+            vec![NeroHookAction::VisibleNote {
                 message: "ok".to_string()
             }]
         );
@@ -305,7 +294,7 @@ mod tests {
 
     #[test]
     fn parse_wrapped_json_in_noise_still_errors() {
-        let err = parse_hook_actions_from_stdout(
+        let err = parse_nero_hook_actions_from_stdout(
             r#"prefix >>> {"actions":[{"type":"visible_note","message":"ctx"}]} <<< suffix"#,
         )
         .expect_err("wrapped json should not be recovered");
@@ -314,7 +303,7 @@ mod tests {
 
     #[test]
     fn unknown_action_type_is_ignored_and_counted() {
-        let parsed = parse_hook_actions_from_stdout(
+        let parsed = parse_nero_hook_actions_from_stdout(
             r#"{
               "actions": [
                 {"type": "visible_note", "message": "a"},
@@ -326,7 +315,7 @@ mod tests {
 
         assert_eq!(
             parsed.actions,
-            vec![HookAction::VisibleNote {
+            vec![NeroHookAction::VisibleNote {
                 message: "a".to_string()
             }]
         );
@@ -334,42 +323,52 @@ mod tests {
     }
 
     #[test]
-    fn retired_context_note_action_type_errors_explicitly() {
-        let err = parse_hook_actions_from_stdout(
+    fn mixed_known_and_unknown_action_types_keep_known_actions_and_count_unknowns() {
+        let parsed = parse_nero_hook_actions_from_stdout(
             r#"{
               "actions": [
-                {"type": "context_note", "message": "legacy"}
+                {"type": "visible_note", "message": "keep me"},
+                {"type": "mystery_action_alpha", "message": "legacy"},
+                {"type": "nero_hook_msg", "mode": "tui-short", "show": {"agent": true, "tui": false}, "msg": {"full": "FULL", "short": "SHORT"}},
+                {"type": "opaque_action_beta", "payload": {"tui_message": "short", "agent_message": "full"}},
+                {"type": "future_magic_action", "message": "future"},
+                {"type": "auto_user_reply", "message": "continue"}
               ]
             }"#,
         )
-        .expect_err("retired action type should not be ignored");
+        .expect("parse");
 
-        assert!(
-            err.to_string()
-                .contains("hook action type `context_note` has been retired")
+        assert_eq!(
+            parsed.actions,
+            vec![
+                NeroHookAction::VisibleNote {
+                    message: "keep me".to_string()
+                },
+                NeroHookAction::NeroHookMsg {
+                    mode: NeroHookMsgMode::TuiShort,
+                    show: NeroHookMsgShow {
+                        agent: true,
+                        tui: false
+                    },
+                    freq: 0,
+                    format: NeroHookMsgFormat::Block,
+                    status: None,
+                    msg: NeroHookMsgContent {
+                        full: "FULL".to_string(),
+                        short: "SHORT".to_string()
+                    }
+                },
+                NeroHookAction::AutoUserReply {
+                    message: "continue".to_string()
+                }
+            ]
         );
-    }
-
-    #[test]
-    fn retired_dual_note_action_type_errors_explicitly() {
-        let err = parse_hook_actions_from_stdout(
-            r#"{
-              "actions": [
-                {"type": "dual_note", "tui_message": "short", "agent_message": "full"}
-              ]
-            }"#,
-        )
-        .expect_err("retired action type should not be ignored");
-
-        assert!(
-            err.to_string()
-                .contains("hook action type `dual_note` has been retired")
-        );
+        assert_eq!(parsed.ignored_unknown_actions, 3);
     }
 
     #[test]
     fn malformed_known_action_errors() {
-        let err = parse_hook_actions_from_stdout(
+        let err = parse_nero_hook_actions_from_stdout(
             r#"{
               "actions": [
                 {"type": "visible_note"}
@@ -383,7 +382,7 @@ mod tests {
 
     #[test]
     fn nero_hook_msg_mode_accepts_tui_short_alias() {
-        let parsed = parse_hook_actions_from_stdout(
+        let parsed = parse_nero_hook_actions_from_stdout(
             r#"{
               "actions": [
                 {
@@ -399,7 +398,7 @@ mod tests {
 
         assert_eq!(
             parsed.actions,
-            vec![HookAction::NeroHookMsg {
+            vec![NeroHookAction::NeroHookMsg {
                 mode: NeroHookMsgMode::TuiShort,
                 show: NeroHookMsgShow {
                     agent: true,
@@ -418,7 +417,7 @@ mod tests {
 
     #[test]
     fn nero_hook_msg_parses_freq_when_present() {
-        let parsed = parse_hook_actions_from_stdout(
+        let parsed = parse_nero_hook_actions_from_stdout(
             r#"{
               "actions": [
                 {
@@ -435,7 +434,7 @@ mod tests {
 
         assert_eq!(
             parsed.actions,
-            vec![HookAction::NeroHookMsg {
+            vec![NeroHookAction::NeroHookMsg {
                 mode: NeroHookMsgMode::TuiShort,
                 show: NeroHookMsgShow {
                     agent: true,
@@ -454,7 +453,7 @@ mod tests {
 
     #[test]
     fn nero_hook_msg_parses_null_freq_as_zero() {
-        let parsed = parse_hook_actions_from_stdout(
+        let parsed = parse_nero_hook_actions_from_stdout(
             r#"{
               "actions": [
                 {
@@ -471,7 +470,7 @@ mod tests {
 
         assert_eq!(
             parsed.actions,
-            vec![HookAction::NeroHookMsg {
+            vec![NeroHookAction::NeroHookMsg {
                 mode: NeroHookMsgMode::TuiShort,
                 show: NeroHookMsgShow {
                     agent: true,
@@ -490,7 +489,7 @@ mod tests {
 
     #[test]
     fn nero_hook_msg_parses_format_and_status_when_present() {
-        let parsed = parse_hook_actions_from_stdout(
+        let parsed = parse_nero_hook_actions_from_stdout(
             r#"{
               "actions": [
                 {
@@ -508,7 +507,7 @@ mod tests {
 
         assert_eq!(
             parsed.actions,
-            vec![HookAction::NeroHookMsg {
+            vec![NeroHookAction::NeroHookMsg {
                 mode: NeroHookMsgMode::TuiShort,
                 show: NeroHookMsgShow {
                     agent: true,
@@ -531,7 +530,7 @@ mod tests {
 
     #[test]
     fn nero_hook_msg_parses_status_meta_when_present() {
-        let parsed = parse_hook_actions_from_stdout(
+        let parsed = parse_nero_hook_actions_from_stdout(
             r#"{
               "actions": [
                 {
@@ -555,7 +554,7 @@ mod tests {
         )
         .expect("parse");
 
-        let HookAction::NeroHookMsg { status, .. } = &parsed.actions[0] else {
+        let NeroHookAction::NeroHookMsg { status, .. } = &parsed.actions[0] else {
             panic!("expected nero_hook_msg action");
         };
         let status = status.as_ref().expect("status");
@@ -570,7 +569,7 @@ mod tests {
 
     #[test]
     fn nero_hook_msg_unknown_format_defaults_to_block() {
-        let parsed = parse_hook_actions_from_stdout(
+        let parsed = parse_nero_hook_actions_from_stdout(
             r#"{
               "actions": [
                 {
@@ -587,7 +586,7 @@ mod tests {
 
         assert_eq!(
             parsed.actions,
-            vec![HookAction::NeroHookMsg {
+            vec![NeroHookAction::NeroHookMsg {
                 mode: NeroHookMsgMode::TuiShort,
                 show: NeroHookMsgShow {
                     agent: true,
@@ -606,7 +605,7 @@ mod tests {
 
     #[test]
     fn nero_hook_msg_non_string_format_defaults_to_block() {
-        let parsed = parse_hook_actions_from_stdout(
+        let parsed = parse_nero_hook_actions_from_stdout(
             r#"{
               "actions": [
                 {
@@ -623,7 +622,7 @@ mod tests {
 
         assert_eq!(
             parsed.actions,
-            vec![HookAction::NeroHookMsg {
+            vec![NeroHookAction::NeroHookMsg {
                 mode: NeroHookMsgMode::TuiShort,
                 show: NeroHookMsgShow {
                     agent: true,
@@ -642,7 +641,7 @@ mod tests {
 
     #[test]
     fn nero_hook_msg_malformed_status_is_ignored() {
-        let parsed = parse_hook_actions_from_stdout(
+        let parsed = parse_nero_hook_actions_from_stdout(
             r#"{
               "actions": [
                 {
@@ -659,7 +658,7 @@ mod tests {
 
         assert_eq!(
             parsed.actions,
-            vec![HookAction::NeroHookMsg {
+            vec![NeroHookAction::NeroHookMsg {
                 mode: NeroHookMsgMode::TuiShort,
                 show: NeroHookMsgShow {
                     agent: true,

@@ -2,6 +2,7 @@
 
 use crate::protocol::SandboxPolicy;
 use crate::spawn::CODEX_SANDBOX_ENV_VAR;
+use crate::spawn::SpawnChildCwdPolicy;
 use crate::spawn::SpawnChildRequest;
 use crate::spawn::StdioPolicy;
 use crate::spawn::spawn_child_async;
@@ -38,7 +39,7 @@ pub async fn spawn_command_under_seatbelt(
         program: PathBuf::from(MACOS_PATH_TO_SEATBELT_EXECUTABLE),
         args,
         arg0,
-        cwd: command_cwd,
+        cwd: SpawnChildCwdPolicy::Explicit(command_cwd),
         network_sandbox_policy: NetworkSandboxPolicy::from(sandbox_policy),
         network,
         stdio_policy,
