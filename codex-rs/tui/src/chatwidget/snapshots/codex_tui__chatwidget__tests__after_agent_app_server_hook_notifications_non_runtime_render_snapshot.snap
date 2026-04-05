@@ -1,0 +1,7 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: combined
+---
+AfterAgent hook (completed)
+  status: legacy after_agent runtime status
+  hook context: NERO HOOK SYSTEM [state: healthy]

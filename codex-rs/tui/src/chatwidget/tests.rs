@@ -13797,6 +13797,7 @@ async fn after_agent_app_server_hook_notifications_render_snapshot() {
                 completed_at: Some(1),
                 duration_ms: Some(0),
                 meta: Some(serde_json::json!({
+                    "domain": "nero_runtime",
                     "status": {
                         "kind_normalized": "auto",
                         "meta": {
@@ -13861,6 +13862,7 @@ async fn after_agent_app_server_hook_notifications_render_meta_only_snapshot() {
                 completed_at: Some(1),
                 duration_ms: Some(0),
                 meta: Some(serde_json::json!({
+                    "domain": "nero_runtime",
                     "status": {
                         "kind_normalized": "auto",
                     },
@@ -13889,6 +13891,207 @@ async fn after_agent_app_server_hook_notifications_render_meta_only_snapshot() {
     assert_snapshot!(
         "after_agent_app_server_hook_notifications_render_meta_only_snapshot",
         combined
+    );
+}
+
+#[test]
+fn hook_runtime_status_prefix_uses_warning_and_error_prefixes() {
+    let warning_meta = serde_json::json!({
+        "status": {
+            "kind_normalized": "warning",
+        },
+    });
+    let error_meta = serde_json::json!({
+        "status": {
+            "kind_normalized": "error",
+        },
+    });
+
+    assert_eq!(
+        hook_runtime_status_prefix(Some(&warning_meta)),
+        "hook-warning instruction: "
+    );
+    assert_eq!(
+        hook_runtime_status_prefix(Some(&error_meta)),
+        "hook-error instruction: "
+    );
+}
+
+#[test]
+fn hook_runtime_meta_lines_use_warning_and_error_labels() {
+    let warning_meta = serde_json::json!({
+        "status": {
+            "kind_normalized": "warning",
+            "meta": {
+                "auto_decision": {
+                    "decision": "continue",
+                    "reason_code": "score_above_threshold",
+                    "campaign_id": "D",
+                    "campaign_status": "active",
+                },
+            },
+        },
+        "protocol": {
+            "status": "ok",
+            "stop_checkpoint_expected": true,
+            "stop_checkpoint_delivered": true,
+        },
+        "follow_up": {
+            "status": "queued",
+            "queued_count": 1,
+            "blocked_count": 0,
+        },
+    });
+    let error_meta = serde_json::json!({
+        "status": {
+            "kind_normalized": "error",
+            "meta": {
+                "auto_decision": {
+                    "decision": "continue",
+                    "reason_code": "score_above_threshold",
+                    "campaign_id": "D",
+                    "campaign_status": "active",
+                },
+            },
+        },
+        "protocol": {
+            "status": "ok",
+            "stop_checkpoint_expected": true,
+            "stop_checkpoint_delivered": true,
+        },
+        "follow_up": {
+            "status": "queued",
+            "queued_count": 1,
+            "blocked_count": 0,
+        },
+    });
+
+    assert_eq!(
+        hook_runtime_meta_lines(Some(&warning_meta), /*has_runtime_status_entry*/ false),
+        vec![
+            "  hook-warning protocol: ok (expected=true, delivered=true)".to_string(),
+            "  hook-warning follow-up: queued (queued=1, blocked=0)".to_string(),
+            "  hook-warning decision: continue (reason=score_above_threshold, campaign=D (active))"
+                .to_string(),
+        ]
+    );
+    assert_eq!(
+        hook_runtime_meta_lines(Some(&error_meta), /*has_runtime_status_entry*/ false),
+        vec![
+            "  hook-error protocol: ok (expected=true, delivered=true)".to_string(),
+            "  hook-error follow-up: queued (queued=1, blocked=0)".to_string(),
+            "  hook-error decision: continue (reason=score_above_threshold, campaign=D (active))"
+                .to_string(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn after_agent_app_server_hook_notifications_non_runtime_render_snapshot() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.handle_server_notification(
+        ServerNotification::HookCompleted(AppServerHookCompletedNotification {
+            thread_id: ThreadId::new().to_string(),
+            turn_id: Some("turn-non-runtime".to_string()),
+            run: AppServerHookRunSummary {
+                id: "after-agent:custom-hook-runtime:turn-non-runtime".to_string(),
+                event_name: AppServerHookEventName::AfterAgent,
+                handler_type: AppServerHookHandlerType::Agent,
+                execution_mode: AppServerHookExecutionMode::Sync,
+                scope: AppServerHookScope::Turn,
+                source_path: PathBuf::from("legacy://after_agent/custom-hook-runtime"),
+                display_order: 0,
+                status: AppServerHookRunStatus::Completed,
+                status_message: Some("legacy after_agent runtime status".to_string()),
+                started_at: 1,
+                completed_at: Some(1),
+                duration_ms: Some(0),
+                meta: Some(serde_json::json!({
+                    "status": {
+                        "kind_normalized": "auto",
+                    },
+                    "protocol": {
+                        "status": "ok",
+                        "stop_checkpoint_expected": true,
+                        "stop_checkpoint_delivered": true,
+                    },
+                    "follow_up": {
+                        "status": "queued",
+                        "queued_count": 1,
+                        "blocked_count": 0,
+                    },
+                })),
+                entries: vec![AppServerHookOutputEntry {
+                    kind: AppServerHookOutputEntryKind::Context,
+                    text: "NERO HOOK SYSTEM [state: healthy]".to_string(),
+                }],
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    let combined = cells
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert_snapshot!(
+        "after_agent_app_server_hook_notifications_non_runtime_render_snapshot",
+        combined
+    );
+}
+
+#[tokio::test]
+async fn after_agent_app_server_hook_notifications_runtime_warning_error_use_runtime_labels() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.handle_server_notification(
+        ServerNotification::HookCompleted(AppServerHookCompletedNotification {
+            thread_id: ThreadId::new().to_string(),
+            turn_id: Some("turn-runtime-warning-error".to_string()),
+            run: AppServerHookRunSummary {
+                id: "after-agent:nero-hook-runtime:turn-runtime-warning-error".to_string(),
+                event_name: AppServerHookEventName::AfterAgent,
+                handler_type: AppServerHookHandlerType::Agent,
+                execution_mode: AppServerHookExecutionMode::Sync,
+                scope: AppServerHookScope::Turn,
+                source_path: PathBuf::from("legacy://after_agent/nero-hook-runtime"),
+                display_order: 0,
+                status: AppServerHookRunStatus::Completed,
+                status_message: None,
+                started_at: 1,
+                completed_at: Some(1),
+                duration_ms: Some(0),
+                meta: Some(serde_json::json!({
+                    "domain": "nero_runtime",
+                    "status": {
+                        "kind_normalized": "warning",
+                    },
+                })),
+                entries: vec![
+                    AppServerHookOutputEntry {
+                        kind: AppServerHookOutputEntryKind::Warning,
+                        text: "runtime warning".to_string(),
+                    },
+                    AppServerHookOutputEntry {
+                        kind: AppServerHookOutputEntryKind::Error,
+                        text: "runtime error".to_string(),
+                    },
+                ],
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    let combined = cells
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert_eq!(
+        combined,
+        "AfterAgent hook (completed)\n  hook-warning instruction: runtime warning\n  hook-warning instruction: runtime error\n"
     );
 }
 

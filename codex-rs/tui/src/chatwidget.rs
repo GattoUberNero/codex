@@ -1394,17 +1394,27 @@ fn hook_completed_event_from_notification(
     }
 }
 
-fn hook_runtime_status_prefix(meta: Option<&serde_json::Value>) -> &'static str {
+fn hook_runtime_label(meta: Option<&serde_json::Value>) -> &'static str {
     let kind_normalized = meta
         .and_then(serde_json::Value::as_object)
         .and_then(|item| item.get("status"))
         .and_then(serde_json::Value::as_object)
         .and_then(|item| item.get("kind_normalized"))
         .and_then(serde_json::Value::as_str);
-    if kind_normalized == Some("auto") {
-        "hook-auto instruction: "
-    } else {
-        "runtime status: "
+    match kind_normalized {
+        Some("auto") => "hook-auto",
+        Some("warning") => "hook-warning",
+        Some("error") => "hook-error",
+        _ => "runtime",
+    }
+}
+
+fn hook_runtime_status_prefix(meta: Option<&serde_json::Value>) -> &'static str {
+    match hook_runtime_label(meta) {
+        "hook-auto" => "hook-auto instruction: ",
+        "hook-warning" => "hook-warning instruction: ",
+        "hook-error" => "hook-error instruction: ",
+        _ => "runtime status: ",
     }
 }
 
@@ -1428,6 +1438,7 @@ fn hook_runtime_meta_lines(
         }
     }
 
+    let runtime_label = hook_runtime_label(meta);
     let protocol = meta_obj
         .get("protocol")
         .and_then(serde_json::Value::as_object);
@@ -1454,10 +1465,10 @@ fn hook_runtime_meta_lines(
         let stop_checkpoint_delivered = protocol
             .get("stop_checkpoint_delivered")
             .and_then(serde_json::Value::as_bool);
+        let stop_checkpoint_expected = stop_checkpoint_expected.unwrap_or(false);
+        let stop_checkpoint_delivered = stop_checkpoint_delivered.unwrap_or(false);
         lines.push(format!(
-            "  hook-auto protocol: {status} (expected={}, delivered={})",
-            stop_checkpoint_expected.unwrap_or(false),
-            stop_checkpoint_delivered.unwrap_or(false),
+            "  {runtime_label} protocol: {status} (expected={stop_checkpoint_expected}, delivered={stop_checkpoint_delivered})"
         ));
     }
 
@@ -1474,7 +1485,7 @@ fn hook_runtime_meta_lines(
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         lines.push(format!(
-            "  hook-auto follow-up: {status} (queued={queued_count}, blocked={blocked_count})"
+            "  {runtime_label} follow-up: {status} (queued={queued_count}, blocked={blocked_count})"
         ));
     }
 
@@ -1504,11 +1515,11 @@ fn hook_runtime_meta_lines(
         }
         if let Some(decision) = decision {
             if detail_parts.is_empty() {
-                lines.push(format!("  hook-auto decision: {decision}"));
+                lines.push(format!("  {runtime_label} decision: {decision}"));
             } else {
+                let detail_text = detail_parts.join(", ");
                 lines.push(format!(
-                    "  hook-auto decision: {decision} ({})",
-                    detail_parts.join(", "),
+                    "  {runtime_label} decision: {decision} ({detail_text})",
                 ));
             }
         }
@@ -4242,11 +4253,18 @@ impl ChatWidget {
             event_name,
             codex_protocol::protocol::HookEventName::AfterAgent
         );
+        let is_nero_runtime_after_agent_event = is_after_agent_runtime_event
+            && meta
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|item| item.get("domain"))
+                .and_then(serde_json::Value::as_str)
+                == Some("nero_runtime");
         let status = format!("{status:?}").to_lowercase();
         let header = format!("{} hook ({status})", hook_event_label(event_name));
         let mut lines: Vec<ratatui::text::Line<'static>> = vec![header.into()];
         let runtime_status_prefix = hook_runtime_status_prefix(meta.as_ref());
-        let has_runtime_status_entry = is_after_agent_runtime_event
+        let has_runtime_status_entry = is_nero_runtime_after_agent_event
             && entries.iter().any(|entry| {
                 matches!(
                     entry.kind,
@@ -4255,13 +4273,17 @@ impl ChatWidget {
             });
         let status_message = status_message.filter(|item| !item.is_empty());
         if let Some(status_message) = &status_message {
-            if is_after_agent_runtime_event && !has_runtime_status_entry {
+            if is_nero_runtime_after_agent_event && !has_runtime_status_entry {
                 lines.push(format!("  {runtime_status_prefix}{status_message}").into());
             } else {
                 lines.push(format!("  status: {status_message}").into());
             }
         }
-        let runtime_meta_lines = hook_runtime_meta_lines(meta.as_ref(), has_runtime_status_entry);
+        let runtime_meta_lines = if is_nero_runtime_after_agent_event {
+            hook_runtime_meta_lines(meta.as_ref(), has_runtime_status_entry)
+        } else {
+            Vec::new()
+        };
         if is_after_agent_runtime_event
             && entries.is_empty()
             && runtime_meta_lines.is_empty()
@@ -4271,15 +4293,25 @@ impl ChatWidget {
         }
         for entry in entries {
             let prefix = match entry.kind {
+                codex_protocol::protocol::HookOutputEntryKind::Warning
+                    if is_nero_runtime_after_agent_event =>
+                {
+                    runtime_status_prefix
+                }
                 codex_protocol::protocol::HookOutputEntryKind::Warning => "warning: ",
                 codex_protocol::protocol::HookOutputEntryKind::Stop => "stop: ",
                 codex_protocol::protocol::HookOutputEntryKind::Feedback => "feedback: ",
                 codex_protocol::protocol::HookOutputEntryKind::Context
-                    if is_after_agent_runtime_event =>
+                    if is_nero_runtime_after_agent_event =>
                 {
                     runtime_status_prefix
                 }
                 codex_protocol::protocol::HookOutputEntryKind::Context => "hook context: ",
+                codex_protocol::protocol::HookOutputEntryKind::Error
+                    if is_nero_runtime_after_agent_event =>
+                {
+                    runtime_status_prefix
+                }
                 codex_protocol::protocol::HookOutputEntryKind::Error => "error: ",
             };
             lines.push(format!("  {prefix}{}", entry.text).into());
