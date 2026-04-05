@@ -4245,10 +4245,6 @@ impl ChatWidget {
         let status = format!("{status:?}").to_lowercase();
         let header = format!("{} hook ({status})", hook_event_label(event_name));
         let mut lines: Vec<ratatui::text::Line<'static>> = vec![header.into()];
-        let status_message = status_message.filter(|item| !item.is_empty());
-        if let Some(status_message) = &status_message {
-            lines.push(format!("  status: {status_message}").into());
-        }
         let runtime_status_prefix = hook_runtime_status_prefix(meta.as_ref());
         let has_runtime_status_entry = is_after_agent_runtime_event
             && entries.iter().any(|entry| {
@@ -4257,6 +4253,14 @@ impl ChatWidget {
                     codex_protocol::protocol::HookOutputEntryKind::Context
                 )
             });
+        let status_message = status_message.filter(|item| !item.is_empty());
+        if let Some(status_message) = &status_message {
+            if is_after_agent_runtime_event && !has_runtime_status_entry {
+                lines.push(format!("  {runtime_status_prefix}{status_message}").into());
+            } else {
+                lines.push(format!("  status: {status_message}").into());
+            }
+        }
         let runtime_meta_lines = hook_runtime_meta_lines(meta.as_ref(), has_runtime_status_entry);
         if is_after_agent_runtime_event
             && entries.is_empty()
