@@ -164,12 +164,6 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
             Box::pin(async move {
                 let notify_payload = legacy_notify_json(payload).ok();
                 let base_command_argv = argv.as_ref().clone();
-                if command_from_argv(&base_command_argv).is_none() {
-                    return HookExecution {
-                        result: HookResult::Success,
-                        actions: Vec::new(),
-                    };
-                }
                 let mut command_argv = base_command_argv.clone();
                 let payload_in_argv = if let Some(notify_payload) = notify_payload.as_ref() {
                     // Preserve the historical argv + JSON contract for legacy hooks
