@@ -837,7 +837,7 @@ async fn subagent_session_runs_stop_and_after_agent_but_filters_nero_actions() -
     let after_agent_marker = hook_dir.path().join("subagent-after-agent.marker");
     let after_agent_marker_str = after_agent_marker.to_string_lossy().to_string();
     let notify_script = write_notify_script(&format!(
-        "#!/bin/bash\n: > \"{after_agent_marker_str}\"\nprintf '%s' '{{\"actions\":[{{\"type\":\"visible_note\",\"message\":\"subagent visible note\"}},{{\"type\":\"context_note\",\"message\":\"SUBAGENT_CONTEXT_NOTE_BLOCKED\"}},{{\"type\":\"dual_note\",\"tui_message\":\"SUBAGENT_DUAL_TUI_BLOCKED\",\"agent_message\":\"SUBAGENT_DUAL_AGENT_BLOCKED\"}},{{\"type\":\"nero_hook_msg\",\"mode\":\"synced\",\"show\":{{\"agent\":true,\"tui\":true}},\"format\":\"block\",\"msg\":{{\"full\":\"SUBAGENT_NERO_FULL_BLOCKED\",\"short\":\"SUBAGENT_NERO_SHORT_BLOCKED\"}}}},{{\"type\":\"auto_user_reply\",\"message\":\"continue from subagent\"}}]}}'\n"
+        "#!/bin/bash\n: > \"{after_agent_marker_str}\"\nprintf '%s' '{{\"actions\":[{{\"type\":\"visible_note\",\"message\":\"subagent visible note\"}},{{\"type\":\"nero_hook_msg\",\"mode\":\"synced\",\"show\":{{\"agent\":true,\"tui\":true}},\"format\":\"block\",\"msg\":{{\"full\":\"SUBAGENT_NERO_FULL_BLOCKED\",\"short\":\"SUBAGENT_NERO_SHORT_BLOCKED\"}}}},{{\"type\":\"auto_user_reply\",\"message\":\"continue from subagent\"}}]}}'\n"
     ))?;
 
     let stop_command = format!("bash {stop_script}");
@@ -917,8 +917,7 @@ async fn subagent_session_runs_stop_and_after_agent_but_filters_nero_actions() -
             Duration::from_millis(300),
             wait_for_event(&test.test().codex, |ev| {
                 matches!(ev, EventMsg::Warning(w)
-                    if w.message.contains("SUBAGENT_DUAL_TUI_BLOCKED")
-                        || w.message.contains("SUBAGENT_NERO_FULL_BLOCKED")
+                    if w.message.contains("SUBAGENT_NERO_FULL_BLOCKED")
                         || w.message.contains("SUBAGENT_NERO_SHORT_BLOCKED"))
             }),
         )
@@ -932,7 +931,7 @@ async fn subagent_session_runs_stop_and_after_agent_but_filters_nero_actions() -
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn after_agent_msg_context_dual_note_do_not_inject_agent_hook_prompts() -> Result<()> {
+async fn after_agent_msg_does_not_inject_agent_hook_prompts() -> Result<()> {
     init_test_tracing();
     if skip_if_no_linux_sandbox_bin() {
         return Ok(());
@@ -952,7 +951,7 @@ fi
 "#,
     )?;
     let script = write_notify_script(&format!(
-        "#!/bin/bash\nset -euo pipefail\nif [ -f \"{once_marker_str}\" ]; then\n  printf '%s' '{{\"actions\":[]}}'\nelse\n  : > \"{once_marker_str}\"\n  printf '%s' '{{\"actions\":[{{\"type\":\"context_note\",\"message\":\"CTX_STOP_CENTRIC_TOKEN\"}},{{\"type\":\"dual_note\",\"tui_message\":\"DUAL_TUI_TOKEN\",\"agent_message\":\"DUAL_AGENT_TOKEN\"}},{{\"type\":\"nero_hook_msg\",\"mode\":\"synced\",\"show\":{{\"agent\":true,\"tui\":false}},\"format\":\"inline\",\"msg\":{{\"full\":\"NERO_AGENT_TOKEN\",\"short\":\"NERO_SHORT_TOKEN\"}}}},{{\"type\":\"auto_user_reply\",\"message\":\"continue stop-centric\"}}]}}'\nfi\n"
+        "#!/bin/bash\nset -euo pipefail\nif [ -f \"{once_marker_str}\" ]; then\n  printf '%s' '{{\"actions\":[]}}'\nelse\n  : > \"{once_marker_str}\"\n  printf '%s' '{{\"actions\":[{{\"type\":\"nero_hook_msg\",\"mode\":\"synced\",\"show\":{{\"agent\":true,\"tui\":false}},\"format\":\"inline\",\"msg\":{{\"full\":\"NERO_AGENT_TOKEN\",\"short\":\"NERO_SHORT_TOKEN\"}}}},{{\"type\":\"auto_user_reply\",\"message\":\"continue stop-centric\"}}]}}'\nfi\n"
     ))?;
     let stop_command = format!("bash {stop_script}");
 
@@ -1012,18 +1011,6 @@ fi
         .iter()
         .flat_map(|request| request.message_input_texts("developer"))
         .collect();
-    assert!(
-        developer_texts
-            .iter()
-            .all(|text| !text.contains("CTX_STOP_CENTRIC_TOKEN")),
-        "context_note must not inject hook prompt into developer history"
-    );
-    assert!(
-        developer_texts
-            .iter()
-            .all(|text| !text.contains("DUAL_AGENT_TOKEN")),
-        "dual_note agent message must not inject hook prompt into developer history"
-    );
     assert!(
         developer_texts
             .iter()

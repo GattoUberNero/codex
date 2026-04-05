@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
+use serde::de::Error as _;
 use tracing::warn;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,13 +116,6 @@ pub enum HookAction {
     VisibleNote {
         message: String,
     },
-    ContextNote {
-        message: String,
-    },
-    DualNote {
-        tui_message: String,
-        agent_message: String,
-    },
     AutoUserReply {
         message: String,
     },
@@ -144,6 +138,13 @@ fn parse_hook_action_envelope(json_payload: &str) -> Result<ParsedHookActions, s
     let mut parsed = ParsedHookActions::default();
 
     for raw_action in envelope.actions {
+        if let Some(kind) = action_type(&raw_action)
+            && is_retired_action_type(kind)
+        {
+            return Err(serde_json::Error::custom(format!(
+                "hook action type `{kind}` has been retired; use `nero_hook_msg`/`visible_note`/`auto_user_reply`"
+            )));
+        }
         match serde_json::from_value::<HookAction>(raw_action.clone()) {
             Ok(action) => parsed.actions.push(action),
             Err(_) if is_unknown_action_type(&raw_action) => {
@@ -202,19 +203,21 @@ pub fn parse_hook_actions_from_stdout(
 }
 
 fn is_unknown_action_type(value: &serde_json::Value) -> bool {
-    let Some(obj) = value.as_object() else {
+    let Some(kind) = action_type(value) else {
         return false;
     };
-    let Some(type_value) = obj.get("type") else {
-        return false;
-    };
-    let Some(kind) = type_value.as_str() else {
-        return false;
-    };
-    !matches!(
-        kind,
-        "nero_hook_msg" | "visible_note" | "context_note" | "dual_note" | "auto_user_reply"
-    )
+    !matches!(kind, "nero_hook_msg" | "visible_note" | "auto_user_reply")
+        && !is_retired_action_type(kind)
+}
+
+fn is_retired_action_type(kind: &str) -> bool {
+    matches!(kind, "context_note" | "dual_note")
+}
+
+fn action_type(value: &serde_json::Value) -> Option<&str> {
+    let obj = value.as_object()?;
+    let type_value = obj.get("type")?;
+    type_value.as_str()
 }
 
 #[cfg(test)]
@@ -241,8 +244,6 @@ mod tests {
             r#"{
               "actions": [
                 {"type": "visible_note", "message": "[nero-hook] ok"},
-                {"type": "context_note", "message": "internal note"},
-                {"type": "dual_note", "tui_message": "short", "agent_message": "full"},
                 {"type": "nero_hook_msg", "mode": "tui-short", "show": {"agent": true, "tui": true}, "msg": {"full": "FULL", "short": "SHORT"}},
                 {"type": "auto_user_reply", "message": "continue"}
               ]
@@ -255,13 +256,6 @@ mod tests {
             vec![
                 HookAction::VisibleNote {
                     message: "[nero-hook] ok".to_string()
-                },
-                HookAction::ContextNote {
-                    message: "internal note".to_string()
-                },
-                HookAction::DualNote {
-                    tui_message: "short".to_string(),
-                    agent_message: "full".to_string()
                 },
                 HookAction::NeroHookMsg {
                     mode: NeroHookMsgMode::TuiShort,
@@ -312,7 +306,7 @@ mod tests {
     #[test]
     fn parse_wrapped_json_in_noise_still_errors() {
         let err = parse_hook_actions_from_stdout(
-            r#"prefix >>> {"actions":[{"type":"context_note","message":"ctx"}]} <<< suffix"#,
+            r#"prefix >>> {"actions":[{"type":"visible_note","message":"ctx"}]} <<< suffix"#,
         )
         .expect_err("wrapped json should not be recovered");
         assert!(!err.to_string().is_empty());
@@ -337,6 +331,40 @@ mod tests {
             }]
         );
         assert_eq!(parsed.ignored_unknown_actions, 1);
+    }
+
+    #[test]
+    fn retired_context_note_action_type_errors_explicitly() {
+        let err = parse_hook_actions_from_stdout(
+            r#"{
+              "actions": [
+                {"type": "context_note", "message": "legacy"}
+              ]
+            }"#,
+        )
+        .expect_err("retired action type should not be ignored");
+
+        assert!(
+            err.to_string()
+                .contains("hook action type `context_note` has been retired")
+        );
+    }
+
+    #[test]
+    fn retired_dual_note_action_type_errors_explicitly() {
+        let err = parse_hook_actions_from_stdout(
+            r#"{
+              "actions": [
+                {"type": "dual_note", "tui_message": "short", "agent_message": "full"}
+              ]
+            }"#,
+        )
+        .expect_err("retired action type should not be ignored");
+
+        assert!(
+            err.to_string()
+                .contains("hook action type `dual_note` has been retired")
+        );
     }
 
     #[test]
