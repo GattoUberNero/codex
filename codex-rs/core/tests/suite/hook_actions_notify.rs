@@ -198,14 +198,14 @@ async fn after_agent_nero_hook_msg_block_status_emits_structured_warning_and_tur
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn after_agent_legacy_plain_stdout_keeps_normal_flow() -> Result<()> {
+async fn after_agent_plain_stdout_keeps_normal_flow() -> Result<()> {
     init_test_tracing();
     if skip_if_no_linux_sandbox_bin() {
         return Ok(());
     }
     let script = write_notify_script(
         r#"#!/bin/bash
-printf '%s' 'legacy-notifier-ok'
+printf '%s' 'notifier-ok'
 "#,
     )?;
 
@@ -221,14 +221,14 @@ printf '%s' 'legacy-notifier-ok'
     )
     .await;
 
-    submit_user_turn_no_wait(&test, "hello legacy").await?;
+    submit_user_turn_no_wait(&test, "hello plain stdout").await?;
 
     let _complete = wait_for_event(&test.test().codex, |ev| {
         matches!(ev, EventMsg::TurnComplete(_))
     })
     .await;
 
-    // No extra warning expected for plain legacy stdout actions path.
+    // No extra warning expected for plain stdout actions path.
     let warning = tokio::time::timeout(
         Duration::from_millis(200),
         wait_for_event(&test.test().codex, |ev| matches!(ev, EventMsg::Warning(_))),
@@ -236,7 +236,7 @@ printf '%s' 'legacy-notifier-ok'
     .await;
     assert!(
         warning.is_err(),
-        "did not expect hook warning for legacy stdout"
+        "did not expect hook warning for plain stdout"
     );
     Ok(())
 }
@@ -497,7 +497,7 @@ printf '%s' '{"actions":[{"type":"nero_hook_msg","mode":"tui-short","show":{"age
         Duration::from_secs(5),
         wait_for_event(&test.test().codex, |ev| {
             matches!(ev, EventMsg::Warning(w)
-                if w.message.contains("Auto delivery blocked: runtime hook message was not delivered in this turn."))
+                if w.message.contains("Auto delivery blocked: STOP checkpoint was not delivered in this turn."))
         }),
     )
     .await;
@@ -522,8 +522,8 @@ printf '%s' '{"actions":[{"type":"nero_hook_msg","mode":"tui-short","show":{"age
         .run
         .meta
         .expect("after_agent runtime hook should include meta");
-    assert_eq!(meta["protocol"]["runtime_msg_expected"], json!(true));
-    assert_eq!(meta["protocol"]["runtime_msg_delivered"], json!(false));
+    assert_eq!(meta["protocol"]["stop_checkpoint_expected"], json!(true));
+    assert_eq!(meta["protocol"]["stop_checkpoint_delivered"], json!(false));
     assert_eq!(meta["protocol"]["contract_satisfied"], json!(false));
     assert_eq!(meta["protocol"]["auto_user_replies_blocked"], json!(1));
     assert_eq!(
@@ -634,8 +634,8 @@ fi
         .run
         .meta
         .expect("after_agent runtime hook should include meta");
-    assert_eq!(meta["protocol"]["runtime_msg_expected"], json!(true));
-    assert_eq!(meta["protocol"]["runtime_msg_delivered"], json!(true));
+    assert_eq!(meta["protocol"]["stop_checkpoint_expected"], json!(true));
+    assert_eq!(meta["protocol"]["stop_checkpoint_delivered"], json!(true));
     assert_eq!(meta["protocol"]["contract_satisfied"], json!(true));
     assert_eq!(meta["protocol"]["auto_user_replies_blocked"], json!(0));
     assert_eq!(
@@ -651,7 +651,7 @@ fi
         Duration::from_millis(300),
         wait_for_event(&test.test().codex, |ev| {
             matches!(ev, EventMsg::Warning(w)
-                if w.message.contains("Auto delivery blocked: runtime hook message was not delivered in this turn."))
+                if w.message.contains("Auto delivery blocked: STOP checkpoint was not delivered in this turn."))
         }),
     )
     .await;
@@ -764,8 +764,8 @@ fi
         .run
         .meta
         .expect("after_agent runtime hook should include meta");
-    assert_eq!(meta["protocol"]["runtime_msg_expected"], json!(true));
-    assert_eq!(meta["protocol"]["runtime_msg_delivered"], json!(true));
+    assert_eq!(meta["protocol"]["stop_checkpoint_expected"], json!(true));
+    assert_eq!(meta["protocol"]["stop_checkpoint_delivered"], json!(true));
     assert_eq!(meta["protocol"]["contract_satisfied"], json!(true));
     assert_eq!(
         meta["follow_up"],

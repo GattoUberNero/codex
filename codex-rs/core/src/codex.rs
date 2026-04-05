@@ -863,8 +863,8 @@ fn after_agent_runtime_hook_summary_meta(
         },
         "protocol": {
             "status": protocol_status,
-            "runtime_msg_expected": stop_checkpoint_required,
-            "runtime_msg_delivered": stop_checkpoint_delivered,
+            "stop_checkpoint_expected": stop_checkpoint_required,
+            "stop_checkpoint_delivered": stop_checkpoint_delivered,
             "contract_satisfied": contract_satisfied,
             "nero_hook_msg_total": nero_hook_msg_total,
             "nero_hook_msg_throttled": nero_hook_msg_throttled,
@@ -1692,7 +1692,7 @@ fn clamp_nero_auto_runtime(runtime: NeroAutoRuntimeConfig) -> NeroAutoRuntimeCon
     }
 }
 
-fn session_source_disables_nero_auto(session_source: &SessionSource) -> bool {
+fn session_source_blocks_nero_msg_auto_lane(session_source: &SessionSource) -> bool {
     matches!(session_source, SessionSource::SubAgent(_))
 }
 
@@ -1701,7 +1701,7 @@ fn effective_nero_auto_runtime(
     session_source: &SessionSource,
 ) -> NeroAutoRuntimeConfig {
     let mut runtime = clamp_nero_auto_runtime(runtime);
-    if session_source_disables_nero_auto(session_source) {
+    if session_source_blocks_nero_msg_auto_lane(session_source) {
         runtime.enabled = false;
     }
     runtime
@@ -3041,7 +3041,7 @@ impl Session {
         text: String,
         session_source: SessionSource,
     ) {
-        if session_source_disables_nero_auto(&session_source) {
+        if session_source_blocks_nero_msg_auto_lane(&session_source) {
             debug!(
                 turn_id = %source_turn_id,
                 hook_name = %hook_name,
@@ -8279,7 +8279,7 @@ pub(crate) async fn run_turn(
                         &hook_delivery_log_path,
                         &sess.conversation_id,
                         turn_context.as_ref(),
-                        "legacy_notify_registry",
+                        "after_agent_hook_registry",
                         "hook_dispatch",
                         hook_dispatch_status,
                         false,
@@ -8323,8 +8323,8 @@ pub(crate) async fn run_turn(
                                 actions = actions.len(),
                                 "processing after_agent hook actions"
                             );
-                            let mut hook_runtime_msg_expected = false;
-                            let hook_runtime_msg_delivered =
+                            let mut hook_stop_checkpoint_expected = false;
+                            let hook_stop_checkpoint_delivered =
                                 stop_runtime_command_delivered_for_turn;
                             let mut hook_nero_msg_total = 0usize;
                             let mut hook_nero_msg_throttled = 0usize;
@@ -8345,7 +8345,7 @@ pub(crate) async fn run_turn(
                                         status,
                                         msg,
                                     } => {
-                                        if session_source_disables_nero_auto(
+                                        if session_source_blocks_nero_msg_auto_lane(
                                             &turn_context.session_source,
                                         ) {
                                             debug!(
@@ -8554,7 +8554,7 @@ pub(crate) async fn run_turn(
                                                 },
                                                 "delivery_contract": {
                                                     "status_kind_normalized": status_kind_normalized,
-                                                    "runtime_delivered_so_far": hook_runtime_msg_delivered,
+                                                    "stop_checkpoint_delivered_so_far": hook_stop_checkpoint_delivered,
                                                     "stop_runtime_command_delivered": stop_runtime_command_delivered_for_turn,
                                                 },
                                             }),
@@ -8595,7 +8595,7 @@ pub(crate) async fn run_turn(
                                     }
                                     HookAction::ContextNote { message } => {
                                         let message_len = message.len();
-                                        if session_source_disables_nero_auto(
+                                        if session_source_blocks_nero_msg_auto_lane(
                                             &turn_context.session_source,
                                         ) {
                                             debug!(
@@ -8647,7 +8647,7 @@ pub(crate) async fn run_turn(
                                     } => {
                                         let tui_message_len = tui_message.len();
                                         let agent_message_len = agent_message.len();
-                                        if session_source_disables_nero_auto(
+                                        if session_source_blocks_nero_msg_auto_lane(
                                             &turn_context.session_source,
                                         ) {
                                             debug!(
@@ -8726,7 +8726,7 @@ pub(crate) async fn run_turn(
                                         .await;
                                     }
                                     HookAction::AutoUserReply { message } => {
-                                        if session_source_disables_nero_auto(
+                                        if session_source_blocks_nero_msg_auto_lane(
                                             &turn_context.session_source,
                                         ) {
                                             debug!(
@@ -8780,7 +8780,7 @@ pub(crate) async fn run_turn(
                                             continue;
                                         }
                                         auto_user_reply_selected_for_turn = true;
-                                        hook_runtime_msg_expected = true;
+                                        hook_stop_checkpoint_expected = true;
                                         debug!(
                                             turn_id = %turn_context.sub_id,
                                             hook_name = %hook_name,
@@ -8809,8 +8809,8 @@ pub(crate) async fn run_turn(
                             }
                             let hook_delivery_contract_satisfied =
                                 runtime_delivery_contract_satisfied(
-                                    hook_runtime_msg_expected,
-                                    hook_runtime_msg_delivered,
+                                    hook_stop_checkpoint_expected,
+                                    hook_stop_checkpoint_delivered,
                                 );
                             if !hook_auto_user_replies_pending.is_empty() {
                                 if hook_delivery_contract_satisfied {
@@ -8832,8 +8832,8 @@ pub(crate) async fn run_turn(
                                                     "stage": "follow_up",
                                                 },
                                                 "delivery_contract": {
-                                                    "runtime_msg_expected": hook_runtime_msg_expected,
-                                                    "runtime_msg_delivered": hook_runtime_msg_delivered,
+                                                    "stop_checkpoint_expected": hook_stop_checkpoint_expected,
+                                                    "stop_checkpoint_delivered": hook_stop_checkpoint_delivered,
                                                     "contract_satisfied": hook_delivery_contract_satisfied,
                                                 },
                                             }),
@@ -8849,12 +8849,12 @@ pub(crate) async fn run_turn(
                                         turn_id = %turn_context.sub_id,
                                         hook_name = %hook_name,
                                         pending_auto_user_replies = hook_auto_user_replies_pending.len(),
-                                        runtime_msg_expected = hook_runtime_msg_expected,
-                                        runtime_msg_delivered = hook_runtime_msg_delivered,
-                                        "blocked auto_user_reply actions because runtime hook message delivery was not confirmed for current turn"
+                                        stop_checkpoint_expected = hook_stop_checkpoint_expected,
+                                        stop_checkpoint_delivered = hook_stop_checkpoint_delivered,
+                                        "blocked auto_user_reply actions because STOP checkpoint delivery was not confirmed for current turn"
                                     );
                                     let contract_warning = nero_hook_tui_warning_message(
-                                        "Auto delivery blocked: runtime hook message was not delivered in this turn.",
+                                        "Auto delivery blocked: STOP checkpoint was not delivered in this turn.",
                                         NeroHookMsgFormat::Block,
                                         Some(("error", "delivery-contract")),
                                     );
@@ -8881,8 +8881,8 @@ pub(crate) async fn run_turn(
                                                     "stage": "follow_up",
                                                 },
                                                 "delivery_contract": {
-                                                    "runtime_msg_expected": hook_runtime_msg_expected,
-                                                    "runtime_msg_delivered": hook_runtime_msg_delivered,
+                                                    "stop_checkpoint_expected": hook_stop_checkpoint_expected,
+                                                    "stop_checkpoint_delivered": hook_stop_checkpoint_delivered,
                                                     "contract_satisfied": hook_delivery_contract_satisfied,
                                                 },
                                             }),
@@ -8902,14 +8902,14 @@ pub(crate) async fn run_turn(
                                 &hook_name,
                                 "delivery_contract",
                                 contract_status,
-                                hook_runtime_msg_delivered,
+                                hook_stop_checkpoint_delivered,
                                 false,
                                 json!({
                                     "auto_stage": {
                                         "stage": "protocol",
                                     },
-                                    "runtime_msg_expected": hook_runtime_msg_expected,
-                                    "runtime_msg_delivered": hook_runtime_msg_delivered,
+                                    "stop_checkpoint_expected": hook_stop_checkpoint_expected,
+                                    "stop_checkpoint_delivered": hook_stop_checkpoint_delivered,
                                     "contract_satisfied": hook_delivery_contract_satisfied,
                                     "nero_hook_msg_total": hook_nero_msg_total,
                                     "nero_hook_msg_throttled": hook_nero_msg_throttled,
@@ -8920,8 +8920,8 @@ pub(crate) async fn run_turn(
                             let has_runtime_signal = !after_agent_summary_entries.is_empty()
                                 || latest_runtime_status_kind_normalized.is_some()
                                 || latest_runtime_status_meta.is_some()
-                                || hook_runtime_msg_expected
-                                || hook_runtime_msg_delivered
+                                || hook_stop_checkpoint_expected
+                                || hook_stop_checkpoint_delivered
                                 || !hook_delivery_contract_satisfied
                                 || hook_nero_msg_total > 0
                                 || hook_nero_msg_throttled > 0
@@ -8934,8 +8934,8 @@ pub(crate) async fn run_turn(
                                     latest_runtime_status_kind_normalized,
                                     latest_runtime_status_meta,
                                     contract_status,
-                                    hook_runtime_msg_expected,
-                                    hook_runtime_msg_delivered,
+                                    hook_stop_checkpoint_expected,
+                                    hook_stop_checkpoint_delivered,
                                     hook_delivery_contract_satisfied,
                                     hook_nero_msg_total,
                                     hook_nero_msg_throttled,
@@ -14577,8 +14577,8 @@ mod tests {
                 },
                 "protocol": {
                     "status": "ok",
-                    "runtime_msg_expected": true,
-                    "runtime_msg_delivered": true,
+                    "stop_checkpoint_expected": true,
+                    "stop_checkpoint_delivered": true,
                     "contract_satisfied": true,
                     "nero_hook_msg_total": 1,
                     "nero_hook_msg_throttled": 0,
@@ -14631,8 +14631,8 @@ mod tests {
                 },
                 "protocol": {
                     "status": "ok",
-                    "runtime_msg_expected": true,
-                    "runtime_msg_delivered": true,
+                    "stop_checkpoint_expected": true,
+                    "stop_checkpoint_delivered": true,
                     "contract_satisfied": true,
                     "nero_hook_msg_total": 1,
                     "nero_hook_msg_throttled": 0,
@@ -14659,8 +14659,8 @@ mod tests {
             Some(json!({
                 "protocol": {
                     "status": "ok",
-                    "runtime_msg_expected": true,
-                    "runtime_msg_delivered": true,
+                    "stop_checkpoint_expected": true,
+                    "stop_checkpoint_delivered": true,
                     "contract_satisfied": true,
                     "nero_hook_msg_total": 1,
                     "nero_hook_msg_throttled": 0,
@@ -14682,15 +14682,15 @@ mod tests {
     }
 
     #[test]
-    fn runtime_delivery_contract_status_marks_unsatisfied_contract_as_failed() {
-        assert_eq!(runtime_delivery_contract_status(true, 0), "ok");
+    fn stop_delivery_contract_status_marks_unsatisfied_contract_as_failed() {
+        assert_eq!(stop_delivery_contract_status(true, 0), "ok");
         assert_eq!(
-            runtime_delivery_contract_status(false, 2),
+            stop_delivery_contract_status(false, 2),
             "fail-closed-blocked"
         );
         assert_eq!(
-            runtime_delivery_contract_status(false, 0),
-            "failed-runtime-message-missing"
+            stop_delivery_contract_status(false, 0),
+            "failed-stop-checkpoint-missing"
         );
     }
 

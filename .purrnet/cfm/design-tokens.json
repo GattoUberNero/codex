@@ -1,0 +1,16 @@
+{
+  "tokens": {
+    "--tg-text-muted": "rgba(255, 255, 255, 0.58)",
+    "--tg-text-label": "rgba(255, 255, 255, 0.72)",
+    "--tg-text-description": "rgba(255, 255, 255, 0.68)",
+    "--tg-surface": "rgba(255, 255, 255, 0.04)",
+    "--tg-surface-strong": "rgba(255, 255, 255, 0.08)",
+    "--tg-border": "rgba(255, 255, 255, 0.10)",
+    "--tg-font-h1": "28px",
+    "--tg-font-h2": "22px",
+    "--tg-font-body": "12px",
+    "--tg-line-h1": "1.15",
+    "--tg-line-h2": "1.2",
+    "--tg-line-body": "1.4"
+  }
+}
