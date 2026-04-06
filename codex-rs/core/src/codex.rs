@@ -833,6 +833,21 @@ fn sanitize_nero_hook_status_meta_for_audit(meta: Option<Value>) -> Option<Value
     Some(Value::Object(out))
 }
 
+fn merge_after_agent_runtime_status_meta(accumulated: &mut Option<Value>, incoming: Option<Value>) {
+    let Some(Value::Object(incoming_obj)) = incoming else {
+        return;
+    };
+
+    match accumulated {
+        Some(Value::Object(existing_obj)) => {
+            existing_obj.extend(incoming_obj);
+        }
+        _ => {
+            *accumulated = Some(Value::Object(incoming_obj));
+        }
+    }
+}
+
 fn after_agent_runtime_hook_summary_meta(
     hook_name: &str,
     status_kind_normalized: Option<String>,
@@ -8479,7 +8494,10 @@ pub(crate) async fn run_turn(
                                         }
                                         latest_runtime_status_kind_normalized =
                                             status_kind_normalized.clone();
-                                        latest_runtime_status_meta = status_meta.clone();
+                                        merge_after_agent_runtime_status_meta(
+                                            &mut latest_runtime_status_meta,
+                                            status_meta.clone(),
+                                        );
                                         let mut delivered_tui = false;
                                         let delivered_agent = false;
                                         if show.tui {
@@ -14651,6 +14669,65 @@ mod tests {
         assert!(sanitize_nero_hook_status_meta_for_audit(Some(json!({"noop": true}))).is_none());
         assert!(
             sanitize_nero_hook_status_meta_for_audit(Some(json!({"auto_decision": "x"}))).is_none()
+        );
+    }
+
+    #[test]
+    fn merge_after_agent_runtime_status_meta_adds_disjoint_keys_and_ignores_none() {
+        let mut accumulated = Some(json!({
+            "auto_stage": {
+                "stage": "decision",
+            }
+        }));
+
+        merge_after_agent_runtime_status_meta(
+            &mut accumulated,
+            Some(json!({
+                "auto_decision": {
+                    "decision": "continue",
+                }
+            })),
+        );
+        merge_after_agent_runtime_status_meta(&mut accumulated, None);
+
+        assert_eq!(
+            accumulated,
+            Some(json!({
+                "auto_stage": {
+                    "stage": "decision",
+                },
+                "auto_decision": {
+                    "decision": "continue",
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn merge_after_agent_runtime_status_meta_keeps_last_write_on_same_key() {
+        let mut accumulated = Some(json!({
+            "auto_decision": {
+                "decision": "continue",
+                "campaign_status": "active",
+            }
+        }));
+
+        merge_after_agent_runtime_status_meta(
+            &mut accumulated,
+            Some(json!({
+                "auto_decision": {
+                    "decision": "block",
+                }
+            })),
+        );
+
+        assert_eq!(
+            accumulated,
+            Some(json!({
+                "auto_decision": {
+                    "decision": "block",
+                }
+            }))
         );
     }
 
