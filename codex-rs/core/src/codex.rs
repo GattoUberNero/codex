@@ -14731,6 +14731,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn merge_after_agent_runtime_status_meta_replaces_same_key_auto_decision_whole_object() {
+        let mut accumulated = Some(json!({
+            "auto_decision": {
+                "decision": "continue",
+                "flags": {
+                    "emergency_flag": false,
+                    "user_collaboration_required": false,
+                },
+                "session_auto_policy_override": {
+                    "autonomy_level": 5,
+                    "max_auto_rounds": 4,
+                },
+            }
+        }));
+
+        merge_after_agent_runtime_status_meta(
+            &mut accumulated,
+            Some(json!({
+                "auto_decision": {
+                    "decision": "block",
+                    "flags": {
+                        "emergency_flag": true,
+                    },
+                    "session_auto_policy_override": {
+                        "max_auto_rounds": 1,
+                    },
+                }
+            })),
+        );
+
+        assert_eq!(
+            accumulated,
+            Some(json!({
+                "auto_decision": {
+                    "decision": "block",
+                    "flags": {
+                        "emergency_flag": true,
+                    },
+                    "session_auto_policy_override": {
+                        "max_auto_rounds": 1,
+                    },
+                }
+            }))
+        );
+    }
+
     async fn sample_rollout(
         session: &Session,
         _turn_context: &TurnContext,
