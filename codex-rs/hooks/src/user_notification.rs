@@ -608,7 +608,7 @@ mod tests {
     fn legacy_notify_stdin_timeout_scales_with_payload_and_caps() {
         const CHUNK: usize = 64 * 1024;
         assert_eq!(
-            legacy_notify_stdin_write_timeout(0),
+            legacy_notify_stdin_write_timeout(/*payload_bytes*/ 0),
             Duration::from_millis(LEGACY_NOTIFY_STDIN_WRITE_BASE_TIMEOUT_MS)
         );
         assert_eq!(

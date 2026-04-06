@@ -2924,7 +2924,11 @@ impl Session {
         debug!(cleared, "reset nero_hook_msg throttle cache");
     }
 
-    async fn maybe_emit_nero_auto_bridge_warning(&self, turn_context: &TurnContext, detail: &str) {
+    async fn maybe_emit_nero_auto_session_auto_read_warning(
+        &self,
+        turn_context: &TurnContext,
+        detail: &str,
+    ) {
         let should_emit = {
             let mut guard = match self.nero_auto_bridge_warning_emitted.lock() {
                 Ok(guard) => guard,
@@ -2941,9 +2945,11 @@ impl Session {
             return;
         }
         let message = nero_hook_tui_warning_message(
-            &format!("NERO auto booster bridge unavailable for this session: {detail}"),
+            &format!(
+                "NERO auto booster session-auto runtime read failed for this session: {detail}"
+            ),
             NeroHookMsgFormat::Block,
-            Some(("warning", "bridge-read")),
+            Some(("warning", "session-auto-read")),
         );
         self.send_event(turn_context, EventMsg::Warning(WarningEvent { message }))
             .await;
@@ -6038,6 +6044,7 @@ mod handlers {
     use codex_protocol::request_user_input::RequestUserInputResponse;
 
     use crate::context_manager::is_user_turn_boundary;
+    use codex_app_server_protocol::SessionSource as AppServerSessionSource;
     use codex_protocol::config_types::CollaborationMode;
     use codex_protocol::config_types::ModeKind;
     use codex_protocol::config_types::Settings;
@@ -6060,6 +6067,11 @@ mod handlers {
     use tokio::process::Command;
     use tracing::info;
     use tracing::warn;
+
+    use crate::nero_auto_runtime_state::NeroThreadSessionAutoContext;
+    use crate::nero_auto_runtime_state::build_session_auto_state;
+    use crate::nero_auto_runtime_state::read_state_snapshot;
+    use crate::nero_auto_runtime_state::resolve_nero_auto_state_path;
 
     const NERO_RUNTIME_STATE_CONTROL_CWD_ENV: &str = "NERO_RUNTIME_STATE_CONTROL_CWD";
     const NERO_RUNTIME_STATE_CONTROL_CWD_ENV_COMPAT: &str =
@@ -6088,7 +6100,7 @@ mod handlers {
         timeout: Duration,
     }
 
-    #[derive(Debug, Serialize)]
+    #[derive(Debug, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct NeroAutoBridgeReadRequest {
         thread_id: String,
@@ -6341,10 +6353,66 @@ mod handlers {
         }
     }
 
+    fn app_server_session_source_from_wire(value: &str) -> AppServerSessionSource {
+        match value {
+            "cli" => AppServerSessionSource::Cli,
+            "vscode" => AppServerSessionSource::VsCode,
+            "exec" => AppServerSessionSource::Exec,
+            "mcp" => AppServerSessionSource::AppServer,
+            "subAgent" => AppServerSessionSource::SubAgent(
+                codex_protocol::protocol::SubAgentSource::Other("runtime-bridge".to_string()),
+            ),
+            "unknown" => AppServerSessionSource::Unknown,
+            other => AppServerSessionSource::Custom(other.to_string()),
+        }
+    }
+
+    fn read_nero_auto_runtime_state_via_shared_seam(
+        request: &NeroAutoBridgeReadRequest,
+    ) -> Result<NeroAutoBridgeReadResponse, String> {
+        let config_path = PathBuf::from(&request.config_path);
+        let state_path = resolve_nero_auto_state_path(&config_path);
+        let snapshot = read_state_snapshot(&state_path)?;
+        let context = NeroThreadSessionAutoContext {
+            thread_id: request.thread_id.clone(),
+            thread_name: None,
+            session_source: app_server_session_source_from_wire(&request.session_source),
+            loaded: true,
+        };
+        let state = build_session_auto_state(&context, &state_path, &config_path, &snapshot);
+        let auto_rounds = usize::try_from(state.effective.auto_rounds).map_err(|err| {
+            format!(
+                "invalid session-auto effective.auto_rounds for thread {}: {err}",
+                request.thread_id
+            )
+        })?;
+        Ok(NeroAutoBridgeReadResponse {
+            ok: true,
+            error: None,
+            message: None,
+            thread_id: Some(request.thread_id.clone()),
+            session_source: Some(request.session_source.clone()),
+            is_subagent: state.is_subagent,
+            effective: NeroAutoBridgeEffective {
+                enabled: state.effective.runtime.enabled,
+                source: state.effective.source,
+                auto_rounds,
+            },
+        })
+    }
+
     async fn run_nero_auto_runtime_bridge(
         command_name: &str,
         payload: &impl Serialize,
     ) -> Result<NeroAutoBridgeReadResponse, String> {
+        if command_name == "read-session-auto" {
+            let request = serde_json::to_value(payload)
+                .map_err(|err| format!("serialize runtime state payload: {err}"))?;
+            let request = serde_json::from_value::<NeroAutoBridgeReadRequest>(request)
+                .map_err(|err| format!("deserialize runtime state payload: {err}"))?;
+            return read_nero_auto_runtime_state_via_shared_seam(&request);
+        }
+
         let settings = resolve_nero_auto_runtime_bridge_settings()?;
         let bridge_input = serde_json::to_vec(payload)
             .map_err(|err| format!("serialize bridge payload: {err}"))?;
@@ -6522,8 +6590,8 @@ In your final assistant response include the auto protocol JSON block required b
         let response = match run_nero_auto_runtime_bridge("read-session-auto", &request).await {
             Ok(response) => response,
             Err(err) => {
-                warn!("failed to read runtime bridge state for auto-turn booster: {err}");
-                sess.maybe_emit_nero_auto_bridge_warning(turn_context, &err)
+                warn!("failed to read session-auto runtime state for auto-turn booster: {err}");
+                sess.maybe_emit_nero_auto_session_auto_read_warning(turn_context, &err)
                     .await;
                 return None;
             }
@@ -6533,15 +6601,15 @@ In your final assistant response include the auto protocol JSON block required b
                 .message
                 .clone()
                 .or(response.error)
-                .unwrap_or_else(|| "runtime bridge read failed".to_string());
-            warn!("runtime bridge read reported failure for auto-turn booster: {detail}");
-            sess.maybe_emit_nero_auto_bridge_warning(turn_context, &detail)
+                .unwrap_or_else(|| "session-auto runtime read failed".to_string());
+            warn!("session-auto runtime read reported failure for auto-turn booster: {detail}");
+            sess.maybe_emit_nero_auto_session_auto_read_warning(turn_context, &detail)
                 .await;
             return None;
         }
         if let Err(err) = validate_nero_auto_bridge_read_identity(&response, &request) {
             warn!("{err}");
-            sess.maybe_emit_nero_auto_bridge_warning(turn_context, &err)
+            sess.maybe_emit_nero_auto_session_auto_read_warning(turn_context, &err)
                 .await;
             return None;
         }
@@ -14326,19 +14394,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nero_auto_bridge_warning_emits_once_until_reset() {
+    async fn nero_auto_session_auto_read_warning_emits_once_until_reset() {
         let (sess, tc, rx) = make_session_and_context_with_rx().await;
 
-        sess.maybe_emit_nero_auto_bridge_warning(&tc, "bridge read failed")
+        sess.maybe_emit_nero_auto_session_auto_read_warning(&tc, "session-auto read failed")
             .await;
         let first = rx.recv().await.expect("first warning event");
         let first_message = match first.msg {
             EventMsg::Warning(WarningEvent { message }) => message,
             other => panic!("expected warning event, got {other:?}"),
         };
-        assert!(first_message.contains("bridge read failed"));
+        assert!(first_message.contains("session-auto read failed"));
 
-        sess.maybe_emit_nero_auto_bridge_warning(&tc, "should be suppressed")
+        sess.maybe_emit_nero_auto_session_auto_read_warning(&tc, "should be suppressed")
             .await;
         assert!(
             matches!(rx.try_recv(), Err(async_channel::TryRecvError::Empty)),
@@ -14353,7 +14421,7 @@ mod tests {
             *guard = false;
         }
 
-        sess.maybe_emit_nero_auto_bridge_warning(&tc, "after reset")
+        sess.maybe_emit_nero_auto_session_auto_read_warning(&tc, "after reset")
             .await;
         let second = rx.recv().await.expect("warning event after reset");
         let second_message = match second.msg {

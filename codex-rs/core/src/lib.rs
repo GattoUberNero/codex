@@ -61,6 +61,7 @@ mod memories;
 pub mod mention_syntax;
 pub mod message_history;
 mod model_provider_info;
+pub mod nero_auto_runtime_state;
 pub mod utils;
 pub use utils::path_utils;
 pub mod personality_migration;
