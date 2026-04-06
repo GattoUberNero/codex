@@ -893,6 +893,42 @@ fn after_agent_runtime_hook_summary_meta(
     })
 }
 
+fn align_auto_decision_meta_with_delivery_contract(
+    status_meta: &mut Option<Value>,
+    contract_satisfied: bool,
+    auto_user_replies_blocked: usize,
+) {
+    if contract_satisfied || auto_user_replies_blocked == 0 {
+        return;
+    }
+
+    let Some(Value::Object(status_meta_obj)) = status_meta else {
+        return;
+    };
+
+    let mut auto_decision = status_meta_obj
+        .get("auto_decision")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    auto_decision.insert(
+        "decision".to_string(),
+        Value::String("blocked-delivery-contract".to_string()),
+    );
+    auto_decision.insert(
+        "reason_code".to_string(),
+        Value::String("delivery-contract-blocked".to_string()),
+    );
+    auto_decision
+        .entry("score_explanation".to_string())
+        .or_insert_with(|| {
+            Value::String("STOP checkpoint was not delivered in this turn.".to_string())
+        });
+
+    status_meta_obj.insert("auto_decision".to_string(), Value::Object(auto_decision));
+}
+
 async fn append_nero_hook_delivery_audit(
     log_path: &Path,
     conversation_id: &ThreadId,
@@ -8878,6 +8914,11 @@ pub(crate) async fn run_turn(
                                     }
                                 }
                             }
+                            align_auto_decision_meta_with_delivery_contract(
+                                &mut latest_runtime_status_meta,
+                                hook_delivery_contract_satisfied,
+                                hook_auto_user_replies_blocked,
+                            );
                             let contract_status = stop_delivery_contract_status(
                                 hook_delivery_contract_satisfied,
                                 hook_auto_user_replies_blocked,
@@ -14678,6 +14719,62 @@ mod tests {
         assert_eq!(
             stop_delivery_contract_status(false, 0),
             "failed-stop-checkpoint-missing"
+        );
+    }
+
+    #[test]
+    fn align_auto_decision_meta_with_delivery_contract_overrides_continue_when_blocked() {
+        let mut status_meta = Some(json!({
+            "auto_stage": {
+                "stage": "follow_up",
+            },
+            "auto_decision": {
+                "decision": "continue",
+                "reason_code": "continue",
+                "score_explanation": "planned low-risk next step",
+                "score": 7
+            }
+        }));
+
+        align_auto_decision_meta_with_delivery_contract(&mut status_meta, false, 1);
+
+        assert_eq!(
+            status_meta,
+            Some(json!({
+                "auto_stage": {
+                    "stage": "follow_up",
+                },
+                "auto_decision": {
+                    "decision": "blocked-delivery-contract",
+                    "reason_code": "delivery-contract-blocked",
+                    "score_explanation": "planned low-risk next step",
+                    "score": 7
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn align_auto_decision_meta_with_delivery_contract_keeps_continue_when_contract_satisfied() {
+        let mut status_meta = Some(json!({
+            "auto_decision": {
+                "decision": "continue",
+                "reason_code": "continue",
+                "score_explanation": "planned low-risk next step"
+            }
+        }));
+
+        align_auto_decision_meta_with_delivery_contract(&mut status_meta, true, 1);
+
+        assert_eq!(
+            status_meta,
+            Some(json!({
+                "auto_decision": {
+                    "decision": "continue",
+                    "reason_code": "continue",
+                    "score_explanation": "planned low-risk next step"
+                }
+            }))
         );
     }
 
