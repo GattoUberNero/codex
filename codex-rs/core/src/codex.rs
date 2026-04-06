@@ -902,8 +902,9 @@ fn align_auto_decision_meta_with_delivery_contract(
         return;
     }
 
-    let Some(Value::Object(status_meta_obj)) = status_meta else {
-        return;
+    let mut status_meta_obj = match status_meta.take() {
+        Some(Value::Object(obj)) => obj,
+        _ => serde_json::Map::new(),
     };
 
     let mut auto_decision = status_meta_obj
@@ -920,13 +921,13 @@ fn align_auto_decision_meta_with_delivery_contract(
         "reason_code".to_string(),
         Value::String("delivery-contract-blocked".to_string()),
     );
-    auto_decision
-        .entry("score_explanation".to_string())
-        .or_insert_with(|| {
-            Value::String("STOP checkpoint was not delivered in this turn.".to_string())
-        });
+    auto_decision.insert(
+        "score_explanation".to_string(),
+        Value::String("STOP checkpoint was not delivered in this turn.".to_string()),
+    );
 
     status_meta_obj.insert("auto_decision".to_string(), Value::Object(auto_decision));
+    *status_meta = Some(Value::Object(status_meta_obj));
 }
 
 async fn append_nero_hook_delivery_audit(
@@ -14747,7 +14748,7 @@ mod tests {
                 "auto_decision": {
                     "decision": "blocked-delivery-contract",
                     "reason_code": "delivery-contract-blocked",
-                    "score_explanation": "planned low-risk next step",
+                    "score_explanation": "STOP checkpoint was not delivered in this turn.",
                     "score": 7
                 }
             }))
@@ -14773,6 +14774,24 @@ mod tests {
                     "decision": "continue",
                     "reason_code": "continue",
                     "score_explanation": "planned low-risk next step"
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn align_auto_decision_meta_with_delivery_contract_builds_meta_when_shape_is_non_object() {
+        let mut status_meta = Some(json!("invalid-meta-shape"));
+
+        align_auto_decision_meta_with_delivery_contract(&mut status_meta, false, 1);
+
+        assert_eq!(
+            status_meta,
+            Some(json!({
+                "auto_decision": {
+                    "decision": "blocked-delivery-contract",
+                    "reason_code": "delivery-contract-blocked",
+                    "score_explanation": "STOP checkpoint was not delivered in this turn."
                 }
             }))
         );
