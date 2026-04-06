@@ -3620,7 +3620,6 @@ impl CodexMessageProcessor {
                 thread_id: thread_uuid.to_string(),
                 thread_name,
                 session_source: config_snapshot.session_source.into(),
-                cwd: config_snapshot.cwd,
                 loaded: true,
             });
         }
@@ -3655,7 +3654,6 @@ impl CodexMessageProcessor {
             thread_id: thread_uuid.to_string(),
             thread_name,
             session_source: thread.source,
-            cwd: thread.cwd,
             loaded: false,
         })
     }
