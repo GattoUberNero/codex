@@ -706,6 +706,41 @@ fn strip_codexn_fork_auto_developer_instructions_keeps_current_when_auto_is_unav
 }
 
 #[test]
+fn strip_codexn_fork_auto_developer_instructions_removes_suffix_even_when_runtime_is_off() {
+    let extra_toml: TomlValue = toml::from_str(
+        r####"
+            [nero.hook.runtime.auto]
+            enabled = false
+            protocol_prefix = "NERO_AUTO_V1 "
+
+            [nero.hook.runtime.auto.scoring_system]
+            enabled = true
+
+            [nero.hook.runtime.auto.scoring_system.show]
+            agent = true
+            tui = false
+
+            [nero.hook.runtime.auto.system_text]
+            header = "## NERO-SYSTEM v1"
+            scoring_on_header = "### scoring_system: on"
+            rules_label = "SCORE_RULES:"
+            json_intro = "Emit the strict JSON block below."
+            legacy_notice = "Legacy prefix `{protocol_prefix}` is still supported."
+        "####,
+    )
+    .expect("parse extra toml");
+
+    let auto = codexn_fork_auto_developer_instructions_for_strip(&extra_toml)
+        .expect("auto instructions should be generated for stripping");
+    let composed = format!("role instructions\n\n{auto}");
+
+    assert_eq!(
+        strip_codexn_fork_auto_developer_instructions(Some(&composed), &extra_toml),
+        Some("role instructions".to_string())
+    );
+}
+
+#[test]
 fn refresh_codexn_fork_developer_instructions_preserves_subagent_role_instructions() {
     let mut extra_toml: TomlValue = toml::from_str(
         r####"

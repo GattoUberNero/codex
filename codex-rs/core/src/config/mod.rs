@@ -920,7 +920,9 @@ fn strip_codexn_fork_auto_developer_instructions(
         return None;
     }
     let mut current = current_raw.to_string();
-    let Some(auto_instructions) = codexn_fork_auto_developer_instructions(extra_toml) else {
+    let Some(auto_instructions) = codexn_fork_auto_developer_instructions(extra_toml)
+        .or_else(|| codexn_fork_auto_developer_instructions_for_strip(extra_toml))
+    else {
         return Some(current_raw.to_string());
     };
     let auto_instructions = auto_instructions.trim();
@@ -965,6 +967,16 @@ fn strip_codexn_fork_auto_developer_instructions(
     } else {
         Some(current_raw.to_string())
     }
+}
+
+fn codexn_fork_auto_developer_instructions_for_strip(extra_toml: &TomlValue) -> Option<String> {
+    let mut forced = extra_toml.clone();
+    let runtime = NeroAutoRuntimeConfig {
+        enabled: true,
+        ..read_codexn_fork_nero_auto_runtime(extra_toml)
+    };
+    apply_codexn_fork_nero_auto_runtime_to_toml(&mut forced, runtime);
+    codexn_fork_auto_developer_instructions(&forced)
 }
 
 fn refresh_codexn_fork_developer_instructions(
@@ -1587,6 +1599,23 @@ pub(crate) fn refresh_codexn_fork_developer_instructions_with_runtime(
         session_source,
     );
     Ok(())
+}
+
+pub(crate) fn resolve_codexn_fork_auto_developer_instructions_for_turn(
+    session_source: &SessionSource,
+) -> std::io::Result<Option<String>> {
+    let Some(mut combined_extra_toml) = load_nero_extra_config_from_env()? else {
+        return Ok(None);
+    };
+    let runtime = NeroAutoRuntimeConfig {
+        enabled: true,
+        ..read_codexn_fork_nero_auto_runtime(&combined_extra_toml)
+    };
+    let effective_runtime = effective_codexn_fork_nero_auto_runtime(runtime, session_source);
+    apply_codexn_fork_nero_auto_runtime_to_toml(&mut combined_extra_toml, effective_runtime);
+    Ok(codexn_fork_auto_developer_instructions(
+        &combined_extra_toml,
+    ))
 }
 
 fn load_catalog_json(path: &AbsolutePathBuf) -> std::io::Result<ModelsResponse> {

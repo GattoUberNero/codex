@@ -6489,11 +6489,13 @@ mod handlers {
             || text.contains("scoring_system")
     }
 
-    fn build_nero_auto_turn_booster(turn_id: &str, source: &str) -> String {
+    fn build_nero_auto_turn_booster(turn_id: &str, source: &str, auto_contract: &str) -> String {
         format!(
             "{NERO_AUTO_TURN_BOOST_TAG_PREFIX} stage=activation_boost turn_id={turn_id} source={source}]\n\
 NERO-HOOK-AUTO bootstrap: auto runtime is enabled for this turn.\n\
-In your final assistant response include the auto protocol JSON block required by runtime hooks."
+This instruction is valid only for turn_id={turn_id}. Ignore it for all other turns.\n\
+Use the exact auto protocol contract below in your final assistant response:\n\n\
+{auto_contract}"
         )
     }
 
@@ -6623,8 +6625,33 @@ In your final assistant response include the auto protocol JSON block required b
         if !should_inject_nero_auto_turn_booster(&response) {
             return None;
         }
+        let auto_contract =
+            match crate::config::resolve_codexn_fork_auto_developer_instructions_for_turn(
+                &turn_context.session_source,
+            ) {
+                Ok(Some(value)) => value,
+                Ok(None) => {
+                    let detail = "session-auto auto protocol contract is unavailable for this turn";
+                    warn!("{detail}");
+                    sess.maybe_emit_nero_auto_session_auto_read_warning(turn_context, detail)
+                        .await;
+                    return None;
+                }
+                Err(err) => {
+                    let detail =
+                        format!("resolve session-auto auto protocol contract failed: {err}");
+                    warn!("{detail}");
+                    sess.maybe_emit_nero_auto_session_auto_read_warning(turn_context, &detail)
+                        .await;
+                    return None;
+                }
+            };
         let source = response.effective.source.trim();
-        Some(build_nero_auto_turn_booster(&turn_context.sub_id, source))
+        Some(build_nero_auto_turn_booster(
+            &turn_context.sub_id,
+            source,
+            auto_contract.as_str(),
+        ))
     }
 
     pub async fn interrupt(sess: &Arc<Session>) {
@@ -7486,11 +7513,17 @@ In your final assistant response include the auto protocol JSON block required b
 
         #[test]
         fn turn_booster_tag_contains_machine_parseable_marker() {
-            let text = build_nero_auto_turn_booster("turn-123", "session-override");
+            let text = build_nero_auto_turn_booster(
+                "turn-123",
+                "session-override",
+                "## NERO-SYSTEM v1\n\n```json\n{}\n```",
+            );
             assert!(text.contains("[nero-hook-auto-boost"));
             assert!(text.contains("stage=activation_boost"));
             assert!(text.contains("turn_id=turn-123"));
             assert!(text.contains("source=session-override"));
+            assert!(text.contains("valid only for turn_id=turn-123"));
+            assert!(text.contains("## NERO-SYSTEM v1"));
         }
 
         #[test]
