@@ -506,6 +506,7 @@ mod tests {
                     },
                     NeroHookAction::AutoUserReply {
                         message: "continue".to_string(),
+                        expected_wait_seconds: None,
                     },
                 ],
             )],
@@ -521,7 +522,8 @@ mod tests {
                     message: "note".to_string()
                 },
                 NeroHookAction::AutoUserReply {
-                    message: "continue".to_string()
+                    message: "continue".to_string(),
+                    expected_wait_seconds: None
                 }
             ]
         );

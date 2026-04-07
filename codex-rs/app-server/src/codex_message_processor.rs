@@ -162,6 +162,10 @@ use codex_app_server_protocol::ThreadRolloutBackupRestoreParams;
 use codex_app_server_protocol::ThreadRolloutBackupRestoreResponse;
 use codex_app_server_protocol::ThreadRolloutTrimParams;
 use codex_app_server_protocol::ThreadRolloutTrimResponse;
+use codex_app_server_protocol::ThreadSessionAutoAuthorityMode;
+use codex_app_server_protocol::ThreadSessionAutoInputActivityKind;
+use codex_app_server_protocol::ThreadSessionAutoInputActivityParams;
+use codex_app_server_protocol::ThreadSessionAutoInputActivityResponse;
 use codex_app_server_protocol::ThreadSessionAutoReadParams;
 use codex_app_server_protocol::ThreadSessionAutoReadResponse;
 use codex_app_server_protocol::ThreadSessionAutoUpdateParams;
@@ -787,6 +791,13 @@ impl CodexMessageProcessor {
             ClientRequest::ThreadSessionAutoRead { request_id, params } => {
                 self.thread_session_auto_read(to_connection_request_id(request_id), params)
                     .await;
+            }
+            ClientRequest::ThreadSessionAutoInputActivity { request_id, params } => {
+                self.thread_session_auto_input_activity(
+                    to_connection_request_id(request_id),
+                    params,
+                )
+                .await;
             }
             ClientRequest::ThreadSessionAutoUpdate { request_id, params } => {
                 self.thread_session_auto_update(to_connection_request_id(request_id), params)
@@ -3753,6 +3764,71 @@ impl CodexMessageProcessor {
                 }
             }
         }
+    }
+
+    async fn thread_session_auto_input_activity(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadSessionAutoInputActivityParams,
+    ) {
+        let ThreadSessionAutoInputActivityParams {
+            thread_id,
+            activity,
+        } = params;
+        let thread_uuid = match ThreadId::from_string(&thread_id) {
+            Ok(id) => id,
+            Err(err) => {
+                self.send_invalid_request_error(request_id, format!("invalid thread id: {err}"))
+                    .await;
+                return;
+            }
+        };
+        let context = match self
+            .resolve_nero_thread_session_auto_context(thread_uuid)
+            .await
+        {
+            Ok(context) => context,
+            Err(err) => {
+                self.send_invalid_request_error(request_id, err).await;
+                return;
+            }
+        };
+        if matches!(context.session_source, SessionSource::SubAgent(_)) {
+            self.send_invalid_request_error(
+                request_id,
+                "session-auto inputActivity is unsupported for subagent sessions".to_string(),
+            )
+            .await;
+            return;
+        }
+        let thread = match self.thread_manager.get_thread(thread_uuid).await {
+            Ok(thread) => thread,
+            Err(_) => {
+                self.send_invalid_request_error(
+                    request_id,
+                    format!("thread not loaded: {thread_uuid}"),
+                )
+                .await;
+                return;
+            }
+        };
+
+        let generation_epoch = match activity {
+            ThreadSessionAutoInputActivityKind::DraftChanged => {
+                thread.note_user_input_activity().await
+            }
+        };
+        self.outgoing
+            .send_response::<ThreadSessionAutoInputActivityResponse>(
+                request_id,
+                ThreadSessionAutoInputActivityResponse {
+                    thread_id,
+                    applied: true,
+                    authority: ThreadSessionAutoAuthorityMode::AppServerAuthority,
+                    generation_epoch,
+                },
+            )
+            .await;
     }
 
     async fn thread_rollout_analyze(

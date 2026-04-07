@@ -197,7 +197,8 @@
     },
     "ThreadSessionAutoAuthorityMode": {
       "enum": [
-        "bridgeProxy"
+        "bridgeProxy",
+        "appServerAuthority"
       ],
       "type": "string"
     },

@@ -92,6 +92,17 @@ where
     Ok(Option::<u64>::deserialize(deserializer)?.unwrap_or(0))
 }
 
+fn deserialize_optional_nonneg_u64_lossy<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    Ok(raw.as_u64())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NeroHookAction {
@@ -117,6 +128,8 @@ pub enum NeroHookAction {
     },
     AutoUserReply {
         message: String,
+        #[serde(default, deserialize_with = "deserialize_optional_nonneg_u64_lossy")]
+        expected_wait_seconds: Option<u64>,
     },
 }
 
@@ -261,7 +274,8 @@ mod tests {
                     }
                 },
                 NeroHookAction::AutoUserReply {
-                    message: "continue".to_string()
+                    message: "continue".to_string(),
+                    expected_wait_seconds: None
                 }
             ]
         );
@@ -359,11 +373,61 @@ mod tests {
                     }
                 },
                 NeroHookAction::AutoUserReply {
-                    message: "continue".to_string()
+                    message: "continue".to_string(),
+                    expected_wait_seconds: None
                 }
             ]
         );
         assert_eq!(parsed.ignored_unknown_actions, 3);
+    }
+
+    #[test]
+    fn parse_auto_user_reply_preserves_expected_wait_seconds() {
+        let parsed = parse_nero_hook_actions_from_stdout(
+            r#"{
+              "actions": [
+                {"type": "auto_user_reply", "message": "continue", "expected_wait_seconds": 2}
+              ]
+            }"#,
+        )
+        .expect("parse");
+
+        assert_eq!(
+            parsed.actions,
+            vec![NeroHookAction::AutoUserReply {
+                message: "continue".to_string(),
+                expected_wait_seconds: Some(2),
+            }]
+        );
+        assert_eq!(parsed.ignored_unknown_actions, 0);
+    }
+
+    #[test]
+    fn parse_auto_user_reply_drops_invalid_expected_wait_seconds() {
+        let parsed = parse_nero_hook_actions_from_stdout(
+            r#"{
+              "actions": [
+                {"type": "auto_user_reply", "message": "continue", "expected_wait_seconds": true},
+                {"type": "auto_user_reply", "message": "continue again", "expected_wait_seconds": -1}
+              ]
+            }"#,
+        )
+        .expect("parse");
+
+        assert_eq!(
+            parsed.actions,
+            vec![
+                NeroHookAction::AutoUserReply {
+                    message: "continue".to_string(),
+                    expected_wait_seconds: None,
+                },
+                NeroHookAction::AutoUserReply {
+                    message: "continue again".to_string(),
+                    expected_wait_seconds: None,
+                }
+            ]
+        );
+        assert_eq!(parsed.ignored_unknown_actions, 0);
     }
 
     #[test]

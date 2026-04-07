@@ -48,6 +48,9 @@ use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadRollbackParams;
 use codex_app_server_protocol::ThreadRollbackResponse;
+use codex_app_server_protocol::ThreadSessionAutoInputActivityKind;
+use codex_app_server_protocol::ThreadSessionAutoInputActivityParams;
+use codex_app_server_protocol::ThreadSessionAutoInputActivityResponse;
 use codex_app_server_protocol::ThreadSessionAutoReadParams;
 use codex_app_server_protocol::ThreadSessionAutoReadResponse;
 use codex_app_server_protocol::ThreadSessionAutoUpdateParams;
@@ -424,6 +427,24 @@ impl AppServerSession {
             .request_typed(ClientRequest::ThreadSessionAutoUpdate { request_id, params })
             .await
             .wrap_err("thread/sessionAuto/update failed in TUI")
+    }
+
+    pub(crate) async fn thread_session_auto_input_activity(
+        &mut self,
+        thread_id: ThreadId,
+        activity: ThreadSessionAutoInputActivityKind,
+    ) -> Result<ThreadSessionAutoInputActivityResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::ThreadSessionAutoInputActivity {
+                request_id,
+                params: ThreadSessionAutoInputActivityParams {
+                    thread_id: thread_id.to_string(),
+                    activity,
+                },
+            })
+            .await
+            .wrap_err("thread/sessionAuto/inputActivity failed in TUI")
     }
 
     #[allow(clippy::too_many_arguments)]

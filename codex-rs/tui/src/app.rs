@@ -78,6 +78,7 @@ use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadLoadedListParams;
 use codex_app_server_protocol::ThreadRollbackResponse;
 use codex_app_server_protocol::ThreadSessionAutoAuthorityMode;
+use codex_app_server_protocol::ThreadSessionAutoInputActivityKind;
 use codex_app_server_protocol::ThreadSessionAutoReadResponse;
 use codex_app_server_protocol::ThreadSessionAutoState;
 use codex_app_server_protocol::ThreadSessionAutoUpdateParams;
@@ -253,6 +254,7 @@ fn nero_session_auto_authority_mode_label(
 ) -> &'static str {
     match authority {
         ThreadSessionAutoAuthorityMode::BridgeProxy => "bridgeProxy",
+        ThreadSessionAutoAuthorityMode::AppServerAuthority => "appServerAuthority",
     }
 }
 
@@ -3157,6 +3159,36 @@ impl App {
         }
     }
 
+    async fn notify_delayed_nero_auto_input_activity_if_draft_changed(
+        &mut self,
+        app_server: &mut AppServerSession,
+        composer_text_before: String,
+    ) {
+        let composer_text_after = self.chat_widget.composer_text_with_pending();
+        if composer_text_before == composer_text_after {
+            return;
+        }
+        let Some(thread_id) = self.active_thread_id else {
+            return;
+        };
+        match app_server
+            .thread_session_auto_input_activity(
+                thread_id,
+                ThreadSessionAutoInputActivityKind::DraftChanged,
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(
+                    thread_id = %thread_id,
+                    error = %err,
+                    "failed to notify delayed nero-auto input activity"
+                );
+            }
+        }
+    }
+
     async fn handle_nero_auto_hotkey_event(
         &mut self,
         app_server: &mut AppServerSession,
@@ -3169,6 +3201,7 @@ impl App {
             tracing::debug!(
                 "ignoring stale nero-auto hotkey event for non-active thread {requested_thread_id}"
             );
+            self.chat_widget.finish_nero_auto_hotkey_action(false);
             return;
         }
         let Some(thread_id) = self.nero_auto_hotkey_thread(requested_thread_id).await else {
@@ -3201,6 +3234,7 @@ impl App {
             Err(err) => {
                 if err.to_string().contains("stale hotkey event") {
                     tracing::debug!("{err}");
+                    self.chat_widget.finish_nero_auto_hotkey_action(false);
                     return;
                 }
                 self.chat_widget.add_error_message(format!(
@@ -3260,6 +3294,7 @@ impl App {
             Err(err) => {
                 if err.to_string().contains("stale hotkey event") {
                     tracing::debug!("{err}");
+                    self.chat_widget.finish_nero_auto_hotkey_action(false);
                     return;
                 }
                 self.chat_widget.add_error_message(format!(
@@ -3283,6 +3318,7 @@ impl App {
             tracing::debug!(
                 "ignoring stale nero-auto update response for non-active thread {thread_id}"
             );
+            self.chat_widget.finish_nero_auto_hotkey_action(false);
             return;
         }
 
@@ -5961,6 +5997,7 @@ impl App {
         app_server: &mut AppServerSession,
         key_event: KeyEvent,
     ) {
+        let composer_text_before = self.chat_widget.composer_text_with_pending();
         // Some terminals, especially on macOS, encode Option+Left/Right as Option+b/f unless
         // enhanced keyboard reporting is available. We only treat those word-motion fallbacks as
         // agent-switch shortcuts when the composer is empty so we never steal the expected
@@ -6091,6 +6128,11 @@ impl App {
                 self.chat_widget.handle_key_event(key_event);
             }
         };
+        self.notify_delayed_nero_auto_input_activity_if_draft_changed(
+            app_server,
+            composer_text_before,
+        )
+        .await;
     }
 
     fn refresh_status_line(&mut self) {
@@ -6323,6 +6365,7 @@ mod tests {
     use codex_app_server_protocol::ThreadSessionAutoAuthorityMode;
     use codex_app_server_protocol::ThreadSessionAutoDefaults;
     use codex_app_server_protocol::ThreadSessionAutoEffective;
+    use codex_app_server_protocol::ThreadSessionAutoInputActivityKind;
     use codex_app_server_protocol::ThreadSessionAutoState;
     use codex_app_server_protocol::ThreadStartedNotification;
     use codex_app_server_protocol::ThreadTokenUsage;
@@ -6434,6 +6477,16 @@ mod tests {
                 &state,
             ),
             "Authority context: thread-id=thread-123, authority=bridgeProxy, session-source=cli, config-path=/tmp/config-nero-hook-auto.toml, state-path=/tmp/nero-hook-auto-state.json"
+        );
+    }
+
+    #[test]
+    fn nero_session_auto_authority_mode_label_reports_app_server_authority() {
+        assert_eq!(
+            nero_session_auto_authority_mode_label(
+                ThreadSessionAutoAuthorityMode::AppServerAuthority
+            ),
+            "appServerAuthority"
         );
     }
 
@@ -9281,6 +9334,52 @@ guardian_approval = true
         )
     }
 
+    fn configure_test_session(app: &mut App, thread_id: ThreadId) {
+        app.active_thread_id = Some(thread_id);
+        app.chat_widget.handle_codex_event(Event {
+            id: String::new(),
+            msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
+                session_id: thread_id,
+                forked_from_id: None,
+                thread_name: None,
+                model: "gpt-test".to_string(),
+                model_provider_id: "test-provider".to_string(),
+                service_tier: None,
+                approval_policy: AskForApproval::Never,
+                approvals_reviewer: ApprovalsReviewer::User,
+                sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                cwd: PathBuf::from("/tmp/project"),
+                reasoning_effort: None,
+                session_source: SessionSource::Cli,
+                nero_auto_runtime: NeroAutoRuntimeConfig::default(),
+                history_log_id: 0,
+                history_entry_count: 0,
+                initial_messages: None,
+                network_proxy: None,
+                rollout_path: Some(PathBuf::new()),
+            }),
+        });
+    }
+
+    fn queue_nero_auto_toggle_hotkey(
+        app: &mut App,
+        app_event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+        thread_id: ThreadId,
+    ) {
+        while app_event_rx.try_recv().is_ok() {}
+        app.chat_widget
+            .handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+
+        assert!(app.chat_widget.nero_auto_hotkey_inflight());
+        assert_matches!(
+            app_event_rx.try_recv(),
+            Ok(AppEvent::ApplyNeroAutoHotkey {
+                thread_id: Some(event_thread_id),
+                action: NeroAutoHotkeyAction::ToggleEnabled,
+            }) if event_thread_id == thread_id
+        );
+    }
+
     fn test_thread_session(thread_id: ThreadId, cwd: PathBuf) -> ThreadSessionState {
         ThreadSessionState {
             thread_id,
@@ -9316,6 +9415,102 @@ guardian_approval = true
             thread_id: thread_id.to_string(),
             turn: test_turn(turn_id, TurnStatus::InProgress, Vec::new()),
         })
+    }
+
+    #[tokio::test]
+    async fn stale_nero_auto_hotkey_event_clears_inflight_flag() {
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let thread_id = ThreadId::new();
+        configure_test_session(&mut app, thread_id);
+        queue_nero_auto_toggle_hotkey(&mut app, &mut app_event_rx, thread_id);
+
+        app.active_thread_id = Some(ThreadId::new());
+
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        app.handle_nero_auto_hotkey_event(
+            &mut app_server,
+            Some(thread_id),
+            NeroAutoHotkeyAction::ToggleEnabled,
+        )
+        .await;
+
+        assert!(!app.chat_widget.nero_auto_hotkey_inflight());
+    }
+
+    #[tokio::test]
+    async fn nero_auto_hotkey_read_error_clears_inflight_flag() {
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let thread_id = ThreadId::new();
+        configure_test_session(&mut app, thread_id);
+        queue_nero_auto_toggle_hotkey(&mut app, &mut app_event_rx, thread_id);
+
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        app.handle_nero_auto_hotkey_event(
+            &mut app_server,
+            Some(thread_id),
+            NeroAutoHotkeyAction::ToggleEnabled,
+        )
+        .await;
+
+        assert!(!app.chat_widget.nero_auto_hotkey_inflight());
+    }
+
+    #[tokio::test]
+    async fn handle_key_event_notifies_session_auto_input_activity_on_draft_change() -> Result<()> {
+        let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        let started = app_server
+            .start_thread(app.chat_widget.config_ref())
+            .await?;
+        let thread_id = started.session.thread_id;
+        configure_test_session(&mut app, thread_id);
+
+        let baseline = app_server
+            .thread_session_auto_input_activity(
+                thread_id,
+                ThreadSessionAutoInputActivityKind::DraftChanged,
+            )
+            .await?;
+
+        app.chat_widget
+            .set_composer_text("ab".to_string(), Vec::new(), Vec::new());
+        let terminal = crate::custom_terminal::Terminal::with_options(
+            ratatui::backend::CrosstermBackend::new(std::io::stdout()),
+        )
+        .expect("terminal");
+        let mut tui = crate::tui::Tui::new(terminal);
+        app.handle_key_event(
+            &mut tui,
+            &mut app_server,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        )
+        .await;
+
+        let after = app_server
+            .thread_session_auto_input_activity(
+                thread_id,
+                ThreadSessionAutoInputActivityKind::DraftChanged,
+            )
+            .await?;
+
+        assert_eq!(
+            after.authority,
+            ThreadSessionAutoAuthorityMode::AppServerAuthority
+        );
+        assert!(
+            after.generation_epoch > baseline.generation_epoch.saturating_add(1),
+            "expected draft-change helper to notify session-auto input activity before the manual probe request"
+        );
+        Ok(())
     }
 
     fn turn_completed_notification(

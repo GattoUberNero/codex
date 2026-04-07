@@ -73,6 +73,7 @@ use codex_app_server_protocol::ThreadRolloutAnalyzeParams;
 use codex_app_server_protocol::ThreadRolloutBackupDeleteParams;
 use codex_app_server_protocol::ThreadRolloutBackupRestoreParams;
 use codex_app_server_protocol::ThreadRolloutTrimParams;
+use codex_app_server_protocol::ThreadSessionAutoInputActivityParams;
 use codex_app_server_protocol::ThreadSessionAutoReadParams;
 use codex_app_server_protocol::ThreadSessionAutoUpdateParams;
 use codex_app_server_protocol::ThreadSetNameParams;
@@ -474,6 +475,16 @@ impl McpProcess {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("thread/sessionAuto/read", params).await
+    }
+
+    /// Send a `thread/sessionAuto/inputActivity` JSON-RPC request.
+    pub async fn send_thread_session_auto_input_activity_request(
+        &mut self,
+        params: ThreadSessionAutoInputActivityParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("thread/sessionAuto/inputActivity", params)
+            .await
     }
 
     /// Send a `thread/sessionAuto/update` JSON-RPC request.

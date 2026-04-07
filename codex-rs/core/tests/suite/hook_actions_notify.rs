@@ -452,6 +452,182 @@ fi
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_agent_auto_user_reply_respects_expected_wait_seconds_before_follow_up() -> Result<()>
+{
+    init_test_tracing();
+    if skip_if_no_linux_sandbox_bin() {
+        return Ok(());
+    }
+    let hook_dir = TempDir::new()?;
+    let marker = hook_dir.path().join("auto_wait.marker");
+    let marker_str = marker.to_string_lossy().to_string();
+    let once_marker = hook_dir.path().join("auto_wait.once");
+    let once_marker_str = once_marker.to_string_lossy().to_string();
+    let stop_script = write_notify_script(
+        r#"#!/bin/bash
+set -euo pipefail
+payload="$(cat)"
+if printf '%s' "$payload" | grep -q '"stop_hook_active":true'; then
+  printf '%s' '{"decision":"continue"}'
+else
+  printf '%s' '{"decision":"block","reason":"auto-wait checkpoint"}'
+fi
+"#,
+    )?;
+    let script = write_notify_script(&format!(
+        "#!/bin/bash\nset -euo pipefail\n: > \"{marker_str}\"\nif [ -f \"{once_marker_str}\" ]; then\n  printf '%s' '{{\"actions\":[]}}'\nelse\n  : > \"{once_marker_str}\"\n  printf '%s' '{{\"actions\":[{{\"type\":\"auto_user_reply\",\"message\":\"continue\",\"expected_wait_seconds\":2}}]}}'\nfi\n"
+    ))?;
+    let stop_command = format!("bash {stop_script}");
+
+    let test = TestCodexHarness::with_builder(
+        core_test_support::test_codex::test_codex()
+            .with_pre_build_hook(move |home| {
+                if let Err(error) = write_stop_hook(home, &stop_command) {
+                    panic!("failed to write stop hook fixture: {error}");
+                }
+            })
+            .with_config(move |cfg| {
+                cfg.notify = Some(vec![script]);
+                cfg.features
+                    .enable(Feature::CodexHooks)
+                    .expect("test config should allow feature update");
+            }),
+    )
+    .await?;
+    responses::mount_sse_once(
+        test.server(),
+        sse(vec![ev_assistant_message("m1", "Done"), ev_completed("r1")]),
+    )
+    .await;
+    responses::mount_sse_once(
+        test.server(),
+        sse(vec![
+            ev_assistant_message("m2", "Done 2"),
+            ev_completed("r2"),
+        ]),
+    )
+    .await;
+    responses::mount_sse_once(
+        test.server(),
+        sse(vec![
+            ev_assistant_message("m3", "Done 3"),
+            ev_completed("r3"),
+        ]),
+    )
+    .await;
+
+    submit_user_turn_no_wait(&test, "hello delayed auto").await?;
+    fs_wait::wait_for_path_exists(&marker, Duration::from_secs(5)).await?;
+
+    let _first_complete = wait_for_event(&test.test().codex, |ev| {
+        matches!(ev, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let second_complete_too_early = tokio::time::timeout(
+        Duration::from_secs(1),
+        wait_for_event(&test.test().codex, |ev| {
+            matches!(ev, EventMsg::TurnComplete(_))
+        }),
+    )
+    .await;
+    assert!(
+        second_complete_too_early.is_err(),
+        "did not expect follow-up TurnComplete before expected_wait_seconds elapsed"
+    );
+
+    let second_complete_after_wait = tokio::time::timeout(
+        Duration::from_secs(8),
+        wait_for_event(&test.test().codex, |ev| {
+            matches!(ev, EventMsg::TurnComplete(_))
+        }),
+    )
+    .await;
+    assert!(
+        second_complete_after_wait.is_ok(),
+        "expected delayed follow-up TurnComplete after expected_wait_seconds elapsed"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_agent_auto_user_reply_cancels_delayed_follow_up_on_input_activity() -> Result<()> {
+    init_test_tracing();
+    if skip_if_no_linux_sandbox_bin() {
+        return Ok(());
+    }
+    let hook_dir = TempDir::new()?;
+    let marker = hook_dir.path().join("auto_wait_cancel.marker");
+    let marker_str = marker.to_string_lossy().to_string();
+    let once_marker = hook_dir.path().join("auto_wait_cancel.once");
+    let once_marker_str = once_marker.to_string_lossy().to_string();
+    let stop_script = write_notify_script(
+        r#"#!/bin/bash
+set -euo pipefail
+payload="$(cat)"
+if printf '%s' "$payload" | grep -q '"stop_hook_active":true'; then
+  printf '%s' '{"decision":"continue"}'
+else
+  printf '%s' '{"decision":"block","reason":"auto-wait cancel checkpoint"}'
+fi
+"#,
+    )?;
+    let script = write_notify_script(&format!(
+        "#!/bin/bash\nset -euo pipefail\n: > \"{marker_str}\"\nif [ -f \"{once_marker_str}\" ]; then\n  printf '%s' '{{\"actions\":[]}}'\nelse\n  : > \"{once_marker_str}\"\n  printf '%s' '{{\"actions\":[{{\"type\":\"auto_user_reply\",\"message\":\"continue\",\"expected_wait_seconds\":2}}]}}'\nfi\n"
+    ))?;
+    let stop_command = format!("bash {stop_script}");
+
+    let test = TestCodexHarness::with_builder(
+        core_test_support::test_codex::test_codex()
+            .with_pre_build_hook(move |home| {
+                if let Err(error) = write_stop_hook(home, &stop_command) {
+                    panic!("failed to write stop hook fixture: {error}");
+                }
+            })
+            .with_config(move |cfg| {
+                cfg.notify = Some(vec![script]);
+                cfg.features
+                    .enable(Feature::CodexHooks)
+                    .expect("test config should allow feature update");
+            }),
+    )
+    .await?;
+    let request_log = responses::mount_sse_sequence(
+        test.server(),
+        vec![sse(vec![
+            ev_assistant_message("m1", "Done"),
+            ev_completed("r1"),
+        ])],
+    )
+    .await;
+
+    submit_user_turn_no_wait(&test, "hello delayed auto cancel").await?;
+    fs_wait::wait_for_path_exists(&marker, Duration::from_secs(5)).await?;
+
+    let _first_complete = wait_for_event(&test.test().codex, |ev| {
+        matches!(ev, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    test.test().codex.note_user_input_activity().await;
+
+    let second_complete_after_activity = tokio::time::timeout(
+        Duration::from_secs(3),
+        wait_for_event(&test.test().codex, |ev| {
+            matches!(ev, EventMsg::TurnComplete(_))
+        }),
+    )
+    .await;
+    assert!(
+        second_complete_after_activity.is_err(),
+        "did not expect delayed follow-up TurnComplete after input activity canceled wait"
+    );
+    assert_eq!(request_log.requests().len(), 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn after_agent_runtime_delivery_contract_blocks_auto_enqueue_when_msg_is_tui_only()
 -> Result<()> {
     init_test_tracing();

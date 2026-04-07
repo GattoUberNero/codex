@@ -3161,6 +3161,31 @@ pub struct ThreadSessionAutoReadParams {
     pub thread_id: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum ThreadSessionAutoInputActivityKind {
+    DraftChanged,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSessionAutoInputActivityParams {
+    pub thread_id: String,
+    pub activity: ThreadSessionAutoInputActivityKind,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSessionAutoInputActivityResponse {
+    pub thread_id: String,
+    pub applied: bool,
+    pub authority: ThreadSessionAutoAuthorityMode,
+    pub generation_epoch: u64,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -3227,6 +3252,7 @@ pub struct ThreadSessionAutoUpdateParams {
 #[ts(export_to = "v2/")]
 pub enum ThreadSessionAutoAuthorityMode {
     BridgeProxy,
+    AppServerAuthority,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

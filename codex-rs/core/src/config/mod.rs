@@ -1469,6 +1469,7 @@ fn codexn_fork_auto_developer_instructions(extra_toml: &TomlValue) -> Option<Str
         "  \"nero_auto_v1\": {".to_string(),
         "    \"score_value\": 7,".to_string(),
         "    \"score_explanation\": \"planned low-risk next step\",".to_string(),
+        "    \"expected_wait_seconds\": 20,".to_string(),
         "    \"gates_done_observed\": false,".to_string(),
         "    \"user_collaboration_required\": false,".to_string(),
         "    \"emergency_flag\": false".to_string(),

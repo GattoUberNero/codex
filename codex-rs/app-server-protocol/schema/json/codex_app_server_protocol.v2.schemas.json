@@ -1184,6 +1184,30 @@
             },
             "method": {
               "enum": [
+                "thread/sessionAuto/inputActivity"
+              ],
+              "title": "Thread/sessionAuto/inputActivityRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadSessionAutoInputActivityParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/sessionAuto/inputActivityRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
                 "thread/sessionAuto/update"
               ],
               "title": "Thread/sessionAuto/updateRequestMethod",
@@ -12181,7 +12205,8 @@
     },
     "ThreadSessionAutoAuthorityMode": {
       "enum": [
-        "bridgeProxy"
+        "bridgeProxy",
+        "appServerAuthority"
       ],
       "type": "string"
     },
@@ -12232,6 +12257,56 @@
         "runtime",
         "source"
       ],
+      "type": "object"
+    },
+    "ThreadSessionAutoInputActivityKind": {
+      "enum": [
+        "draftChanged"
+      ],
+      "type": "string"
+    },
+    "ThreadSessionAutoInputActivityParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "activity": {
+          "$ref": "#/definitions/ThreadSessionAutoInputActivityKind"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "activity",
+        "threadId"
+      ],
+      "title": "ThreadSessionAutoInputActivityParams",
+      "type": "object"
+    },
+    "ThreadSessionAutoInputActivityResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "applied": {
+          "type": "boolean"
+        },
+        "authority": {
+          "$ref": "#/definitions/ThreadSessionAutoAuthorityMode"
+        },
+        "generationEpoch": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "applied",
+        "authority",
+        "generationEpoch",
+        "threadId"
+      ],
+      "title": "ThreadSessionAutoInputActivityResponse",
       "type": "object"
     },
     "ThreadSessionAutoReadParams": {

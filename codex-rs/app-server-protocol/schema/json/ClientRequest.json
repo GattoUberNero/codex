@@ -3123,6 +3123,27 @@
       ],
       "type": "object"
     },
+    "ThreadSessionAutoInputActivityKind": {
+      "enum": [
+        "draftChanged"
+      ],
+      "type": "string"
+    },
+    "ThreadSessionAutoInputActivityParams": {
+      "properties": {
+        "activity": {
+          "$ref": "#/definitions/ThreadSessionAutoInputActivityKind"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "activity",
+        "threadId"
+      ],
+      "type": "object"
+    },
     "ThreadSessionAutoReadParams": {
       "properties": {
         "threadId": {
@@ -4080,6 +4101,30 @@
         "params"
       ],
       "title": "Thread/sessionAuto/readRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "thread/sessionAuto/inputActivity"
+          ],
+          "title": "Thread/sessionAuto/inputActivityRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadSessionAutoInputActivityParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/sessionAuto/inputActivityRequest",
       "type": "object"
     },
     {

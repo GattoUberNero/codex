@@ -452,6 +452,7 @@ const HOOK_AUTO_REPLY_MAX_CHAIN_DEPTH: u32 = 8;
 /// still available as fallback when the user has not queued anything.
 const HOOK_AUTO_REPLY_TAB_PRIORITY_GRACE_MS: u64 = 300;
 const HOOK_AUTO_REPLY_WAIT_FOR_TERMINAL_TIMEOUT_MS: u64 = 30_000;
+const HOOK_AUTO_REPLY_WAIT_POLL_INTERVAL_MS: u64 = 10;
 const NERO_HOOK_DELIVERY_LOG_FILENAME: &str = "nero-hook-delivery.jsonl";
 const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
 const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyber-safety";
@@ -1411,6 +1412,10 @@ impl Codex {
             })
             .await?;
         Ok(self.thread_config_snapshot().await)
+    }
+
+    pub(crate) async fn note_user_input_activity(&self) -> u64 {
+        self.session.note_user_input_activity().await
     }
 
     pub(crate) async fn agent_status(&self) -> AgentStatus {
@@ -2943,6 +2948,10 @@ impl Session {
         next_epoch
     }
 
+    pub(crate) async fn note_user_input_activity(&self) -> u64 {
+        self.begin_new_user_submission_generation().await
+    }
+
     fn current_hook_auto_reply_epoch(&self) -> u64 {
         let guard = match self.hook_auto_reply_guard_state.lock() {
             Ok(guard) => guard,
@@ -3076,6 +3085,14 @@ impl Session {
         guard.chain_depth = guard.chain_depth.saturating_sub(1);
     }
 
+    fn normalize_hook_auto_reply_wait_seconds(expected_wait_seconds: Option<u64>) -> Option<u64> {
+        let max_wait_seconds = HOOK_AUTO_REPLY_WAIT_FOR_TERMINAL_TIMEOUT_MS.div_ceil(1000);
+        expected_wait_seconds
+            .filter(|wait_seconds| *wait_seconds > 0)
+            .map(|wait_seconds| wait_seconds.min(max_wait_seconds))
+            .filter(|wait_seconds| *wait_seconds > 0)
+    }
+
     fn register_internal_hook_auto_submission_id(&self, submission_id: String) {
         let mut ids = match self.hook_auto_reply_internal_submission_ids.lock() {
             Ok(guard) => guard,
@@ -3097,6 +3114,7 @@ impl Session {
         source_turn_id: String,
         hook_name: String,
         text: String,
+        expected_wait_seconds: Option<u64>,
         session_source: SessionSource,
     ) {
         if session_source_blocks_nero_msg_auto_lane(&session_source) {
@@ -3157,7 +3175,10 @@ impl Session {
                     );
                     return;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    HOOK_AUTO_REPLY_WAIT_POLL_INTERVAL_MS,
+                ))
+                .await;
             }
             let apply_tab_priority_grace = {
                 let state = sess.state.lock().await;
@@ -3177,6 +3198,43 @@ impl Session {
                     HOOK_AUTO_REPLY_TAB_PRIORITY_GRACE_MS,
                 ))
                 .await;
+            }
+            if let Some(wait_seconds) =
+                Self::normalize_hook_auto_reply_wait_seconds(expected_wait_seconds)
+            {
+                let scheduled_wait = StdDuration::from_secs(wait_seconds);
+                let delay_started = StdInstant::now();
+                info!(
+                    turn_id = %source_turn_id,
+                    hook_name = %hook_name,
+                    reservation_epoch,
+                    requested_wait_seconds = expected_wait_seconds,
+                    wait_seconds,
+                    "delaying synthetic user reply by requested expected_wait_seconds"
+                );
+                while delay_started.elapsed() < scheduled_wait {
+                    if sess.current_hook_auto_reply_epoch() != reservation_epoch {
+                        sess.release_hook_auto_reply_chain_slot_for_epoch(reservation_epoch);
+                        info!(
+                            turn_id = %source_turn_id,
+                            hook_name = %hook_name,
+                            reservation_epoch,
+                            current_epoch = sess.current_hook_auto_reply_epoch(),
+                            wait_seconds,
+                            "dropping delayed synthetic user reply because a newer user submission generation is active"
+                        );
+                        sess.clear_turn_terminal_marker(&source_turn_id).await;
+                        return;
+                    }
+                    let remaining = scheduled_wait.saturating_sub(delay_started.elapsed());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    let sleep_for = remaining.min(StdDuration::from_millis(
+                        HOOK_AUTO_REPLY_WAIT_POLL_INTERVAL_MS,
+                    ));
+                    tokio::time::sleep(sleep_for).await;
+                }
             }
             if sess.current_hook_auto_reply_epoch() != reservation_epoch {
                 sess.release_hook_auto_reply_chain_slot_for_epoch(reservation_epoch);
@@ -3210,10 +3268,11 @@ impl Session {
             match send_result.await {
                 Ok(()) => {
                     info!(
-                        turn_id = %source_turn_id,
+                            turn_id = %source_turn_id,
                         hook_name = %hook_name,
                         chain_depth,
                         reservation_epoch,
+                        expected_wait_seconds,
                         %submission_id,
                         "queued synthetic user reply from hook action"
                     );
@@ -8463,7 +8522,8 @@ pub(crate) async fn run_turn(
                     }
 
                     let mut abort_message = None;
-                    let mut deferred_auto_user_replies: Vec<(String, String)> = Vec::new();
+                    let mut deferred_auto_user_replies: Vec<(String, String, Option<u64>)> =
+                        Vec::new();
                     let mut auto_user_reply_selected_for_turn = false;
                     for hook_outcome in hook_outcomes {
                         let hook_name = hook_outcome.hook_name;
@@ -8481,7 +8541,8 @@ pub(crate) async fn run_turn(
                                 stop_runtime_command_delivered_for_turn;
                             let mut hook_nero_msg_total = 0usize;
                             let mut hook_nero_msg_throttled = 0usize;
-                            let mut hook_auto_user_replies_pending: Vec<String> = Vec::new();
+                            let mut hook_auto_user_replies_pending: Vec<(String, Option<u64>)> =
+                                Vec::new();
                             let mut hook_auto_user_replies_blocked = 0usize;
                             let mut hook_auto_user_replies_queued = 0usize;
                             let mut latest_runtime_status_kind_normalized = None::<String>;
@@ -8749,7 +8810,10 @@ pub(crate) async fn run_turn(
                                         )
                                         .await;
                                     }
-                                    NeroHookAction::AutoUserReply { message } => {
+                                    NeroHookAction::AutoUserReply {
+                                        message,
+                                        expected_wait_seconds,
+                                    } => {
                                         if session_source_blocks_nero_msg_auto_lane(
                                             &turn_context.session_source,
                                         ) {
@@ -8770,6 +8834,7 @@ pub(crate) async fn run_turn(
                                                 false,
                                                 json!({
                                                     "message_len": message.len(),
+                                                    "expected_wait_seconds": expected_wait_seconds,
                                                     "auto_stage": {
                                                         "stage": "follow_up",
                                                     },
@@ -8795,6 +8860,7 @@ pub(crate) async fn run_turn(
                                                 false,
                                                 json!({
                                                     "message_len": message.len(),
+                                                    "expected_wait_seconds": expected_wait_seconds,
                                                     "auto_stage": {
                                                         "stage": "follow_up",
                                                     },
@@ -8821,13 +8887,15 @@ pub(crate) async fn run_turn(
                                             false,
                                             json!({
                                                 "message_len": message.len(),
+                                                "expected_wait_seconds": expected_wait_seconds,
                                                 "auto_stage": {
                                                     "stage": "follow_up",
                                                 },
                                             }),
                                         )
                                         .await;
-                                        hook_auto_user_replies_pending.push(message);
+                                        hook_auto_user_replies_pending
+                                            .push((message, expected_wait_seconds));
                                     }
                                 }
                             }
@@ -8838,7 +8906,9 @@ pub(crate) async fn run_turn(
                                 );
                             if !hook_auto_user_replies_pending.is_empty() {
                                 if hook_delivery_contract_satisfied {
-                                    for message in hook_auto_user_replies_pending {
+                                    for (message, expected_wait_seconds) in
+                                        hook_auto_user_replies_pending
+                                    {
                                         hook_auto_user_replies_queued =
                                             hook_auto_user_replies_queued.saturating_add(1);
                                         append_nero_hook_delivery_audit(
@@ -8852,6 +8922,7 @@ pub(crate) async fn run_turn(
                                             false,
                                             json!({
                                                 "message_len": message.len(),
+                                                "expected_wait_seconds": expected_wait_seconds,
                                                 "auto_stage": {
                                                     "stage": "follow_up",
                                                 },
@@ -8863,8 +8934,11 @@ pub(crate) async fn run_turn(
                                             }),
                                         )
                                         .await;
-                                        deferred_auto_user_replies
-                                            .push((hook_name.clone(), message));
+                                        deferred_auto_user_replies.push((
+                                            hook_name.clone(),
+                                            message,
+                                            expected_wait_seconds,
+                                        ));
                                     }
                                 } else {
                                     hook_auto_user_replies_blocked =
@@ -8889,7 +8963,9 @@ pub(crate) async fn run_turn(
                                         }),
                                     )
                                     .await;
-                                    for message in hook_auto_user_replies_pending {
+                                    for (message, expected_wait_seconds) in
+                                        hook_auto_user_replies_pending
+                                    {
                                         append_nero_hook_delivery_audit(
                                             &hook_delivery_log_path,
                                             &sess.conversation_id,
@@ -8901,6 +8977,7 @@ pub(crate) async fn run_turn(
                                             false,
                                             json!({
                                                 "message_len": message.len(),
+                                                "expected_wait_seconds": expected_wait_seconds,
                                                 "auto_stage": {
                                                     "stage": "follow_up",
                                                 },
@@ -9064,11 +9141,12 @@ pub(crate) async fn run_turn(
                         .await;
                         return None;
                     }
-                    for (hook_name, message) in deferred_auto_user_replies {
+                    for (hook_name, message, expected_wait_seconds) in deferred_auto_user_replies {
                         sess.spawn_deferred_auto_user_reply(
                             turn_context.sub_id.clone(),
                             hook_name,
                             message,
+                            expected_wait_seconds,
                             turn_context.session_source.clone(),
                         );
                     }
@@ -14405,7 +14483,7 @@ mod tests {
             assert!(!seen.contains("turn-a"));
         }
 
-        let next_epoch = sess.begin_new_user_submission_generation().await;
+        let next_epoch = sess.note_user_input_activity().await;
         assert!(next_epoch > second.1);
         let stale_epoch = second.1;
         sess.release_hook_auto_reply_chain_slot_for_epoch(stale_epoch);
@@ -14992,6 +15070,31 @@ mod tests {
                     },
                 }
             }))
+        );
+    }
+
+    #[test]
+    fn normalize_hook_auto_reply_wait_seconds_uses_existing_runtime_budget() {
+        let max_wait_seconds = HOOK_AUTO_REPLY_WAIT_FOR_TERMINAL_TIMEOUT_MS.div_ceil(1000);
+
+        assert_eq!(Session::normalize_hook_auto_reply_wait_seconds(None), None);
+        assert_eq!(
+            Session::normalize_hook_auto_reply_wait_seconds(Some(0)),
+            None
+        );
+        assert_eq!(
+            Session::normalize_hook_auto_reply_wait_seconds(Some(1)),
+            Some(1)
+        );
+        assert_eq!(
+            Session::normalize_hook_auto_reply_wait_seconds(Some(max_wait_seconds)),
+            Some(max_wait_seconds)
+        );
+        assert_eq!(
+            Session::normalize_hook_auto_reply_wait_seconds(Some(
+                max_wait_seconds.saturating_add(9)
+            )),
+            Some(max_wait_seconds)
         );
     }
 

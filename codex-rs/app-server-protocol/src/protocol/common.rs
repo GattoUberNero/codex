@@ -321,6 +321,10 @@ client_request_definitions! {
         params: v2::ThreadSessionAutoReadParams,
         response: v2::ThreadSessionAutoReadResponse,
     },
+    ThreadSessionAutoInputActivity => "thread/sessionAuto/inputActivity" {
+        params: v2::ThreadSessionAutoInputActivityParams,
+        response: v2::ThreadSessionAutoInputActivityResponse,
+    },
     ThreadSessionAutoUpdate => "thread/sessionAuto/update" {
         params: v2::ThreadSessionAutoUpdateParams,
         response: v2::ThreadSessionAutoUpdateResponse,

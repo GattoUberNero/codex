@@ -118,6 +118,10 @@ impl CodexThread {
         self.codex.set_nero_auto_runtime(nero_auto_runtime).await
     }
 
+    pub async fn note_user_input_activity(&self) -> u64 {
+        self.codex.note_user_input_activity().await
+    }
+
     /// Use sparingly: this is intended to be removed soon.
     pub async fn submit_with_id(&self, sub: Submission) -> CodexResult<()> {
         self.codex.submit_with_id(sub).await

@@ -139,6 +139,7 @@ Example with notification opt-out:
 - `thread/loaded/list` — list the thread ids currently loaded in memory.
 - `thread/read` — read a stored thread by id without resuming it; optionally include turns via `includeTurns`. The returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded.
 - `thread/sessionAuto/read` — read the bridge-backed runtime `session-auto` state for a thread through app-server v2, including CAS `version`, effective/default/applied values, and the current authority mode.
+- `thread/sessionAuto/inputActivity` — notify a loaded thread that the user changed composer draft input so runtime-owned delayed nero-auto follow-ups can cancel before the next submitted turn.
 - `thread/sessionAuto/update` — update the bridge-backed runtime `session-auto` state for a thread via app-server v2 using `expectedVersion` compare-and-swap semantics; returns the refreshed state on success and the current state on conflicts when available.
 - `thread/metadata/update` — patch stored thread metadata in sqlite; currently supports updating persisted `gitInfo` fields and returns the refreshed `thread`.
 - `thread/status/changed` — notification emitted when a loaded thread’s status changes (`threadId` + new `status`).
@@ -445,6 +446,21 @@ Use `thread/sessionAuto/update` with the last observed `expectedVersion` to pres
             "autoRounds": 3
         }
     }
+} }
+```
+
+Use `thread/sessionAuto/inputActivity` when the user changes draft input in the composer. This call requires a loaded thread and returns the new hook-auto generation epoch so delayed auto-follow-ups from older generations are canceled before the next submitted turn.
+
+```json
+{ "method": "thread/sessionAuto/inputActivity", "id": 28, "params": {
+    "threadId": "thr_123",
+    "activity": "draftChanged"
+} }
+{ "id": 28, "result": {
+    "threadId": "thr_123",
+    "applied": true,
+    "authority": "appServerAuthority",
+    "generationEpoch": 42
 } }
 ```
 

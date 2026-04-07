@@ -442,6 +442,7 @@ fn codexn_fork_auto_prompt_uses_safe_defaults_when_system_text_is_missing() {
         .expect("developer instructions");
     assert!(instructions.contains("## NERO-SYSTEM v1"));
     assert!(instructions.contains("\"nero_auto_v1\""));
+    assert!(instructions.contains("\"expected_wait_seconds\""));
     assert!(instructions.contains("\"user_collaboration_required\""));
     assert!(instructions.contains("NERO_AUTO_V1"));
 }

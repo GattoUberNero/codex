@@ -8,6 +8,9 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::ThreadSessionAutoApplied;
 use codex_app_server_protocol::ThreadSessionAutoAuthorityMode;
+use codex_app_server_protocol::ThreadSessionAutoInputActivityKind;
+use codex_app_server_protocol::ThreadSessionAutoInputActivityParams;
+use codex_app_server_protocol::ThreadSessionAutoInputActivityResponse;
 use codex_app_server_protocol::ThreadSessionAutoReadParams;
 use codex_app_server_protocol::ThreadSessionAutoReadResponse;
 use codex_app_server_protocol::ThreadSessionAutoUpdateParams;
@@ -606,6 +609,114 @@ async fn thread_session_auto_update_uses_loaded_thread_context_and_preserves_ver
     assert_eq!(updated_state.version, reread.state.version);
     assert_eq!(updated_state.effective.runtime.autonomy_level, 8);
     assert_eq!(reread.state.effective.runtime.autonomy_level, 8);
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_session_auto_input_activity_bumps_generation_epoch_for_loaded_threads() -> Result<()>
+{
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    let runtime_env = create_config_toml(
+        codex_home.path(),
+        &server.uri(),
+        /*require_runtime_msg_for_auto*/ false,
+    )?;
+
+    let env_overrides = runtime_env.env_overrides();
+    let mut mcp = McpProcess::new_with_env(codex_home.path(), &env_overrides).await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let start_id = mcp
+        .send_thread_start_request(ThreadStartParams::default())
+        .await?;
+    let start_resp: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(start_id)),
+    )
+    .await??;
+    let started: ThreadStartResponse = to_response::<ThreadStartResponse>(start_resp)?;
+    let thread_id = started.thread.id;
+
+    let first_activity_id = mcp
+        .send_thread_session_auto_input_activity_request(ThreadSessionAutoInputActivityParams {
+            thread_id: thread_id.clone(),
+            activity: ThreadSessionAutoInputActivityKind::DraftChanged,
+        })
+        .await?;
+    let first_activity_resp: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(first_activity_id)),
+    )
+    .await??;
+    let first_activity: ThreadSessionAutoInputActivityResponse =
+        to_response::<ThreadSessionAutoInputActivityResponse>(first_activity_resp)?;
+    assert_eq!(first_activity.thread_id, thread_id);
+    assert!(first_activity.applied);
+    assert_eq!(
+        first_activity.authority,
+        ThreadSessionAutoAuthorityMode::AppServerAuthority
+    );
+
+    let second_activity_id = mcp
+        .send_thread_session_auto_input_activity_request(ThreadSessionAutoInputActivityParams {
+            thread_id: thread_id.clone(),
+            activity: ThreadSessionAutoInputActivityKind::DraftChanged,
+        })
+        .await?;
+    let second_activity_resp: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(second_activity_id)),
+    )
+    .await??;
+    let second_activity: ThreadSessionAutoInputActivityResponse =
+        to_response::<ThreadSessionAutoInputActivityResponse>(second_activity_resp)?;
+    assert_eq!(second_activity.thread_id, thread_id);
+    assert!(second_activity.applied);
+    assert_eq!(
+        second_activity.authority,
+        ThreadSessionAutoAuthorityMode::AppServerAuthority
+    );
+    assert!(second_activity.generation_epoch > first_activity.generation_epoch);
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_session_auto_input_activity_rejects_unloaded_threads() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    let runtime_env = create_config_toml(
+        codex_home.path(),
+        &server.uri(),
+        /*require_runtime_msg_for_auto*/ false,
+    )?;
+    let thread_id = app_test_support::create_fake_rollout_with_source(
+        codex_home.path(),
+        "2026-04-01T13-30-00",
+        "2026-04-01T13:30:00Z",
+        "hello unloaded",
+        Some("mock"),
+        None,
+        codex_protocol::protocol::SessionSource::Cli,
+    )?;
+
+    let env_overrides = runtime_env.env_overrides();
+    let mut mcp = McpProcess::new_with_env(codex_home.path(), &env_overrides).await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let activity_id = mcp
+        .send_thread_session_auto_input_activity_request(ThreadSessionAutoInputActivityParams {
+            thread_id: thread_id.clone(),
+            activity: ThreadSessionAutoInputActivityKind::DraftChanged,
+        })
+        .await?;
+    let activity_error: JSONRPCError = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(activity_id)),
+    )
+    .await??;
+    assert_eq!(activity_error.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert!(activity_error.error.message.contains("thread not loaded"));
     Ok(())
 }
 
