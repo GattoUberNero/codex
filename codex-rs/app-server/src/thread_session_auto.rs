@@ -29,7 +29,7 @@ fn version_conflict_response(
 ) -> ThreadSessionAutoUpdateResponse {
     ThreadSessionAutoUpdateResponse {
         thread_id: context.thread_id.clone(),
-        authority: ThreadSessionAutoAuthorityMode::BridgeProxy,
+        authority: ThreadSessionAutoAuthorityMode::AppServerAuthority,
         applied: false,
         conflict: true,
         message: Some(format!(
@@ -49,7 +49,7 @@ fn session_source_conflict_response(
 ) -> ThreadSessionAutoUpdateResponse {
     ThreadSessionAutoUpdateResponse {
         thread_id: context.thread_id.clone(),
-        authority: ThreadSessionAutoAuthorityMode::BridgeProxy,
+        authority: ThreadSessionAutoAuthorityMode::AppServerAuthority,
         applied: false,
         conflict: true,
         message: Some(format!(
@@ -70,7 +70,7 @@ fn invalid_input_response(
 ) -> ThreadSessionAutoUpdateResponse {
     ThreadSessionAutoUpdateResponse {
         thread_id: context.thread_id.clone(),
-        authority: ThreadSessionAutoAuthorityMode::BridgeProxy,
+        authority: ThreadSessionAutoAuthorityMode::AppServerAuthority,
         applied: false,
         conflict: false,
         message: Some(message),
@@ -89,7 +89,7 @@ fn rejected_update_response(
 ) -> ThreadSessionAutoUpdateResponse {
     ThreadSessionAutoUpdateResponse {
         thread_id: context.thread_id.clone(),
-        authority: ThreadSessionAutoAuthorityMode::BridgeProxy,
+        authority: ThreadSessionAutoAuthorityMode::AppServerAuthority,
         applied: false,
         conflict: false,
         message: Some(message.to_string()),
@@ -108,7 +108,7 @@ pub(crate) async fn read_thread_session_auto(
     let snapshot = read_state_snapshot(&state_path)?;
     Ok(ThreadSessionAutoReadResponse {
         thread_id: context.thread_id.clone(),
-        authority: ThreadSessionAutoAuthorityMode::BridgeProxy,
+        authority: ThreadSessionAutoAuthorityMode::AppServerAuthority,
         state: build_session_auto_state(context, &state_path, &config_path, &snapshot),
     })
 }
@@ -290,7 +290,7 @@ pub(crate) async fn update_thread_session_auto(
 
     Ok(ThreadSessionAutoUpdateResponse {
         thread_id: context.thread_id.clone(),
-        authority: ThreadSessionAutoAuthorityMode::BridgeProxy,
+        authority: ThreadSessionAutoAuthorityMode::AppServerAuthority,
         applied: true,
         conflict: false,
         message: None,

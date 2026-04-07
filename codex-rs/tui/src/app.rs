@@ -253,8 +253,8 @@ fn nero_session_auto_authority_mode_label(
     authority: ThreadSessionAutoAuthorityMode,
 ) -> &'static str {
     match authority {
-        ThreadSessionAutoAuthorityMode::BridgeProxy => "bridgeProxy",
-        ThreadSessionAutoAuthorityMode::AppServerAuthority => "appServerAuthority",
+        ThreadSessionAutoAuthorityMode::BridgeProxy
+        | ThreadSessionAutoAuthorityMode::AppServerAuthority => "appServerAuthority",
     }
 }
 
@@ -6473,10 +6473,10 @@ mod tests {
         assert_eq!(
             nero_session_auto_authority_context(
                 "thread-123",
-                ThreadSessionAutoAuthorityMode::BridgeProxy,
+                ThreadSessionAutoAuthorityMode::AppServerAuthority,
                 &state,
             ),
-            "Authority context: thread-id=thread-123, authority=bridgeProxy, session-source=cli, config-path=/tmp/config-nero-hook-auto.toml, state-path=/tmp/nero-hook-auto-state.json"
+            "Authority context: thread-id=thread-123, authority=appServerAuthority, session-source=cli, config-path=/tmp/config-nero-hook-auto.toml, state-path=/tmp/nero-hook-auto-state.json"
         );
     }
 

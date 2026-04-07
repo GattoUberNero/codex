@@ -101,7 +101,7 @@ async fn thread_session_auto_read_and_update_via_rust_authority() -> Result<()> 
     assert_eq!(initial.thread_id, thread_id);
     assert_eq!(
         initial.authority,
-        ThreadSessionAutoAuthorityMode::BridgeProxy
+        ThreadSessionAutoAuthorityMode::AppServerAuthority
     );
     assert_eq!(initial.state.session_source, SessionSource::Cli);
     assert_eq!(
