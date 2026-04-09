@@ -18,6 +18,7 @@ fn view_image_tool_omits_detail_without_original_detail_feature() {
                 properties: BTreeMap::from([(
                     "path".to_string(),
                     JsonSchema::String {
+                enum_values: None,
                         description: Some("Local filesystem path to an image file".to_string()),
                     },
                 )]),
@@ -46,6 +47,7 @@ fn view_image_tool_includes_detail_with_original_detail_feature() {
                     (
                         "detail".to_string(),
                         JsonSchema::String {
+                enum_values: None,
                             description: Some(
                                 "Optional detail override. The only supported value is `original`; omit this field for default resized behavior. Use `original` to preserve the file's original resolution instead of resizing to fit. This is important when high-fidelity image perception or precise localization is needed, especially for CUA agents.".to_string(),
                             ),
@@ -54,6 +56,7 @@ fn view_image_tool_includes_detail_with_original_detail_feature() {
                     (
                         "path".to_string(),
                         JsonSchema::String {
+                enum_values: None,
                             description: Some("Local filesystem path to an image file".to_string()),
                         },
                     ),

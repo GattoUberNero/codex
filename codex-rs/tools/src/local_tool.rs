@@ -21,12 +21,14 @@ pub fn create_exec_command_tool(options: CommandToolOptions) -> ToolSpec {
         (
             "cmd".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some("Shell command to execute.".to_string()),
             },
         ),
         (
             "workdir".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "Optional working directory to run the command in; defaults to the turn cwd."
                         .to_string(),
@@ -36,6 +38,7 @@ pub fn create_exec_command_tool(options: CommandToolOptions) -> ToolSpec {
         (
             "shell".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "Shell binary to launch. Defaults to the user's default shell.".to_string(),
                 ),
@@ -115,6 +118,7 @@ pub fn create_write_stdin_tool() -> ToolSpec {
         (
             "chars".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some("Bytes to write to stdin (may be empty to poll).".to_string()),
             },
         ),
@@ -158,13 +162,17 @@ pub fn create_shell_tool(options: ShellToolOptions) -> ToolSpec {
         (
             "command".to_string(),
             JsonSchema::Array {
-                items: Box::new(JsonSchema::String { description: None }),
+                items: Box::new(JsonSchema::String {
+                    enum_values: None,
+                    description: None,
+                }),
                 description: Some("The command to execute".to_string()),
             },
         ),
         (
             "workdir".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some("The working directory to execute the command in".to_string()),
             },
         ),
@@ -221,6 +229,7 @@ pub fn create_shell_command_tool(options: CommandToolOptions) -> ToolSpec {
         (
             "command".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "The shell script to execute in the user's default shell".to_string(),
                 ),
@@ -229,6 +238,7 @@ pub fn create_shell_command_tool(options: CommandToolOptions) -> ToolSpec {
         (
             "workdir".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some("The working directory to execute the command in".to_string()),
             },
         ),
@@ -295,6 +305,7 @@ pub fn create_request_permissions_tool(description: String) -> ToolSpec {
         (
             "reason".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "Optional short explanation for why additional permissions are needed."
                         .to_string(),
@@ -359,6 +370,7 @@ fn create_approval_parameters(
         (
             "sandbox_permissions".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     if exec_permission_approvals_enabled {
                         "Sandbox permissions for the command. Use \"with_additional_permissions\" to request additional sandboxed filesystem or network permissions (preferred), or \"require_escalated\" to request running without sandbox restrictions; defaults to \"use_default\"."
@@ -372,6 +384,7 @@ fn create_approval_parameters(
         (
             "justification".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     r#"Only set if sandbox_permissions is \"require_escalated\".
                     Request approval from the user to run this command outside the sandbox.
@@ -385,7 +398,8 @@ fn create_approval_parameters(
         (
             "prefix_rule".to_string(),
             JsonSchema::Array {
-                items: Box::new(JsonSchema::String { description: None }),
+                items: Box::new(JsonSchema::String {
+                enum_values: None, description: None }),
                 description: Some(
                     r#"Only specify when sandbox_permissions is `require_escalated`.
                         Suggest a prefix command pattern that will allow you to fulfill similar requests from the user in the future.
@@ -435,14 +449,20 @@ fn file_system_permissions_schema() -> JsonSchema {
             (
                 "read".to_string(),
                 JsonSchema::Array {
-                    items: Box::new(JsonSchema::String { description: None }),
+                    items: Box::new(JsonSchema::String {
+                        enum_values: None,
+                        description: None,
+                    }),
                     description: Some("Absolute paths to grant read access to.".to_string()),
                 },
             ),
             (
                 "write".to_string(),
                 JsonSchema::Array {
-                    items: Box::new(JsonSchema::String { description: None }),
+                    items: Box::new(JsonSchema::String {
+                        enum_values: None,
+                        description: None,
+                    }),
                     description: Some("Absolute paths to grant write access to.".to_string()),
                 },
             ),

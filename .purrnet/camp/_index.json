@@ -1,6 +1,15 @@
 {
   "schema": "purrnet/camp-index.v1",
-  "activeCampaign": null,
-  "campaignOrder": [],
-  "campaigns": {}
+  "activeCampaign": "A",
+  "campaignOrder": [
+    "A"
+  ],
+  "campaigns": {
+    "A": {
+      "status": "active",
+      "title": "Nero auto countdown TUI",
+      "createdAt": "2026-04-07T09:21:04.541Z",
+      "updatedAt": "2026-04-07T09:21:09.374Z"
+    }
+  }
 }

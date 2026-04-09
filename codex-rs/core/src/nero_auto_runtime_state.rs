@@ -26,6 +26,14 @@ pub const NERO_HOOK_AUTO_ENABLED_ENV: &str = "NERO_HOOK_AUTO_ENABLED";
 pub const NERO_HOOK_AUTO_AUTONOMY_LEVEL_ENV: &str = "NERO_HOOK_AUTO_AUTONOMY_LEVEL";
 pub const NERO_HOOK_AUTO_MAX_ROUNDS_ENV: &str = "NERO_HOOK_AUTO_MAX_ROUNDS";
 pub const NERO_HOOK_AUTO_STEP_PER_ROUND_ENV: &str = "NERO_HOOK_AUTO_STEP_PER_ROUND";
+pub const NERO_AUTO_MAIN_SESSION_CONFIRMED_KEY: &str = "main_session_confirmed";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NeroStopHookDebugReportingMode {
+    Off,
+    Summary,
+    Full,
+}
 
 #[derive(Debug, Clone)]
 pub struct NeroThreadSessionAutoContext {
@@ -33,6 +41,7 @@ pub struct NeroThreadSessionAutoContext {
     pub thread_name: Option<String>,
     pub session_source: SessionSource,
     pub loaded: bool,
+    pub main_session_confirmed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -276,6 +285,26 @@ fn runtime_table_from_merged_doc(merged_doc: &TomlTable) -> TomlTable {
         .unwrap_or_default()
 }
 
+fn stop_hook_debug_reporting_mode_from_runtime_table(
+    runtime: &TomlTable,
+) -> NeroStopHookDebugReportingMode {
+    let mode = runtime
+        .get("stop")
+        .and_then(TomlValue::as_table)
+        .and_then(|stop| stop.get("debug"))
+        .and_then(TomlValue::as_table)
+        .and_then(|debug| debug.get("hook_prompt_reporting"))
+        .and_then(TomlValue::as_str)
+        .map(str::trim)
+        .map(str::to_ascii_lowercase);
+
+    match mode.as_deref() {
+        Some("summary") => NeroStopHookDebugReportingMode::Summary,
+        Some("full") => NeroStopHookDebugReportingMode::Full,
+        Some("off") | None | Some(_) => NeroStopHookDebugReportingMode::Off,
+    }
+}
+
 pub fn resolve_nero_auto_state_path(auto_config_path: &Path) -> PathBuf {
     let merged = merged_runtime_document(auto_config_path);
     let path = merged
@@ -310,6 +339,13 @@ pub fn runtime_delivery_requires_runtime_msg(auto_config_path: &Path) -> bool {
         .and_then(|delivery| delivery.get("require_runtime_msg_for_auto"))
         .and_then(TomlValue::as_bool)
         .unwrap_or(true)
+}
+
+pub fn resolve_stop_hook_debug_reporting_mode(
+    auto_config_path: &Path,
+) -> NeroStopHookDebugReportingMode {
+    let runtime = runtime_table_from_merged_doc(&merged_runtime_document(auto_config_path));
+    stop_hook_debug_reporting_mode_from_runtime_table(&runtime)
 }
 
 fn resolve_runtime_defaults(
@@ -611,8 +647,11 @@ pub fn build_session_auto_state(
     let applied_policy = normalized_policy_override_from_entry(&entry);
     let auto_rounds = i64_from_json(entry.get("auto_rounds")).unwrap_or(0).max(0);
     let updated_at = string_from_json(entry.get("session_auto_override_updated_at"));
+    let main_session_confirmed = bool_from_json(entry.get(NERO_AUTO_MAIN_SESSION_CONFIRMED_KEY))
+        .unwrap_or(context.main_session_confirmed);
 
-    let is_subagent = is_subagent_session_source(&context.session_source);
+    let is_subagent =
+        is_subagent_session_source(&context.session_source) || !main_session_confirmed;
     let effective_enabled = if is_subagent {
         false
     } else if let Some(value) = applied_enabled {
@@ -676,5 +715,83 @@ pub fn build_session_auto_state(
             auto_rounds,
             source: effective_source,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+    use toml::Table as TomlTable;
+    use toml::Value as TomlValue;
+
+    use super::NeroStopHookDebugReportingMode;
+    use super::stop_hook_debug_reporting_mode_from_runtime_table;
+
+    #[test]
+    fn stop_hook_debug_reporting_mode_from_runtime_table_defaults_to_off() {
+        assert_eq!(
+            stop_hook_debug_reporting_mode_from_runtime_table(&TomlTable::new()),
+            NeroStopHookDebugReportingMode::Off,
+        );
+    }
+
+    #[test]
+    fn stop_hook_debug_reporting_mode_from_runtime_table_reads_summary_and_full() {
+        let mut debug = TomlTable::new();
+        debug.insert(
+            "hook_prompt_reporting".to_string(),
+            TomlValue::String("summary".to_string()),
+        );
+        let mut stop = TomlTable::new();
+        stop.insert("debug".to_string(), TomlValue::Table(debug));
+        let mut runtime = TomlTable::new();
+        runtime.insert("stop".to_string(), TomlValue::Table(stop));
+
+        assert_eq!(
+            stop_hook_debug_reporting_mode_from_runtime_table(&runtime),
+            NeroStopHookDebugReportingMode::Summary,
+        );
+
+        runtime.insert(
+            "stop".to_string(),
+            TomlValue::Table({
+                let mut stop = TomlTable::new();
+                stop.insert(
+                    "debug".to_string(),
+                    TomlValue::Table({
+                        let mut debug = TomlTable::new();
+                        debug.insert(
+                            "hook_prompt_reporting".to_string(),
+                            TomlValue::String("full".to_string()),
+                        );
+                        debug
+                    }),
+                );
+                stop
+            }),
+        );
+
+        assert_eq!(
+            stop_hook_debug_reporting_mode_from_runtime_table(&runtime),
+            NeroStopHookDebugReportingMode::Full,
+        );
+    }
+
+    #[test]
+    fn stop_hook_debug_reporting_mode_from_runtime_table_treats_invalid_values_as_off() {
+        let mut debug = TomlTable::new();
+        debug.insert(
+            "hook_prompt_reporting".to_string(),
+            TomlValue::String("verbose".to_string()),
+        );
+        let mut stop = TomlTable::new();
+        stop.insert("debug".to_string(), TomlValue::Table(debug));
+        let mut runtime = TomlTable::new();
+        runtime.insert("stop".to_string(), TomlValue::Table(stop));
+
+        assert_eq!(
+            stop_hook_debug_reporting_mode_from_runtime_table(&runtime),
+            NeroStopHookDebugReportingMode::Off,
+        );
     }
 }

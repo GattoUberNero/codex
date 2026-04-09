@@ -1,0 +1,29 @@
+{
+  "schema": "purrnet/phase.v1",
+  "campaignId": "A",
+  "phaseId": "01",
+  "title": "Visible countdown in TUI",
+  "status": "active",
+  "createdAt": "2026-04-07T09:21:09.374Z",
+  "updatedAt": "2026-04-07T09:21:15.970Z",
+  "notes": null,
+  "tags": [
+    "kind:operation"
+  ],
+  "brief": {
+    "constructorAction": null,
+    "input": {
+      "setId": null,
+      "text": "",
+      "list": []
+    },
+    "workflow": {
+      "text": "",
+      "list": []
+    },
+    "skills": {
+      "generalKnowledge": [],
+      "actions": []
+    }
+  }
+}

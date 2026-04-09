@@ -63,6 +63,17 @@ Zbudować deterministyczny system `hook msg + hook auto`, który:
 - Funkcja: pełna odtwarzalność jednej tury.
 - Realizacja: log records z `thread_id`, `turn_id`, action, parse wynik, decyzja, delivery status.
 
+## CAP-07: STOP Hook Prompt Debug Reporting
+- Funkcja: jawny dev/debug raport tego, że `STOP` rzeczywiście wstrzyknął komendę do agenta przez natywny `HookPrompt`.
+- Zakres: tylko ścieżka `STOP -> HookPrompt injection`; nie dotyczy `AFTER_AGENT`, które pozostaje własnym kanałem raportu/telemetrii.
+- Tryby:
+  - `off`: brak dodatkowego raportu debugowego.
+  - `summary`: jeden user-visible komunikat, że `STOP_HOOK` wysłał prompt do agenta.
+  - `full`: user-visible komunikat z pełną treścią wszystkich wstrzykniętych fragmentów promptu.
+- Realizacja: user-visible `WarningEvent` emitowany wyłącznie po skutecznym zapisaniu `HookPrompt` do historii rozmowy.
+- Konfiguracja: `nero.hook.runtime.stop.debug.hook_prompt_reporting = "off" | "summary" | "full"`.
+- Uwaga architektoniczna: to jest capability per mechanizm `STOP`, a nie wspólny logger dla wszystkich hooków.
+
 ---
 
 ## 4) Zakres ingerencji (co wolno / czego nie wolno)
@@ -71,11 +82,13 @@ Zbudować deterministyczny system `hook msg + hook auto`, który:
 - Dodanie/utrzymanie logiki decyzyjnej `auto continue/stop`.
 - Dodanie enqueue `AUTO_USER_MSG` po pozytywnej decyzji.
 - Publikacja raportu dla usera przez natywne hook summary/event.
+- Dodanie stop-centric dev/debug warning dla potwierdzonego `HookPrompt` injection.
 
 ## Niedozwolone
 - Override natywnych kolejek i schedulerów turnów.
 - Runtime command przez `developer_instructions`.
 - Kaskady fallbacków semantycznych (wiele alternatywnych torów wykonania).
+- Udawanie, że inne hook families (`AfterCompaction`, `SessionStart`, itd.) używają tego samego kanału co `STOP`.
 
 ---
 
@@ -150,4 +163,3 @@ flowchart TD
 - Brak zmiany natywnego mechanizmu kolejki tur Codexa.
 - Brak przebudowy całego systemu hooków upstream.
 - Brak „smart fallbacków” zmieniających semantykę działania.
-

@@ -36,13 +36,15 @@ Examples of valid command strings:
         (
             "command".to_string(),
             JsonSchema::Array {
-                items: Box::new(JsonSchema::String { description: None }),
+                items: Box::new(JsonSchema::String {
+                enum_values: None, description: None }),
                 description: Some("The command to execute".to_string()),
             },
         ),
         (
             "workdir".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some("The working directory to execute the command in".to_string()),
             },
         ),
@@ -55,6 +57,7 @@ Examples of valid command strings:
         (
             "sandbox_permissions".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "Sandbox permissions for the command. Set to \"require_escalated\" to request running without sandbox restrictions; defaults to \"use_default\"."
                         .to_string(),
@@ -64,6 +67,7 @@ Examples of valid command strings:
         (
             "justification".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     r#"Only set if sandbox_permissions is \"require_escalated\".
                     Request approval from the user to run this command outside the sandbox.
@@ -77,7 +81,8 @@ Examples of valid command strings:
         (
             "prefix_rule".to_string(),
             JsonSchema::Array {
-                items: Box::new(JsonSchema::String { description: None }),
+                items: Box::new(JsonSchema::String {
+                enum_values: None, description: None }),
                 description: Some(
                     r#"Only specify when sandbox_permissions is `require_escalated`.
                         Suggest a prefix command pattern that will allow you to fulfill similar requests from the user in the future.
@@ -126,12 +131,14 @@ fn exec_command_tool_matches_expected_spec() {
         (
             "cmd".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some("Shell command to execute.".to_string()),
             },
         ),
         (
             "workdir".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "Optional working directory to run the command in; defaults to the turn cwd."
                         .to_string(),
@@ -141,6 +148,7 @@ fn exec_command_tool_matches_expected_spec() {
         (
             "shell".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "Shell binary to launch. Defaults to the user's default shell.".to_string(),
                 ),
@@ -216,6 +224,7 @@ fn write_stdin_tool_matches_expected_spec() {
         (
             "chars".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some("Bytes to write to stdin (may be empty to poll).".to_string()),
             },
         ),
@@ -267,13 +276,17 @@ fn shell_tool_with_request_permission_includes_additional_permissions() {
         (
             "command".to_string(),
             JsonSchema::Array {
-                items: Box::new(JsonSchema::String { description: None }),
+                items: Box::new(JsonSchema::String {
+                    enum_values: None,
+                    description: None,
+                }),
                 description: Some("The command to execute".to_string()),
             },
         ),
         (
             "workdir".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some("The working directory to execute the command in".to_string()),
             },
         ),
@@ -337,6 +350,7 @@ fn request_permissions_tool_includes_full_permission_schema() {
         (
             "reason".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "Optional short explanation for why additional permissions are needed."
                         .to_string(),
@@ -393,6 +407,7 @@ Examples of valid command strings:
         (
             "command".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "The shell script to execute in the user's default shell".to_string(),
                 ),
@@ -401,6 +416,7 @@ Examples of valid command strings:
         (
             "workdir".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some("The working directory to execute the command in".to_string()),
             },
         ),

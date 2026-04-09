@@ -839,6 +839,22 @@ impl ChatComposer {
         self.pending_pastes.clone()
     }
 
+    pub(crate) fn pending_paste_count(&self) -> usize {
+        self.pending_pastes.len()
+    }
+
+    pub(crate) fn local_image_count(&self) -> usize {
+        self.attached_images.len()
+    }
+
+    pub(crate) fn remote_image_url_count(&self) -> usize {
+        self.remote_image_urls.len()
+    }
+
+    pub(crate) fn mention_binding_count(&self) -> usize {
+        self.mention_bindings.len()
+    }
+
     pub(crate) fn set_pending_pastes(&mut self, pending_pastes: Vec<(String, String)>) {
         let text = self.textarea.text().to_string();
         self.pending_pastes = pending_pastes

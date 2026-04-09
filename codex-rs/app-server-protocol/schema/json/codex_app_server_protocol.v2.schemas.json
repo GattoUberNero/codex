@@ -9864,6 +9864,82 @@
       "title": "SkillsListResponse",
       "type": "object"
     },
+    "SpawnContextInheritanceEffectiveMode": {
+      "enum": [
+        "off",
+        "exact",
+        "bounded_full",
+        "bounded_trimmed",
+        "bounded_suppressed"
+      ],
+      "type": "string"
+    },
+    "SpawnContextInheritanceMode": {
+      "enum": [
+        "off",
+        "exact",
+        "bounded"
+      ],
+      "type": "string"
+    },
+    "SpawnContextInheritanceSuppressionReason": {
+      "enum": [
+        "invalid_parent_spawn_pairing",
+        "missing_budget_proxy",
+        "budget_exceeded"
+      ],
+      "type": "string"
+    },
+    "SpawnContextInheritanceTelemetry": {
+      "properties": {
+        "estimated_shipped_tokens": {
+          "description": "Approximate token count of the shipped candidate payload.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "parent_replay_safe_turn_count": {
+          "description": "Replay-safe parent turn count observed before trimming.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "shipped_replay_safe_turn_count": {
+          "description": "Replay-safe turn count shipped into the child fork payload.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "suppression_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SpawnContextInheritanceSuppressionReason"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Explicit reason when requested inheritance was suppressed or downgraded."
+        },
+        "usable_context_budget_tokens": {
+          "description": "Practical child startup budget proxy used during bounded evaluation.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "SubAgentSource": {
       "oneOf": [
         {
@@ -10773,6 +10849,39 @@
               },
               "description": "Last known status of the target agents, when available.",
               "type": "object"
+            },
+            "contextInheritanceEffective": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/SpawnContextInheritanceEffectiveMode"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Effective parent-context inheritance mode after runtime budgeting and validation."
+            },
+            "contextInheritanceRequested": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/SpawnContextInheritanceMode"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Requested parent-context inheritance mode for spawn calls, when available."
+            },
+            "contextInheritanceTelemetry": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/SpawnContextInheritanceTelemetry"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Runtime budgeting telemetry for the effective inheritance decision."
             },
             "id": {
               "description": "Unique identifier for this collab tool call.",

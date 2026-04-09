@@ -44,6 +44,7 @@ fn create_tool_search_tool_deduplicates_and_renders_enabled_apps() {
                     (
                         "query".to_string(),
                         JsonSchema::String {
+                enum_values: None,
                             description: Some("Search query for apps tools.".to_string()),
                         },
                     ),
@@ -88,6 +89,7 @@ fn create_tool_suggest_tool_uses_plugin_summary_fallback() {
                     (
                         "action_type".to_string(),
                         JsonSchema::String {
+                enum_values: None,
                             description: Some(
                                 "Suggested action for the tool. Use \"install\" or \"enable\"."
                                     .to_string(),
@@ -97,6 +99,7 @@ fn create_tool_suggest_tool_uses_plugin_summary_fallback() {
                     (
                         "suggest_reason".to_string(),
                         JsonSchema::String {
+                enum_values: None,
                             description: Some(
                                 "Concise one-line user-facing reason why this tool can help with the current request."
                                     .to_string(),
@@ -106,6 +109,7 @@ fn create_tool_suggest_tool_uses_plugin_summary_fallback() {
                     (
                         "tool_id".to_string(),
                         JsonSchema::String {
+                enum_values: None,
                             description: Some(
                                 "Connector or plugin id to suggest. Must be one of: slack@openai-curated, github."
                                     .to_string(),
@@ -115,6 +119,7 @@ fn create_tool_suggest_tool_uses_plugin_summary_fallback() {
                     (
                         "tool_type".to_string(),
                         JsonSchema::String {
+                enum_values: None,
                             description: Some(
                                 "Type of discoverable tool to suggest. Use \"connector\" or \"plugin\"."
                                     .to_string(),

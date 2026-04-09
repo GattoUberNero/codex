@@ -147,6 +147,7 @@ pub(crate) const PROJECT_DOC_MAX_BYTES: usize = 32 * 1024; // 32 KiB
 pub(crate) const DEFAULT_AGENT_MAX_THREADS: Option<usize> = Some(6);
 pub(crate) const DEFAULT_AGENT_MAX_DEPTH: i32 = 1;
 pub(crate) const DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS: Option<u64> = None;
+pub(crate) const DEFAULT_AGENT_BOUNDED_FORK_STARTUP_RESERVE_TOKENS: i64 = 24_000;
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
 const OPENAI_BASE_URL_ENV_VAR: &str = "OPENAI_BASE_URL";
@@ -408,6 +409,10 @@ pub struct Config {
 
     /// Maximum nesting depth allowed for spawned agent threads.
     pub agent_max_depth: i32,
+
+    /// Reserved context tokens kept for child startup overhead when bounded
+    /// context inheritance is requested for sub-agent forks.
+    pub agent_bounded_fork_startup_reserve_tokens: i64,
 
     /// User-defined role declarations keyed by role name.
     pub agent_roles: BTreeMap<String, AgentRoleConfig>,
@@ -2395,6 +2400,8 @@ pub struct AgentsToml {
     /// Default maximum runtime in seconds for agent job workers.
     #[schemars(range(min = 1))]
     pub job_max_runtime_seconds: Option<u64>,
+    /// Settings for bounded sub-agent context inheritance.
+    pub bounded_fork_context: Option<AgentBoundedForkContextToml>,
 
     /// User-defined role declarations keyed by role name.
     ///
@@ -2407,6 +2414,15 @@ pub struct AgentsToml {
     /// ```
     #[serde(default, flatten)]
     pub roles: BTreeMap<String, AgentRoleToml>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct AgentBoundedForkContextToml {
+    /// Reserve this many tokens from the model auto-compaction ceiling so
+    /// bounded fork payloads leave startup headroom for the delegated task.
+    #[schemars(range(min = 1))]
+    pub startup_reserve_tokens: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -3182,6 +3198,18 @@ impl Config {
                 "agents.job_max_runtime_seconds must fit within a 64-bit signed integer",
             ));
         }
+        let agent_bounded_fork_startup_reserve_tokens = cfg
+            .agents
+            .as_ref()
+            .and_then(|agents| agents.bounded_fork_context.as_ref())
+            .and_then(|bounded_fork| bounded_fork.startup_reserve_tokens)
+            .unwrap_or(DEFAULT_AGENT_BOUNDED_FORK_STARTUP_RESERVE_TOKENS);
+        if agent_bounded_fork_startup_reserve_tokens < 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "agents.bounded_fork_context.startup_reserve_tokens must be at least 1",
+            ));
+        }
         let background_terminal_max_timeout = cfg
             .background_terminal_max_timeout
             .unwrap_or(DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS)
@@ -3453,6 +3481,7 @@ impl Config {
             tool_output_token_limit: cfg.tool_output_token_limit,
             agent_max_threads,
             agent_max_depth,
+            agent_bounded_fork_startup_reserve_tokens,
             agent_roles,
             memories: cfg.memories.unwrap_or_default().into(),
             agent_job_max_runtime_seconds,

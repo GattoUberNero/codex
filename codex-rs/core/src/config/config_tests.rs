@@ -3968,6 +3968,7 @@ fn load_config_rejects_missing_agent_role_config_file() -> std::io::Result<()> {
             max_threads: None,
             max_depth: None,
             job_max_runtime_seconds: None,
+            bounded_fork_context: None,
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
@@ -4833,6 +4834,7 @@ fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Result<()
             max_threads: None,
             max_depth: None,
             job_max_runtime_seconds: None,
+            bounded_fork_context: None,
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
@@ -4874,6 +4876,7 @@ fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::Result
             max_threads: None,
             max_depth: None,
             job_max_runtime_seconds: None,
+            bounded_fork_context: None,
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
@@ -4909,6 +4912,7 @@ fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::io::Re
             max_threads: None,
             max_depth: None,
             job_max_runtime_seconds: None,
+            bounded_fork_context: None,
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
@@ -4944,6 +4948,7 @@ fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io::Resul
             max_threads: None,
             max_depth: None,
             job_max_runtime_seconds: None,
+            bounded_fork_context: None,
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
@@ -5189,6 +5194,8 @@ fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             tool_output_token_limit: None,
             agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
             agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
+            agent_bounded_fork_startup_reserve_tokens:
+                DEFAULT_AGENT_BOUNDED_FORK_STARTUP_RESERVE_TOKENS,
             agent_roles: BTreeMap::new(),
             memories: MemoriesConfig::default(),
             agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
@@ -5331,6 +5338,8 @@ fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         tool_output_token_limit: None,
         agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
         agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
+        agent_bounded_fork_startup_reserve_tokens:
+            DEFAULT_AGENT_BOUNDED_FORK_STARTUP_RESERVE_TOKENS,
         agent_roles: BTreeMap::new(),
         memories: MemoriesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
@@ -5471,6 +5480,8 @@ fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         tool_output_token_limit: None,
         agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
         agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
+        agent_bounded_fork_startup_reserve_tokens:
+            DEFAULT_AGENT_BOUNDED_FORK_STARTUP_RESERVE_TOKENS,
         agent_roles: BTreeMap::new(),
         memories: MemoriesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
@@ -5597,6 +5608,8 @@ fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         tool_output_token_limit: None,
         agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
         agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
+        agent_bounded_fork_startup_reserve_tokens:
+            DEFAULT_AGENT_BOUNDED_FORK_STARTUP_RESERVE_TOKENS,
         agent_roles: BTreeMap::new(),
         memories: MemoriesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,

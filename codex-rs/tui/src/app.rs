@@ -546,6 +546,8 @@ struct ThreadEventSnapshot {
     turns: Vec<Turn>,
     events: Vec<ThreadBufferedEvent>,
     input_state: Option<ThreadInputState>,
+    latest_turn_id: Option<String>,
+    session_auto_generation_epoch: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -562,6 +564,8 @@ struct ThreadEventStore {
     buffer: VecDeque<ThreadBufferedEvent>,
     pending_interactive_replay: PendingInteractiveReplayState,
     active_turn_id: Option<String>,
+    latest_turn_id: Option<String>,
+    session_auto_generation_epoch: Option<u64>,
     input_state: Option<ThreadInputState>,
     capacity: usize,
     active: bool,
@@ -584,6 +588,8 @@ impl ThreadEventStore {
             buffer: VecDeque::new(),
             pending_interactive_replay: PendingInteractiveReplayState::default(),
             active_turn_id: None,
+            latest_turn_id: None,
+            session_auto_generation_epoch: None,
             input_state: None,
             capacity,
             active: false,
@@ -613,6 +619,7 @@ impl ThreadEventStore {
             .rev()
             .find(|turn| matches!(turn.status, TurnStatus::InProgress))
             .map(|turn| turn.id.clone());
+        self.latest_turn_id = turns.last().map(|turn| turn.id.clone());
         self.turns = turns;
     }
 
@@ -622,8 +629,10 @@ impl ThreadEventStore {
         match &notification {
             ServerNotification::TurnStarted(turn) => {
                 self.active_turn_id = Some(turn.turn.id.clone());
+                self.latest_turn_id = Some(turn.turn.id.clone());
             }
             ServerNotification::TurnCompleted(turn) => {
+                self.latest_turn_id = Some(turn.turn.id.clone());
                 if self.active_turn_id.as_deref() == Some(turn.turn.id.as_str()) {
                     self.active_turn_id = None;
                 }
@@ -658,10 +667,9 @@ impl ThreadEventStore {
     }
 
     fn apply_thread_rollback(&mut self, response: &ThreadRollbackResponse) {
-        self.turns = response.thread.turns.clone();
+        self.set_turns(response.thread.turns.clone());
         self.buffer.clear();
         self.pending_interactive_replay = PendingInteractiveReplayState::default();
-        self.active_turn_id = None;
     }
 
     fn snapshot(&self) -> ThreadEventSnapshot {
@@ -683,7 +691,13 @@ impl ThreadEventStore {
                 .cloned()
                 .collect(),
             input_state: self.input_state.clone(),
+            latest_turn_id: self.latest_turn_id.clone(),
+            session_auto_generation_epoch: self.session_auto_generation_epoch,
         }
+    }
+
+    fn set_session_auto_generation_epoch(&mut self, generation_epoch: u64) {
+        self.session_auto_generation_epoch = Some(generation_epoch);
     }
 
     fn note_outbound_op<T>(&mut self, op: T)
@@ -711,6 +725,59 @@ impl ThreadEventStore {
 
     fn clear_active_turn_id(&mut self) {
         self.active_turn_id = None;
+    }
+}
+
+fn latest_turn_id_for_thread_snapshot(snapshot: &ThreadEventSnapshot) -> Option<String> {
+    let latest_turn_from_events = snapshot
+        .events
+        .iter()
+        .rev()
+        .find_map(snapshot_buffered_event_turn_id);
+    let latest_turn_from_turns = snapshot.turns.last().map(|turn| turn.id.as_str());
+
+    match (latest_turn_from_events, latest_turn_from_turns) {
+        (Some(event_turn_id), Some(turns_turn_id)) if event_turn_id == turns_turn_id => {
+            Some(event_turn_id.to_string())
+        }
+        (Some(event_turn_id), Some(turns_turn_id))
+            if snapshot.turns.iter().any(|turn| turn.id == event_turn_id) =>
+        {
+            Some(turns_turn_id.to_string())
+        }
+        (Some(_), Some(turns_turn_id)) => Some(turns_turn_id.to_string()),
+        (Some(event_turn_id), None) => Some(event_turn_id.to_string()),
+        (None, Some(turns_turn_id)) => Some(turns_turn_id.to_string()),
+        (None, None) => None,
+    }
+}
+
+fn snapshot_buffered_event_turn_id(event: &ThreadBufferedEvent) -> Option<&str> {
+    match event {
+        ThreadBufferedEvent::Notification(notification) => {
+            snapshot_server_notification_turn_id(notification)
+        }
+        ThreadBufferedEvent::Request(_) | ThreadBufferedEvent::HistoryEntryResponse(_) => None,
+    }
+}
+
+fn snapshot_server_notification_turn_id(notification: &ServerNotification) -> Option<&str> {
+    match notification {
+        ServerNotification::AgentMessageDelta(notification) => Some(notification.turn_id.as_str()),
+        ServerNotification::ContextCompacted(notification) => Some(notification.turn_id.as_str()),
+        ServerNotification::HookStarted(notification) => notification.turn_id.as_deref(),
+        ServerNotification::HookCompleted(notification) => notification.turn_id.as_deref(),
+        ServerNotification::ItemStarted(notification) => Some(notification.turn_id.as_str()),
+        ServerNotification::ItemCompleted(notification) => Some(notification.turn_id.as_str()),
+        ServerNotification::ThreadTokenUsageUpdated(notification) => {
+            Some(notification.turn_id.as_str())
+        }
+        ServerNotification::ThreadWarning(notification) => Some(notification.turn_id.as_str()),
+        ServerNotification::TurnDiffUpdated(notification) => Some(notification.turn_id.as_str()),
+        ServerNotification::TurnPlanUpdated(notification) => Some(notification.turn_id.as_str()),
+        ServerNotification::TurnStarted(notification) => Some(notification.turn.id.as_str()),
+        ServerNotification::TurnCompleted(notification) => Some(notification.turn.id.as_str()),
+        _ => None,
     }
 }
 
@@ -3162,10 +3229,10 @@ impl App {
     async fn notify_delayed_nero_auto_input_activity_if_draft_changed(
         &mut self,
         app_server: &mut AppServerSession,
-        composer_text_before: String,
+        draft_input_before: (String, usize, usize, usize, usize),
     ) {
-        let composer_text_after = self.chat_widget.composer_text_with_pending();
-        if composer_text_before == composer_text_after {
+        let draft_input_after = self.chat_widget.composer_input_activity_marker();
+        if draft_input_before == draft_input_after {
             return;
         }
         let Some(thread_id) = self.active_thread_id else {
@@ -3178,7 +3245,18 @@ impl App {
             )
             .await
         {
-            Ok(_) => {}
+            Ok(response) => {
+                if let Some(channel) = self.thread_event_channels.get(&thread_id) {
+                    channel
+                        .store
+                        .lock()
+                        .await
+                        .set_session_auto_generation_epoch(response.generation_epoch);
+                }
+                if self.active_thread_id == Some(thread_id) {
+                    self.chat_widget.clear_auto_follow_up_countdown();
+                }
+            }
             Err(err) => {
                 tracing::warn!(
                     thread_id = %thread_id,
@@ -3351,6 +3429,9 @@ impl App {
                     };
                     self.chat_widget
                         .add_info_message(message, Some(resolved_hint));
+                    if !requested_next.enabled {
+                        self.chat_widget.clear_auto_follow_up_countdown();
+                    }
                     self.chat_widget.finish_nero_auto_hotkey_action(true);
                     return;
                 }
@@ -3400,6 +3481,9 @@ impl App {
             session_source.clone(),
         );
         let confirmed_next = nero_auto_runtime_from_authority_state(confirmed_state);
+        if !confirmed_next.enabled {
+            self.chat_widget.clear_auto_follow_up_countdown();
+        }
         let (message, hint) = nero_auto_action_message(action, confirmed_previous, confirmed_next);
         let context_hint = nero_session_auto_authority_context(
             &apply_result.thread_id,
@@ -3681,6 +3765,12 @@ impl App {
         snapshot: ThreadEventSnapshot,
         resume_restored_queue: bool,
     ) {
+        let latest_turn_id = snapshot
+            .latest_turn_id
+            .clone()
+            .or_else(|| latest_turn_id_for_thread_snapshot(&snapshot));
+        self.chat_widget
+            .begin_thread_snapshot_replay(latest_turn_id, snapshot.session_auto_generation_epoch);
         if let Some(session) = snapshot.session {
             self.chat_widget.handle_thread_session(session);
         }
@@ -3690,7 +3780,7 @@ impl App {
             .restore_thread_input_state(snapshot.input_state);
         if !snapshot.turns.is_empty() {
             self.chat_widget
-                .replay_thread_turns(snapshot.turns, ReplayKind::ThreadSnapshot);
+                .replay_thread_turns(snapshot.turns, ReplayKind::ThreadSnapshotTurns);
         }
         for event in snapshot.events {
             self.handle_thread_event_replay(event);
@@ -4155,12 +4245,18 @@ impl App {
                     self.handle_key_event(tui, app_server, key_event).await;
                 }
                 TuiEvent::Paste(pasted) => {
+                    let draft_input_before = self.chat_widget.composer_input_activity_marker();
                     // Many terminals convert newlines to \r when pasting (e.g., iTerm2),
                     // but tui-textarea expects \n. Normalize CR to LF.
                     // [tui-textarea]: https://github.com/rhysd/tui-textarea/blob/4d18622eeac13b309e0ff6a55a46ac6706da68cf/src/textarea.rs#L782-L783
                     // [iTerm2]: https://github.com/gnachman/iTerm2/blob/5d0c0d9f68523cbd0494dad5422998964a2ecd8d/sources/iTermPasteHelper.m#L206-L216
                     let pasted = pasted.replace("\r", "\n");
                     self.chat_widget.handle_paste(pasted);
+                    self.notify_delayed_nero_auto_input_activity_if_draft_changed(
+                        app_server,
+                        draft_input_before,
+                    )
+                    .await;
                 }
                 TuiEvent::Draw => {
                     if self.backtrack_render_pending {
@@ -4168,10 +4264,16 @@ impl App {
                         self.render_transcript_once(tui);
                     }
                     self.chat_widget.maybe_post_pending_notification(tui);
+                    let draft_input_before = self.chat_widget.composer_input_activity_marker();
                     if self
                         .chat_widget
                         .handle_paste_burst_tick(tui.frame_requester())
                     {
+                        self.notify_delayed_nero_auto_input_activity_if_draft_changed(
+                            app_server,
+                            draft_input_before,
+                        )
+                        .await;
                         return Ok(AppRunControl::Continue);
                     }
                     // Allow widgets to process any pending timers before rendering.
@@ -4687,7 +4789,7 @@ impl App {
             }
             AppEvent::LaunchExternalEditor => {
                 if self.chat_widget.external_editor_state() == ExternalEditorState::Active {
-                    self.launch_external_editor(tui).await;
+                    self.launch_external_editor(tui, app_server).await;
                 }
             }
             AppEvent::OpenWindowsSandboxEnablePrompt { preset } => {
@@ -5786,10 +5888,10 @@ impl App {
         match event {
             ThreadBufferedEvent::Notification(notification) => self
                 .chat_widget
-                .handle_server_notification(notification, Some(ReplayKind::ThreadSnapshot)),
+                .handle_server_notification(notification, Some(ReplayKind::ThreadSnapshotEvents)),
             ThreadBufferedEvent::Request(request) => self
                 .chat_widget
-                .handle_server_request(request, Some(ReplayKind::ThreadSnapshot)),
+                .handle_server_request(request, Some(ReplayKind::ThreadSnapshotEvents)),
             ThreadBufferedEvent::HistoryEntryResponse(event) => {
                 self.chat_widget.handle_history_entry_response(event)
             }
@@ -5928,7 +6030,11 @@ impl App {
         }
     }
 
-    async fn launch_external_editor(&mut self, tui: &mut tui::Tui) {
+    async fn launch_external_editor(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+    ) {
         let editor_cmd = match external_editor::resolve_editor_command() {
             Ok(cmd) => cmd,
             Err(external_editor::EditorError::MissingEditor) => {
@@ -5950,7 +6056,8 @@ impl App {
             }
         };
 
-        let seed = self.chat_widget.composer_text_with_pending();
+        let draft_input_before = self.chat_widget.composer_input_activity_marker();
+        let seed = draft_input_before.0.clone();
         let editor_result = tui
             .with_restored(tui::RestoreMode::KeepRaw, || async {
                 external_editor::run_editor(&seed, &editor_cmd).await
@@ -5963,6 +6070,11 @@ impl App {
                 // Trim trailing whitespace
                 let cleaned = new_text.trim_end().to_string();
                 self.chat_widget.apply_external_edit(cleaned);
+                self.notify_delayed_nero_auto_input_activity_if_draft_changed(
+                    app_server,
+                    draft_input_before,
+                )
+                .await;
             }
             Err(err) => {
                 self.chat_widget
@@ -5997,7 +6109,7 @@ impl App {
         app_server: &mut AppServerSession,
         key_event: KeyEvent,
     ) {
-        let composer_text_before = self.chat_widget.composer_text_with_pending();
+        let draft_input_before = self.chat_widget.composer_input_activity_marker();
         // Some terminals, especially on macOS, encode Option+Left/Right as Option+b/f unless
         // enhanced keyboard reporting is available. We only treat those word-motion fallbacks as
         // agent-switch shortcuts when the composer is empty so we never steal the expected
@@ -6130,7 +6242,7 @@ impl App {
         };
         self.notify_delayed_nero_auto_input_activity_if_draft_changed(
             app_server,
-            composer_text_before,
+            draft_input_before,
         )
         .await;
     }
@@ -7065,6 +7177,8 @@ mod tests {
                     turn_completed_notification(thread_id, "turn-1", TurnStatus::Completed),
                 )],
                 input_state: Some(input_state),
+                latest_turn_id: None,
+                session_auto_generation_epoch: None,
             },
             /*resume_restored_queue*/ true,
         );
@@ -7118,6 +7232,8 @@ mod tests {
                     turn_completed_notification(thread_id, "turn-1", TurnStatus::Completed),
                 )],
                 input_state: Some(input_state),
+                latest_turn_id: None,
+                session_auto_generation_epoch: None,
             },
             /*resume_restored_queue*/ false,
         );
@@ -7167,6 +7283,8 @@ mod tests {
                 turns: Vec::new(),
                 events: vec![],
                 input_state: Some(input_state),
+                latest_turn_id: None,
+                session_auto_generation_epoch: None,
             },
             /*resume_restored_queue*/ true,
         );
@@ -7216,6 +7334,8 @@ mod tests {
                 turns: vec![test_turn("turn-1", TurnStatus::InProgress, Vec::new())],
                 events: Vec::new(),
                 input_state: Some(input_state),
+                latest_turn_id: None,
+                session_auto_generation_epoch: None,
             },
             /*resume_restored_queue*/ true,
         );
@@ -7246,6 +7366,8 @@ mod tests {
                 turns: vec![test_turn("turn-1", TurnStatus::InProgress, Vec::new())],
                 events: Vec::new(),
                 input_state: None,
+                latest_turn_id: None,
+                session_auto_generation_epoch: None,
             },
             /*resume_restored_queue*/ false,
         );
@@ -7297,6 +7419,8 @@ mod tests {
                     )),
                 ],
                 input_state: Some(input_state),
+                latest_turn_id: None,
+                session_auto_generation_epoch: None,
             },
             /*resume_restored_queue*/ true,
         );
@@ -7429,6 +7553,8 @@ mod tests {
                 turns: Vec::new(),
                 events: vec![],
                 input_state: Some(input_state),
+                latest_turn_id: None,
+                session_auto_generation_epoch: None,
             },
             /*resume_restored_queue*/ true,
         );
@@ -7510,6 +7636,8 @@ mod tests {
                 turns: Vec::new(),
                 events: vec![],
                 input_state: Some(input_state),
+                latest_turn_id: None,
+                session_auto_generation_epoch: None,
             },
             /*resume_restored_queue*/ true,
         );
@@ -7562,6 +7690,8 @@ mod tests {
                     turn_completed_notification(thread_id, "turn-1", TurnStatus::Interrupted),
                 )],
                 input_state: Some(input_state),
+                latest_turn_id: None,
+                session_auto_generation_epoch: None,
             },
             /*resume_restored_queue*/ true,
         );
@@ -9473,6 +9603,13 @@ guardian_approval = true
             .await?;
         let thread_id = started.session.thread_id;
         configure_test_session(&mut app, thread_id);
+        app.chat_widget.arm_auto_follow_up_countdown(15, 1);
+        assert!(
+            app.chat_widget
+                .status_line_text()
+                .expect("countdown status line")
+                .contains("Nero auto countdown: next auto reply in 15s (typing cancels)")
+        );
 
         let baseline = app_server
             .thread_session_auto_input_activity(
@@ -9494,6 +9631,12 @@ guardian_approval = true
             KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
         )
         .await;
+        assert!(
+            !app.chat_widget
+                .status_line_text()
+                .map(|line| line.contains("Nero auto countdown:"))
+                .unwrap_or(false)
+        );
 
         let after = app_server
             .thread_session_auto_input_activity(
@@ -9509,6 +9652,126 @@ guardian_approval = true
         assert!(
             after.generation_epoch > baseline.generation_epoch.saturating_add(1),
             "expected draft-change helper to notify session-auto input activity before the manual probe request"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn handle_tui_event_paste_notifies_session_auto_input_activity_on_draft_change()
+    -> Result<()> {
+        let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        let started = app_server
+            .start_thread(app.chat_widget.config_ref())
+            .await?;
+        let thread_id = started.session.thread_id;
+        configure_test_session(&mut app, thread_id);
+        app.chat_widget.arm_auto_follow_up_countdown(15, 1);
+        assert!(
+            app.chat_widget
+                .status_line_text()
+                .expect("countdown status line")
+                .contains("Nero auto countdown: next auto reply in 15s (typing cancels)")
+        );
+        let baseline = app_server
+            .thread_session_auto_input_activity(
+                thread_id,
+                ThreadSessionAutoInputActivityKind::DraftChanged,
+            )
+            .await?;
+        let terminal = crate::custom_terminal::Terminal::with_options(
+            ratatui::backend::CrosstermBackend::new(std::io::stdout()),
+        )
+        .expect("terminal");
+        let mut tui = crate::tui::Tui::new(terminal);
+        let control = app
+            .handle_tui_event(&mut tui, &mut app_server, TuiEvent::Paste("ab".to_string()))
+            .await?;
+        assert_matches!(control, AppRunControl::Continue);
+        assert!(
+            !app.chat_widget
+                .status_line_text()
+                .map(|line| line.contains("Nero auto countdown:"))
+                .unwrap_or(false)
+        );
+
+        let after = app_server
+            .thread_session_auto_input_activity(
+                thread_id,
+                ThreadSessionAutoInputActivityKind::DraftChanged,
+            )
+            .await?;
+
+        assert!(
+            after.generation_epoch > baseline.generation_epoch.saturating_add(1),
+            "expected paste helper to notify session-auto input activity before the manual probe request"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn draw_tick_paste_burst_flush_notifies_session_auto_input_activity() -> Result<()> {
+        let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        let started = app_server
+            .start_thread(app.chat_widget.config_ref())
+            .await?;
+        let thread_id = started.session.thread_id;
+        configure_test_session(&mut app, thread_id);
+        app.chat_widget.arm_auto_follow_up_countdown(15, 1);
+        assert!(
+            app.chat_widget
+                .status_line_text()
+                .expect("countdown status line")
+                .contains("Nero auto countdown: next auto reply in 15s (typing cancels)")
+        );
+
+        let terminal = crate::custom_terminal::Terminal::with_options(
+            ratatui::backend::CrosstermBackend::new(std::io::stdout()),
+        )
+        .expect("terminal");
+        let mut tui = crate::tui::Tui::new(terminal);
+        app.handle_tui_event(
+            &mut tui,
+            &mut app_server,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+        )
+        .await?;
+        let baseline = app_server
+            .thread_session_auto_input_activity(
+                thread_id,
+                ThreadSessionAutoInputActivityKind::DraftChanged,
+            )
+            .await?;
+
+        time::sleep(crate::bottom_pane::ChatComposer::recommended_paste_flush_delay()).await;
+        let control = app
+            .handle_tui_event(&mut tui, &mut app_server, TuiEvent::Draw)
+            .await?;
+        assert_matches!(control, AppRunControl::Continue);
+        assert!(
+            !app.chat_widget
+                .status_line_text()
+                .map(|line| line.contains("Nero auto countdown:"))
+                .unwrap_or(false)
+        );
+
+        let after = app_server
+            .thread_session_auto_input_activity(
+                thread_id,
+                ThreadSessionAutoInputActivityKind::DraftChanged,
+            )
+            .await?;
+
+        assert!(
+            after.generation_epoch > baseline.generation_epoch.saturating_add(1),
+            "expected draw-tick paste flush to notify session-auto input activity before the manual probe request"
         );
         Ok(())
     }
@@ -9609,6 +9872,64 @@ guardian_approval = true
                         text: "prompt blocked".to_string(),
                     },
                 ],
+            },
+        })
+    }
+
+    fn after_agent_runtime_queued_hook_completed_notification(
+        thread_id: ThreadId,
+        turn_id: &str,
+        expected_wait_seconds: u64,
+    ) -> ServerNotification {
+        after_agent_runtime_queued_hook_completed_notification_with_generation_epoch(
+            thread_id,
+            turn_id,
+            expected_wait_seconds,
+            1,
+        )
+    }
+
+    fn after_agent_runtime_queued_hook_completed_notification_with_generation_epoch(
+        thread_id: ThreadId,
+        turn_id: &str,
+        expected_wait_seconds: u64,
+        generation_epoch: u64,
+    ) -> ServerNotification {
+        let completed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+            .unwrap_or(0);
+        ServerNotification::HookCompleted(HookCompletedNotification {
+            thread_id: thread_id.to_string(),
+            turn_id: Some(turn_id.to_string()),
+            run: AppServerHookRunSummary {
+                id: format!("after-agent:nero-hook-runtime:{turn_id}"),
+                event_name: AppServerHookEventName::AfterAgent,
+                handler_type: AppServerHookHandlerType::Agent,
+                execution_mode: AppServerHookExecutionMode::Sync,
+                scope: AppServerHookScope::Turn,
+                source_path: PathBuf::from("legacy://after_agent/nero-hook-runtime"),
+                display_order: 0,
+                status: AppServerHookRunStatus::Completed,
+                status_message: None,
+                started_at: completed_at.saturating_sub(1),
+                completed_at: Some(completed_at),
+                duration_ms: Some(1),
+                meta: Some(serde_json::json!({
+                    "domain": "nero_runtime",
+                    "status": {
+                        "kind_normalized": "auto",
+                    },
+                    "follow_up": {
+                        "status": "queued",
+                        "queued_count": 1,
+                        "blocked_count": 0,
+                        "expected_wait_seconds": expected_wait_seconds,
+                        "generation_epoch": generation_epoch,
+                    },
+                })),
+                entries: Vec::new(),
             },
         })
     }
@@ -10626,6 +10947,8 @@ guardian_approval = true
                 ],
                 events: Vec::new(),
                 input_state: None,
+                latest_turn_id: None,
+                session_auto_generation_epoch: None,
             },
             /*resume_restored_queue*/ false,
         );
@@ -10649,6 +10972,136 @@ guardian_approval = true
         assert_eq!(
             user_messages,
             vec!["first prompt".to_string(), "third prompt".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_thread_snapshot_ignores_stale_auto_countdown_from_older_turn_hook() {
+        let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let thread_id = ThreadId::new();
+        app.replay_thread_snapshot(
+            ThreadEventSnapshot {
+                session: Some(test_thread_session(
+                    thread_id,
+                    PathBuf::from("/home/user/project"),
+                )),
+                turns: vec![
+                    test_turn("turn-1", TurnStatus::Completed, Vec::new()),
+                    test_turn("turn-2", TurnStatus::Completed, Vec::new()),
+                ],
+                events: vec![ThreadBufferedEvent::Notification(
+                    after_agent_runtime_queued_hook_completed_notification(thread_id, "turn-1", 15),
+                )],
+                input_state: None,
+                latest_turn_id: None,
+                session_auto_generation_epoch: None,
+            },
+            /*resume_restored_queue*/ false,
+        );
+
+        assert!(
+            !app.chat_widget
+                .status_line_text()
+                .map(|line| line.contains("Nero auto countdown:"))
+                .unwrap_or(false),
+            "stale queued hook notifications from older turns must not re-arm the countdown"
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_thread_snapshot_uses_buffered_event_turn_when_turn_list_is_stale() {
+        let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let thread_id = ThreadId::new();
+        app.replay_thread_snapshot(
+            ThreadEventSnapshot {
+                session: Some(test_thread_session(
+                    thread_id,
+                    PathBuf::from("/home/user/project"),
+                )),
+                turns: vec![test_turn("turn-1", TurnStatus::Completed, Vec::new())],
+                events: vec![ThreadBufferedEvent::Notification(
+                    after_agent_runtime_queued_hook_completed_notification(thread_id, "turn-2", 15),
+                )],
+                input_state: None,
+                latest_turn_id: Some("turn-2".to_string()),
+                session_auto_generation_epoch: None,
+            },
+            /*resume_restored_queue*/ false,
+        );
+
+        assert!(
+            app.chat_widget
+                .status_line_text()
+                .map(|line| line.contains("Nero auto countdown: next auto reply in 15s"))
+                .unwrap_or(false),
+            "stored latest turn id should preserve countdown replay when snapshot turns are stale"
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_thread_snapshot_without_latest_turn_id_keeps_turn_tail_for_unknown_buffered_turn()
+     {
+        let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let thread_id = ThreadId::new();
+        app.replay_thread_snapshot(
+            ThreadEventSnapshot {
+                session: Some(test_thread_session(
+                    thread_id,
+                    PathBuf::from("/home/user/project"),
+                )),
+                turns: vec![test_turn("turn-2", TurnStatus::Completed, Vec::new())],
+                events: vec![ThreadBufferedEvent::Notification(
+                    after_agent_runtime_queued_hook_completed_notification(
+                        thread_id,
+                        "turn-unknown",
+                        15,
+                    ),
+                )],
+                input_state: None,
+                latest_turn_id: None,
+                session_auto_generation_epoch: None,
+            },
+            /*resume_restored_queue*/ false,
+        );
+
+        assert!(
+            !app.chat_widget
+                .status_line_text()
+                .map(|line| line.contains("Nero auto countdown:"))
+                .unwrap_or(false),
+            "unknown buffered turn ids must not override the snapshot turn tail without an explicit latest-turn marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_thread_snapshot_ignores_auto_countdown_from_stale_generation_epoch() {
+        let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let thread_id = ThreadId::new();
+        app.replay_thread_snapshot(
+            ThreadEventSnapshot {
+                session: Some(test_thread_session(
+                    thread_id,
+                    PathBuf::from("/home/user/project"),
+                )),
+                turns: vec![test_turn("turn-2", TurnStatus::Completed, Vec::new())],
+                events: vec![ThreadBufferedEvent::Notification(
+                    after_agent_runtime_queued_hook_completed_notification_with_generation_epoch(
+                        thread_id, "turn-2", 15, 3,
+                    ),
+                )],
+                input_state: None,
+                latest_turn_id: None,
+                session_auto_generation_epoch: Some(4),
+            },
+            /*resume_restored_queue*/ false,
+        );
+
+        assert!(
+            !app.chat_widget
+                .status_line_text()
+                .map(|line| line.contains("Nero auto countdown:"))
+                .unwrap_or(false),
+            "replayed queued hook notifications older than the known session-auto generation must not re-arm the countdown"
         );
     }
 
@@ -10702,11 +11155,16 @@ guardian_approval = true
                             prompt: None,
                             model: None,
                             reasoning_effort: None,
+                            context_inheritance_requested: None,
+                            context_inheritance_effective: None,
+                            context_inheritance_telemetry: None,
                             agents_states: HashMap::new(),
                         },
                     }),
                 )],
                 input_state: None,
+                latest_turn_id: None,
+                session_auto_generation_epoch: None,
             },
             /*resume_restored_queue*/ false,
         );
@@ -10759,6 +11217,8 @@ guardian_approval = true
             turns: Vec::new(),
             events: Vec::new(),
             input_state: None,
+            latest_turn_id: None,
+            session_auto_generation_epoch: None,
         };
 
         app.apply_refreshed_snapshot_thread(

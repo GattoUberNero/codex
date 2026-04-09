@@ -1,0 +1,51 @@
+{
+  "schema": "purrnet/phase-activity-log.v1",
+  "campaignId": "A",
+  "phaseId": "01",
+  "items": [
+    {
+      "id": "evt-1775553669379-i55gb3",
+      "at": "2026-04-07T09:21:09.380Z",
+      "kind": "phase.created",
+      "scope": "phase",
+      "summary": "Phase 01 created.",
+      "meta": {
+        "status": "active",
+        "title": "Visible countdown in TUI",
+        "operationId": "phase-create-415a079e"
+      }
+    },
+    {
+      "id": "evt-1775553675975-g4hiq9",
+      "at": "2026-04-07T09:21:15.975Z",
+      "kind": "plan.set",
+      "scope": "plan",
+      "summary": "Plan markdown updated.",
+      "meta": {
+        "chars": 365,
+        "lines": 6,
+        "operationId": "phase-plan-set-7ef9fe63"
+      }
+    },
+    {
+      "id": "evt-1775553675993-ijdvmg",
+      "at": "2026-04-07T09:21:15.993Z",
+      "kind": "gates.replace",
+      "scope": "gates",
+      "summary": "Success gates replaced (3 items).",
+      "meta": {
+        "source": "put",
+        "total": 3,
+        "todo": 2,
+        "active": 1,
+        "blocked": 0,
+        "done": 0,
+        "canceled": 0,
+        "prev_total": 0,
+        "prev_done": 0,
+        "operationId": "phase-gates-put-663eed14"
+      }
+    }
+  ],
+  "updatedAt": "2026-04-07T09:21:15.993Z"
+}

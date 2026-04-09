@@ -5,6 +5,7 @@ use codex_app_server_protocol::ThreadSessionAutoReadResponse;
 use codex_app_server_protocol::ThreadSessionAutoState;
 use codex_app_server_protocol::ThreadSessionAutoUpdateParams;
 use codex_app_server_protocol::ThreadSessionAutoUpdateResponse;
+use codex_core::nero_auto_runtime_state::NERO_AUTO_MAIN_SESSION_CONFIRMED_KEY;
 pub(crate) use codex_core::nero_auto_runtime_state::NeroThreadSessionAutoContext;
 use codex_core::nero_auto_runtime_state::acquire_state_lock;
 use codex_core::nero_auto_runtime_state::build_session_auto_state;
@@ -21,6 +22,30 @@ use codex_core::nero_auto_runtime_state::threads_map_mut;
 use codex_core::nero_auto_runtime_state::write_state_snapshot_atomic;
 use serde_json::Value as JsonValue;
 use std::path::Path;
+
+fn sync_main_session_confirmed_marker(
+    snapshot: &mut codex_core::nero_auto_runtime_state::NeroStateSnapshot,
+    context: &NeroThreadSessionAutoContext,
+) -> bool {
+    let thread_key = format!("id:{}", context.thread_id);
+    let threads = threads_map_mut(&mut snapshot.root);
+    let (mut entry, legacy_key) = read_thread_state_entry(threads, &thread_key);
+    let current = entry
+        .get(NERO_AUTO_MAIN_SESSION_CONFIRMED_KEY)
+        .and_then(JsonValue::as_bool);
+    if current == Some(context.main_session_confirmed) {
+        return false;
+    }
+    entry.insert(
+        NERO_AUTO_MAIN_SESSION_CONFIRMED_KEY.to_string(),
+        JsonValue::Bool(context.main_session_confirmed),
+    );
+    threads.insert(thread_key, JsonValue::Object(entry));
+    if let Some(key) = legacy_key {
+        threads.remove(&key);
+    }
+    true
+}
 
 fn version_conflict_response(
     context: &NeroThreadSessionAutoContext,
@@ -105,7 +130,12 @@ pub(crate) async fn read_thread_session_auto(
 ) -> Result<ThreadSessionAutoReadResponse, String> {
     let config_path = resolve_nero_auto_config_path(codex_home);
     let state_path = resolve_nero_auto_state_path(&config_path);
-    let snapshot = read_state_snapshot(&state_path)?;
+    let _lock = acquire_state_lock(&state_path)?;
+    let mut snapshot = read_state_snapshot(&state_path)?;
+    if sync_main_session_confirmed_marker(&mut snapshot, context) {
+        write_state_snapshot_atomic(&state_path, &snapshot.root)?;
+        snapshot = read_state_snapshot(&state_path)?;
+    }
     Ok(ThreadSessionAutoReadResponse {
         thread_id: context.thread_id.clone(),
         authority: ThreadSessionAutoAuthorityMode::AppServerAuthority,
@@ -118,13 +148,20 @@ pub(crate) async fn update_thread_session_auto(
     context: &NeroThreadSessionAutoContext,
     params: &ThreadSessionAutoUpdateParams,
 ) -> Result<ThreadSessionAutoUpdateResponse, String> {
-    if is_subagent_session_source(&context.session_source) {
-        return Err("session-auto updates are unsupported for subagent sessions".to_string());
+    if is_subagent_session_source(&context.session_source) || !context.main_session_confirmed {
+        return Err(
+            "session-auto updates are unsupported unless the session is a confirmed main session."
+                .to_string(),
+        );
     }
     let config_path = resolve_nero_auto_config_path(codex_home);
     let state_path = resolve_nero_auto_state_path(&config_path);
     let _lock = acquire_state_lock(&state_path)?;
     let mut snapshot = read_state_snapshot(&state_path)?;
+    if sync_main_session_confirmed_marker(&mut snapshot, context) {
+        write_state_snapshot_atomic(&state_path, &snapshot.root)?;
+        snapshot = read_state_snapshot(&state_path)?;
+    }
     let current_state = build_session_auto_state(context, &state_path, &config_path, &snapshot);
 
     if let Some(expected_session_source) = &params.expected_session_source
@@ -226,7 +263,11 @@ pub(crate) async fn update_thread_session_auto(
     if params.done_stop_scope.is_some() {
         match params.done_stop_scope.clone().flatten() {
             Some(value) => {
-                let normalized = normalize_done_stop_scope(Some(value.as_str()), None, "");
+                let normalized = normalize_done_stop_scope(
+                    Some(value.as_str()),
+                    /*stop_when_all_gates_done*/ None,
+                    "",
+                );
                 if normalized.is_empty() {
                     let current_state =
                         build_session_auto_state(context, &state_path, &config_path, &snapshot);
@@ -332,6 +373,7 @@ mod tests {
             thread_name: Some("thread-1".to_string()),
             session_source: SessionSource::Cli,
             loaded: true,
+            main_session_confirmed: true,
         }
     }
 
@@ -370,7 +412,6 @@ mod tests {
         let base_config_path = temp.path().join("config-nero.toml");
         let msg_config_path = temp.path().join("config-nero-hook-msg.toml");
         let dev_config_path = temp.path().join("config-nero-dev.toml");
-        let state_path = temp.path().join("nero-hook-auto-state.json");
         std::fs::write(&base_config_path, "").expect("write base config");
         std::fs::write(&msg_config_path, "").expect("write msg config");
         std::fs::write(&dev_config_path, "").expect("write dev config");
@@ -388,7 +429,7 @@ max_auto_rounds = 7
 autonomy_step_per_round = 1.0
 done_stop_scope = "active_phase"
 "#,
-                state_path.display()
+                temp.path().join("nero-hook-auto-state.json").display()
             ),
         )
         .expect("write config");
@@ -464,7 +505,6 @@ done_stop_scope = "active_phase"
         let base_config_path = temp.path().join("config-nero.toml");
         let msg_config_path = temp.path().join("config-nero-hook-msg.toml");
         let dev_config_path = temp.path().join("config-nero-dev.toml");
-        let state_path = temp.path().join("nero-hook-auto-state.json");
         std::fs::write(&base_config_path, "").expect("write base config");
         std::fs::write(&msg_config_path, "").expect("write msg config");
         std::fs::write(&dev_config_path, "").expect("write dev config");
@@ -477,7 +517,7 @@ enabled = false
 [nero.hook.runtime.auto.state]
 path = "{}"
 "#,
-                state_path.display()
+                temp.path().join("nero-hook-auto-state.json").display()
             ),
         )
         .expect("write config");
@@ -515,6 +555,106 @@ path = "{}"
         assert_eq!(
             update.state.as_ref().map(|state| state.version.clone()),
             Some(initial.state.version)
+        );
+    }
+
+    #[tokio::test]
+    async fn read_persists_main_session_confirmation_marker_for_confirmed_main_session() {
+        let _guard = runtime_auto_test_guard().lock().await;
+        let temp = tempdir().expect("tempdir");
+        let config_path = temp.path().join("config-nero-hook-auto.toml");
+        let base_config_path = temp.path().join("config-nero.toml");
+        let msg_config_path = temp.path().join("config-nero-hook-msg.toml");
+        let dev_config_path = temp.path().join("config-nero-dev.toml");
+        let state_path = temp.path().join("nero-hook-auto-state.json");
+        std::fs::write(&base_config_path, "").expect("write base config");
+        std::fs::write(&msg_config_path, "").expect("write msg config");
+        std::fs::write(&dev_config_path, "").expect("write dev config");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+[nero.hook.runtime.auto]
+enabled = false
+[nero.hook.runtime.auto.state]
+path = "{}"
+"#,
+                state_path.display()
+            ),
+        )
+        .expect("write config");
+        configure_isolated_runtime_config_env(
+            &config_path,
+            &base_config_path,
+            &msg_config_path,
+            &dev_config_path,
+        );
+
+        let response = read_thread_session_auto(temp.path(), &sample_context())
+            .await
+            .expect("read state");
+
+        assert!(!response.state.is_subagent);
+        let snapshot: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&response.state.state_path).expect("read state file"),
+        )
+        .expect("parse state file");
+        assert_eq!(
+            snapshot["threads"]["id:thread-1"]["main_session_confirmed"].as_bool(),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn read_fail_closes_when_main_session_is_not_confirmed() {
+        let _guard = runtime_auto_test_guard().lock().await;
+        let temp = tempdir().expect("tempdir");
+        let config_path = temp.path().join("config-nero-hook-auto.toml");
+        let base_config_path = temp.path().join("config-nero.toml");
+        let msg_config_path = temp.path().join("config-nero-hook-msg.toml");
+        let dev_config_path = temp.path().join("config-nero-dev.toml");
+        let state_path = temp.path().join("nero-hook-auto-state.json");
+        std::fs::write(&base_config_path, "").expect("write base config");
+        std::fs::write(&msg_config_path, "").expect("write msg config");
+        std::fs::write(&dev_config_path, "").expect("write dev config");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+[nero.hook.runtime.auto]
+enabled = true
+[nero.hook.runtime.auto.state]
+path = "{}"
+"#,
+                state_path.display()
+            ),
+        )
+        .expect("write config");
+        configure_isolated_runtime_config_env(
+            &config_path,
+            &base_config_path,
+            &msg_config_path,
+            &dev_config_path,
+        );
+
+        let context = NeroThreadSessionAutoContext {
+            main_session_confirmed: false,
+            ..sample_context()
+        };
+        let response = read_thread_session_auto(temp.path(), &context)
+            .await
+            .expect("read state");
+
+        assert!(response.state.is_subagent);
+        assert!(!response.state.effective.runtime.enabled);
+        assert_eq!(response.state.effective.source, "subagent-forced-off");
+        let snapshot: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&response.state.state_path).expect("read state file"),
+        )
+        .expect("parse state file");
+        assert_eq!(
+            snapshot["threads"]["id:thread-1"]["main_session_confirmed"].as_bool(),
+            Some(false)
         );
     }
 }

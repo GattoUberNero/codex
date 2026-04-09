@@ -19,6 +19,10 @@ use codex_protocol::protocol::CollabResumeBeginEvent;
 use codex_protocol::protocol::CollabResumeEndEvent;
 use codex_protocol::protocol::CollabWaitingBeginEvent;
 use codex_protocol::protocol::CollabWaitingEndEvent;
+use codex_protocol::protocol::SpawnContextInheritanceEffectiveMode;
+use codex_protocol::protocol::SpawnContextInheritanceMode;
+use codex_protocol::protocol::SpawnContextInheritanceSuppressionReason;
+use codex_protocol::protocol::SpawnContextInheritanceTelemetry;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 #[cfg(target_os = "macos")]
@@ -182,6 +186,9 @@ pub(crate) fn spawn_end(
         new_agent_nickname,
         new_agent_role,
         prompt,
+        context_inheritance_requested,
+        context_inheritance_effective,
+        context_inheritance_telemetry,
         status: _,
         ..
     } = ev;
@@ -203,6 +210,14 @@ pub(crate) fn spawn_end(
     if let Some(line) = prompt_line(&prompt) {
         details.push(line);
     }
+    if let Some(line) =
+        context_inheritance_line(context_inheritance_requested, context_inheritance_effective)
+    {
+        details.push(line);
+    }
+    details.extend(context_inheritance_telemetry_lines(
+        context_inheritance_telemetry,
+    ));
     collab_event(title, details)
 }
 
@@ -444,6 +459,80 @@ fn prompt_line(prompt: &str) -> Option<Line<'static>> {
     }
 }
 
+fn context_inheritance_line(
+    requested: Option<SpawnContextInheritanceMode>,
+    effective: Option<SpawnContextInheritanceEffectiveMode>,
+) -> Option<Line<'static>> {
+    let requested = requested?;
+    let effective = effective?;
+    let requested = match requested {
+        SpawnContextInheritanceMode::Off => "off",
+        SpawnContextInheritanceMode::Exact => "exact",
+        SpawnContextInheritanceMode::Bounded => "bounded",
+    };
+    let effective = match effective {
+        SpawnContextInheritanceEffectiveMode::Off => "off",
+        SpawnContextInheritanceEffectiveMode::Exact => "exact",
+        SpawnContextInheritanceEffectiveMode::BoundedFull => "bounded_full",
+        SpawnContextInheritanceEffectiveMode::BoundedTrimmed => "bounded_trimmed",
+        SpawnContextInheritanceEffectiveMode::BoundedSuppressed => "bounded_suppressed",
+    };
+
+    Some(Line::from(vec![
+        "Context ".dim(),
+        requested.into(),
+        " -> ".dim(),
+        effective.into(),
+    ]))
+}
+
+fn context_inheritance_telemetry_lines(
+    telemetry: Option<SpawnContextInheritanceTelemetry>,
+) -> Vec<Line<'static>> {
+    let Some(telemetry) = telemetry else {
+        return Vec::new();
+    };
+
+    let mut metrics = Vec::new();
+    if let Some(parent_turns) = telemetry.parent_replay_safe_turn_count {
+        let turns = match telemetry.shipped_replay_safe_turn_count {
+            Some(shipped_turns) => format!("turns {parent_turns} -> {shipped_turns}"),
+            None => format!("turns {parent_turns} -> -"),
+        };
+        metrics.push(turns);
+    }
+    if let Some(shipped_tokens) = telemetry.estimated_shipped_tokens {
+        let tokens = match telemetry.usable_context_budget_tokens {
+            Some(budget_tokens) => format!("tokens ~{shipped_tokens}/{budget_tokens}"),
+            None => format!("tokens ~{shipped_tokens}"),
+        };
+        metrics.push(tokens);
+    } else if let Some(budget_tokens) = telemetry.usable_context_budget_tokens {
+        metrics.push(format!("budget {budget_tokens}"));
+    }
+
+    let mut lines = Vec::new();
+    if !metrics.is_empty() {
+        lines.push(Line::from(vec![
+            "Budget ".dim(),
+            metrics.join(" | ").into(),
+        ]));
+    }
+
+    if let Some(reason) = telemetry.suppression_reason {
+        let reason = match reason {
+            SpawnContextInheritanceSuppressionReason::InvalidParentSpawnPairing => {
+                "invalid_parent_spawn_pairing"
+            }
+            SpawnContextInheritanceSuppressionReason::MissingBudgetProxy => "missing_budget_proxy",
+            SpawnContextInheritanceSuppressionReason::BudgetExceeded => "budget_exceeded",
+        };
+        lines.push(Line::from(vec!["Suppressed ".dim(), reason.into()]));
+    }
+
+    lines
+}
+
 fn merge_wait_receivers(
     receiver_thread_ids: &[ThreadId],
     mut receiver_agents: Vec<CollabAgentRef>,
@@ -611,6 +700,17 @@ mod tests {
                 prompt: "Compute 11! and reply with just the integer result.".to_string(),
                 model: "gpt-5".to_string(),
                 reasoning_effort: ReasoningEffortConfig::High,
+                context_inheritance_requested: Some(SpawnContextInheritanceMode::Bounded),
+                context_inheritance_effective: Some(
+                    SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
+                ),
+                context_inheritance_telemetry: Some(SpawnContextInheritanceTelemetry {
+                    parent_replay_safe_turn_count: Some(6),
+                    shipped_replay_safe_turn_count: Some(2),
+                    estimated_shipped_tokens: Some(18_500),
+                    usable_context_budget_tokens: Some(24_000),
+                    suppression_reason: None,
+                }),
                 status: AgentStatus::PendingInit,
             },
             Some(&SpawnRequestSummary {
@@ -749,6 +849,15 @@ mod tests {
                 prompt: String::new(),
                 model: "gpt-5".to_string(),
                 reasoning_effort: ReasoningEffortConfig::High,
+                context_inheritance_requested: Some(SpawnContextInheritanceMode::Exact),
+                context_inheritance_effective: Some(SpawnContextInheritanceEffectiveMode::Exact),
+                context_inheritance_telemetry: Some(SpawnContextInheritanceTelemetry {
+                    parent_replay_safe_turn_count: Some(3),
+                    shipped_replay_safe_turn_count: Some(3),
+                    estimated_shipped_tokens: Some(14_000),
+                    usable_context_budget_tokens: None,
+                    suppression_reason: None,
+                }),
                 status: AgentStatus::PendingInit,
             },
             Some(&SpawnRequestSummary {

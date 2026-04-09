@@ -6,6 +6,18 @@
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
     },
+    "AgentBoundedForkContextToml": {
+      "additionalProperties": false,
+      "properties": {
+        "startup_reserve_tokens": {
+          "description": "Reserve this many tokens from the model auto-compaction ceiling so bounded fork payloads leave startup headroom for the delegated task.",
+          "format": "int64",
+          "minimum": 1.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "AgentRoleToml": {
       "additionalProperties": false,
       "properties": {
@@ -36,6 +48,14 @@
         "$ref": "#/definitions/AgentRoleToml"
       },
       "properties": {
+        "bounded_fork_context": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentBoundedForkContextToml"
+            }
+          ],
+          "description": "Settings for bounded sub-agent context inheritance."
+        },
         "job_max_runtime_seconds": {
           "description": "Default maximum runtime in seconds for agent job workers.",
           "format": "uint64",

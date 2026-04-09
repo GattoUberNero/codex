@@ -21,7 +21,10 @@ fn tool_definition_to_responses_api_tool_omits_false_defer_loading() {
             input_schema: JsonSchema::Object {
                 properties: BTreeMap::from([(
                     "order_id".to_string(),
-                    JsonSchema::String { description: None },
+                    JsonSchema::String {
+                        enum_values: None,
+                        description: None
+                    },
                 )]),
                 required: Some(vec!["order_id".to_string()]),
                 additional_properties: Some(false.into()),
@@ -37,7 +40,10 @@ fn tool_definition_to_responses_api_tool_omits_false_defer_loading() {
             parameters: JsonSchema::Object {
                 properties: BTreeMap::from([(
                     "order_id".to_string(),
-                    JsonSchema::String { description: None },
+                    JsonSchema::String {
+                        enum_values: None,
+                        description: None
+                    },
                 )]),
                 required: Some(vec!["order_id".to_string()]),
                 additional_properties: Some(false.into()),
@@ -73,7 +79,10 @@ fn dynamic_tool_to_responses_api_tool_preserves_defer_loading() {
             parameters: JsonSchema::Object {
                 properties: BTreeMap::from([(
                     "order_id".to_string(),
-                    JsonSchema::String { description: None },
+                    JsonSchema::String {
+                        enum_values: None,
+                        description: None
+                    },
                 )]),
                 required: Some(vec!["order_id".to_string()]),
                 additional_properties: Some(false.into()),
@@ -118,7 +127,8 @@ fn mcp_tool_to_deferred_responses_api_tool_sets_defer_loading() {
             parameters: JsonSchema::Object {
                 properties: BTreeMap::from([(
                     "order_id".to_string(),
-                    JsonSchema::String { description: None },
+                    JsonSchema::String {
+                enum_values: None, description: None },
                 )]),
                 required: Some(vec!["order_id".to_string()]),
                 additional_properties: Some(false.into()),

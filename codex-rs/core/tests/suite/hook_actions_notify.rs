@@ -51,18 +51,30 @@ fn write_notify_script(contents: &str) -> Result<String> {
 }
 
 fn write_stop_hook(home: &Path, command: &str) -> Result<()> {
+    write_stop_hooks(home, &[command])
+}
+
+fn write_stop_hooks(home: &Path, commands: &[&str]) -> Result<()> {
     let hooks = json!({
         "hooks": {
             "Stop": [{
-                "hooks": [{
+                "hooks": commands.iter().map(|command| json!({
                     "type": "command",
                     "command": command,
                     "statusMessage": "running stop hook",
-                }]
+                })).collect::<Vec<_>>()
             }]
         }
     });
     std::fs::write(home.join("hooks.json"), hooks.to_string())?;
+    Ok(())
+}
+
+fn write_stop_hook_debug_config(home: &Path, mode: &str) -> Result<()> {
+    std::fs::write(
+        home.join("config-nero-hook-auto.toml"),
+        format!("[nero.hook.runtime.stop.debug]\nhook_prompt_reporting = \"{mode}\"\n"),
+    )?;
     Ok(())
 }
 
@@ -99,6 +111,30 @@ async fn submit_user_turn_no_wait(test: &TestCodexHarness, text: &str) -> Result
         })
         .await?;
     Ok(())
+}
+
+fn write_stop_debug_script() -> Result<String> {
+    write_notify_script(
+        r#"#!/bin/bash
+set -euo pipefail
+payload="$(cat)"
+if printf '%s' "$payload" | grep -q '"stop_hook_active":true'; then
+  printf '%s' '{"decision":"continue"}'
+else
+  printf '%s' '{"decision":"block","reason":"STOP_DEBUG_COMMAND\n{\"nero_auto_v1\":{\"score_value\":7,\"score_explanation\":\"debug payload\"}}"}'
+fi
+"#,
+    )
+}
+
+fn write_stop_debug_script_with_reason(reason: &str) -> Result<String> {
+    write_notify_script(&format!(
+        "#!/bin/bash\nset -euo pipefail\npayload=\"$(cat)\"\nif printf '%s' \"$payload\" | grep -q '\"stop_hook_active\":true'; then\n  printf '%s' '{{\"decision\":\"continue\"}}'\nelse\n  printf '%s' '{}'\nfi\n",
+        serde_json::to_string(&json!({
+            "decision": "block",
+            "reason": reason,
+        }))?
+    ))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -270,6 +306,245 @@ printf '%s' '{not-json'
         matches!(ev, EventMsg::TurnComplete(_))
     })
     .await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_hook_prompt_debug_reporting_defaults_to_off() -> Result<()> {
+    init_test_tracing();
+    if skip_if_no_linux_sandbox_bin() {
+        return Ok(());
+    }
+    let stop_script = write_stop_debug_script()?;
+    let stop_command = format!("bash {stop_script}");
+
+    let test = TestCodexHarness::with_builder(
+        core_test_support::test_codex::test_codex()
+            .with_pre_build_hook(move |home| {
+                if let Err(error) = write_stop_hook(home, &stop_command) {
+                    panic!("failed to write stop hook fixture: {error}");
+                }
+            })
+            .with_config(|cfg| {
+                cfg.features
+                    .enable(Feature::CodexHooks)
+                    .expect("test config should allow feature update");
+            }),
+    )
+    .await?;
+
+    responses::mount_sse_sequence(
+        test.server(),
+        vec![
+            sse(vec![ev_assistant_message("m1", "Done"), ev_completed("r1")]),
+            sse(vec![
+                ev_assistant_message("m2", "Done 2"),
+                ev_completed("r2"),
+            ]),
+        ],
+    )
+    .await;
+
+    submit_user_turn_no_wait(&test, "stop debug off").await?;
+
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), test.test().codex.next_event())
+            .await
+            .expect("timeout waiting for STOP debug off events")
+            .expect("event stream ended unexpectedly");
+        match event.msg {
+            EventMsg::Warning(warning) if warning.message.contains("[nero-hook][stop-debug]") => {
+                panic!(
+                    "did not expect STOP debug warning when reporting is disabled: {}",
+                    warning.message
+                );
+            }
+            EventMsg::TurnComplete(_) => break,
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_hook_prompt_debug_reporting_summary_emits_brief_warning() -> Result<()> {
+    init_test_tracing();
+    if skip_if_no_linux_sandbox_bin() {
+        return Ok(());
+    }
+    let stop_script = write_stop_debug_script()?;
+    let stop_command = format!("bash {stop_script}");
+
+    let test = TestCodexHarness::with_builder(
+        core_test_support::test_codex::test_codex()
+            .with_pre_build_hook(move |home| {
+                if let Err(error) = write_stop_hook(home, &stop_command) {
+                    panic!("failed to write stop hook fixture: {error}");
+                }
+                if let Err(error) = write_stop_hook_debug_config(home, "summary") {
+                    panic!("failed to write stop debug config: {error}");
+                }
+            })
+            .with_config(|cfg| {
+                cfg.features
+                    .enable(Feature::CodexHooks)
+                    .expect("test config should allow feature update");
+            }),
+    )
+    .await?;
+
+    responses::mount_sse_sequence(
+        test.server(),
+        vec![
+            sse(vec![ev_assistant_message("m1", "Done"), ev_completed("r1")]),
+            sse(vec![
+                ev_assistant_message("m2", "Done 2"),
+                ev_completed("r2"),
+            ]),
+        ],
+    )
+    .await;
+
+    submit_user_turn_no_wait(&test, "stop debug summary").await?;
+
+    let warning = wait_for_event(&test.test().codex, |ev| {
+        matches!(ev, EventMsg::Warning(w)
+            if w.message.contains("[nero-hook][stop-debug] STOP_HOOK injected 1 hook prompt fragment(s)")
+                && !w.message.contains("STOP_DEBUG_COMMAND"))
+    })
+    .await;
+    assert!(matches!(warning, EventMsg::Warning(_)));
+
+    let _complete = wait_for_event(&test.test().codex, |ev| {
+        matches!(ev, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_hook_prompt_debug_reporting_full_emits_fragment_payload() -> Result<()> {
+    init_test_tracing();
+    if skip_if_no_linux_sandbox_bin() {
+        return Ok(());
+    }
+    let stop_script = write_stop_debug_script()?;
+    let stop_command = format!("bash {stop_script}");
+
+    let test = TestCodexHarness::with_builder(
+        core_test_support::test_codex::test_codex()
+            .with_pre_build_hook(move |home| {
+                if let Err(error) = write_stop_hook(home, &stop_command) {
+                    panic!("failed to write stop hook fixture: {error}");
+                }
+                if let Err(error) = write_stop_hook_debug_config(home, "full") {
+                    panic!("failed to write stop debug config: {error}");
+                }
+            })
+            .with_config(|cfg| {
+                cfg.features
+                    .enable(Feature::CodexHooks)
+                    .expect("test config should allow feature update");
+            }),
+    )
+    .await?;
+
+    responses::mount_sse_sequence(
+        test.server(),
+        vec![
+            sse(vec![ev_assistant_message("m1", "Done"), ev_completed("r1")]),
+            sse(vec![
+                ev_assistant_message("m2", "Done 2"),
+                ev_completed("r2"),
+            ]),
+        ],
+    )
+    .await;
+
+    submit_user_turn_no_wait(&test, "stop debug full").await?;
+
+    let warning = wait_for_event(&test.test().codex, |ev| {
+        matches!(ev, EventMsg::Warning(w)
+            if w.message.contains("[nero-hook][stop-debug]\n------------\nfragments = 1")
+                && w.message.contains("fragment[1].text = STOP_DEBUG_COMMAND")
+                && w.message.contains("\"nero_auto_v1\":{\"score_value\":7"))
+    })
+    .await;
+    assert!(matches!(warning, EventMsg::Warning(_)));
+
+    let _complete = wait_for_event(&test.test().codex, |ev| {
+        matches!(ev, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_hook_prompt_debug_reporting_full_uses_delivered_multi_fragment_payload() -> Result<()>
+{
+    init_test_tracing();
+    if skip_if_no_linux_sandbox_bin() {
+        return Ok(());
+    }
+    let stop_script_one = write_stop_debug_script_with_reason(
+        "STOP_DEBUG_COMMAND_ONE\n{\"nero_auto_v1\":{\"score_value\":7}}",
+    )?;
+    let stop_script_two = write_stop_debug_script_with_reason(
+        "STOP_DEBUG_COMMAND_TWO\n{\"nero_auto_v1\":{\"score_value\":8}}",
+    )?;
+    let stop_command_one = format!("bash {stop_script_one}");
+    let stop_command_two = format!("bash {stop_script_two}");
+
+    let test = TestCodexHarness::with_builder(
+        core_test_support::test_codex::test_codex()
+            .with_pre_build_hook(move |home| {
+                if let Err(error) = write_stop_hooks(home, &[&stop_command_one, &stop_command_two])
+                {
+                    panic!("failed to write stop hook fixtures: {error}");
+                }
+                if let Err(error) = write_stop_hook_debug_config(home, "full") {
+                    panic!("failed to write stop debug config: {error}");
+                }
+            })
+            .with_config(|cfg| {
+                cfg.features
+                    .enable(Feature::CodexHooks)
+                    .expect("test config should allow feature update");
+            }),
+    )
+    .await?;
+
+    responses::mount_sse_sequence(
+        test.server(),
+        vec![
+            sse(vec![ev_assistant_message("m1", "Done"), ev_completed("r1")]),
+            sse(vec![
+                ev_assistant_message("m2", "Done 2"),
+                ev_completed("r2"),
+            ]),
+        ],
+    )
+    .await;
+
+    submit_user_turn_no_wait(&test, "stop debug full multi fragment").await?;
+
+    let warning = wait_for_event(&test.test().codex, |ev| {
+        matches!(ev, EventMsg::Warning(w)
+            if w.message.contains("[nero-hook][stop-debug]\n------------\nfragments = 2")
+                && w.message.contains("fragment[1].text = STOP_DEBUG_COMMAND_ONE")
+                && w.message.contains("fragment[2].text = STOP_DEBUG_COMMAND_TWO"))
+    })
+    .await;
+    assert!(matches!(warning, EventMsg::Warning(_)));
+
+    let _complete = wait_for_event(&test.test().codex, |ev| {
+        matches!(ev, EventMsg::TurnComplete(_))
+    })
+    .await;
+
     Ok(())
 }
 
@@ -518,6 +793,31 @@ fi
 
     submit_user_turn_no_wait(&test, "hello delayed auto").await?;
     fs_wait::wait_for_path_exists(&marker, Duration::from_secs(5)).await?;
+
+    let hook_completed = tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_event(&test.test().codex, |ev| {
+            matches!(ev, EventMsg::HookCompleted(event)
+                if event.run.event_name == codex_protocol::protocol::HookEventName::AfterAgent)
+        }),
+    )
+    .await
+    .expect("timed out waiting for after_agent HookCompleted event");
+    let EventMsg::HookCompleted(hook_completed) = hook_completed else {
+        panic!("expected HookCompleted event");
+    };
+    let meta = hook_completed
+        .run
+        .meta
+        .expect("after_agent runtime hook should include meta");
+    assert_eq!(meta["follow_up"]["expected_wait_seconds"], json!(2));
+    assert!(
+        meta["follow_up"]["generation_epoch"]
+            .as_u64()
+            .is_some_and(|generation_epoch| generation_epoch > 0),
+        "expected queued follow-up meta to carry a positive generation epoch"
+    );
+    assert_eq!(meta["follow_up"]["status"], json!("queued"));
 
     let _first_complete = wait_for_event(&test.test().codex, |ev| {
         matches!(ev, EventMsg::TurnComplete(_))

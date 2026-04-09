@@ -37,6 +37,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use url::Url;
 
@@ -697,6 +699,37 @@ impl StatusIndicatorState {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AutoFollowUpCountdownState {
+    deadline: Instant,
+    queued_count: usize,
+}
+
+impl AutoFollowUpCountdownState {
+    fn new(expected_wait_seconds: u64, queued_count: usize) -> Self {
+        let now = Instant::now();
+        let wait = Duration::from_secs(expected_wait_seconds);
+        Self {
+            deadline: now.checked_add(wait).unwrap_or(now),
+            queued_count,
+        }
+    }
+
+    fn remaining_seconds(&self, now: Instant) -> u64 {
+        let remaining = self.deadline.saturating_duration_since(now);
+        let whole_seconds = remaining.as_secs();
+        if remaining.subsec_nanos() > 0 {
+            whole_seconds.saturating_add(1)
+        } else {
+            whole_seconds
+        }
+    }
+
+    fn is_expired(&self, now: Instant) -> bool {
+        now >= self.deadline
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct PendingGuardianReviewStatus {
     entries: Vec<PendingGuardianReviewStatusEntry>,
@@ -1000,6 +1033,9 @@ pub(crate) struct ChatWidget {
     nero_auto_runtime: NeroAutoRuntimeConfig,
     is_subagent_session: bool,
     nero_auto_hotkey_inflight: bool,
+    auto_follow_up_countdown: Option<AutoFollowUpCountdownState>,
+    snapshot_replay_latest_turn_id: Option<String>,
+    snapshot_replay_session_auto_generation_epoch: Option<u64>,
     last_non_retry_error: Option<(String, String)>,
 }
 
@@ -1285,7 +1321,17 @@ fn merge_user_messages(messages: Vec<UserMessage>) -> UserMessage {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReplayKind {
     ResumeInitialMessages,
-    ThreadSnapshot,
+    ThreadSnapshotTurns,
+    ThreadSnapshotEvents,
+}
+
+impl ReplayKind {
+    fn is_thread_snapshot(self) -> bool {
+        matches!(
+            self,
+            ReplayKind::ThreadSnapshotTurns | ReplayKind::ThreadSnapshotEvents
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1418,6 +1464,50 @@ fn hook_runtime_status_prefix(meta: Option<&serde_json::Value>) -> &'static str 
     }
 }
 
+fn hook_runtime_follow_up_expected_wait_seconds(meta: Option<&serde_json::Value>) -> Option<u64> {
+    let meta_obj = meta.and_then(serde_json::Value::as_object)?;
+    let follow_up = meta_obj
+        .get("follow_up")
+        .and_then(serde_json::Value::as_object)?;
+    if follow_up.get("status").and_then(serde_json::Value::as_str) != Some("queued") {
+        return None;
+    }
+    follow_up
+        .get("expected_wait_seconds")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|wait_seconds| *wait_seconds > 0)
+}
+
+fn hook_runtime_follow_up_generation_epoch(meta: Option<&serde_json::Value>) -> Option<u64> {
+    let meta_obj = meta.and_then(serde_json::Value::as_object)?;
+    let follow_up = meta_obj
+        .get("follow_up")
+        .and_then(serde_json::Value::as_object)?;
+    if follow_up.get("status").and_then(serde_json::Value::as_str) != Some("queued") {
+        return None;
+    }
+    follow_up
+        .get("generation_epoch")
+        .and_then(serde_json::Value::as_u64)
+}
+
+fn replay_follow_up_remaining_wait_seconds(
+    expected_wait_seconds: u64,
+    completed_at: Option<i64>,
+) -> Option<u64> {
+    let completed_at = completed_at?;
+    let now_epoch_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())?;
+    let now_epoch_seconds = i64::try_from(now_epoch_seconds).ok()?;
+    let elapsed_seconds = now_epoch_seconds.saturating_sub(completed_at);
+    let elapsed_seconds = u64::try_from(elapsed_seconds).ok()?;
+    expected_wait_seconds
+        .checked_sub(elapsed_seconds)
+        .filter(|remaining| *remaining > 0)
+}
+
 fn hook_runtime_meta_lines(
     meta: Option<&serde_json::Value>,
     has_runtime_status_entry: bool,
@@ -1487,6 +1577,16 @@ fn hook_runtime_meta_lines(
         lines.push(format!(
             "  {runtime_label} follow-up: {status} (queued={queued_count}, blocked={blocked_count})"
         ));
+        if let Some(expected_wait_seconds) = hook_runtime_follow_up_expected_wait_seconds(meta) {
+            let queued_suffix = if queued_count > 1 {
+                format!(" · {queued_count} queued")
+            } else {
+                String::new()
+            };
+            lines.push(format!(
+                "  {runtime_label} countdown: next auto reply in {expected_wait_seconds}s (typing cancels){queued_suffix}"
+            ));
+        }
     }
 
     if let Some(auto_decision) = auto_decision {
@@ -2007,6 +2107,46 @@ impl ChatWidget {
         self.bottom_pane.set_active_agent_label(active_agent_label);
     }
 
+    pub(crate) fn arm_auto_follow_up_countdown(
+        &mut self,
+        expected_wait_seconds: u64,
+        queued_count: usize,
+    ) {
+        if expected_wait_seconds == 0 {
+            self.clear_auto_follow_up_countdown();
+            return;
+        }
+        let candidate = AutoFollowUpCountdownState::new(expected_wait_seconds, queued_count);
+        if let Some(existing) = self.auto_follow_up_countdown.as_mut() {
+            if candidate.deadline < existing.deadline {
+                *existing = candidate;
+                self.refresh_status_line();
+            } else if queued_count > existing.queued_count {
+                existing.queued_count = queued_count;
+                self.refresh_status_line();
+            }
+            return;
+        }
+        self.auto_follow_up_countdown = Some(candidate);
+        self.refresh_status_line();
+    }
+
+    pub(crate) fn clear_auto_follow_up_countdown(&mut self) {
+        if self.auto_follow_up_countdown.take().is_some() {
+            self.refresh_status_line();
+        }
+    }
+
+    pub(crate) fn begin_thread_snapshot_replay(
+        &mut self,
+        latest_turn_id: Option<String>,
+        session_auto_generation_epoch: Option<u64>,
+    ) {
+        self.snapshot_replay_latest_turn_id = latest_turn_id;
+        self.snapshot_replay_session_auto_generation_epoch = session_auto_generation_epoch;
+        self.clear_auto_follow_up_countdown();
+    }
+
     /// Recomputes footer status-line content from config and current runtime state.
     ///
     /// This method is the status-line orchestrator: it parses configured item identifiers,
@@ -2485,6 +2625,7 @@ impl ChatWidget {
         self.agent_turn_running = true;
         self.turn_sleep_inhibitor
             .set_turn_running(/*turn_running*/ true);
+        self.clear_auto_follow_up_countdown();
         self.saw_plan_update_this_turn = false;
         self.saw_plan_item_this_turn = false;
         self.last_plan_progress = None;
@@ -3995,6 +4136,9 @@ impl ChatWidget {
             prompt,
             model,
             reasoning_effort,
+            context_inheritance_requested,
+            context_inheritance_effective,
+            context_inheritance_telemetry,
             agents_states,
         } = item
         else {
@@ -4047,6 +4191,9 @@ impl ChatWidget {
                             prompt: prompt.unwrap_or_default(),
                             model: String::new(),
                             reasoning_effort: ReasoningEffortConfig::Medium,
+                            context_inheritance_requested,
+                            context_inheritance_effective,
+                            context_inheritance_telemetry,
                             status: first_receiver
                                 .as_ref()
                                 .and_then(|thread_id| agents_states.get(&thread_id.to_string()))
@@ -4240,11 +4387,17 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    fn on_hook_completed(&mut self, event: codex_protocol::protocol::HookCompletedEvent) {
+    fn on_hook_completed(
+        &mut self,
+        event: codex_protocol::protocol::HookCompletedEvent,
+        replay_kind: Option<ReplayKind>,
+    ) {
+        let turn_id = event.turn_id;
         let codex_protocol::protocol::HookRunSummary {
             event_name,
             status,
             status_message,
+            completed_at,
             meta,
             entries,
             ..
@@ -4284,6 +4437,57 @@ impl ChatWidget {
         } else {
             Vec::new()
         };
+        let is_snapshot_turn_replay = matches!(replay_kind, Some(ReplayKind::ThreadSnapshotTurns));
+        let replay_event_targets_latest_turn = match replay_kind {
+            Some(ReplayKind::ThreadSnapshotEvents) => {
+                matches!(
+                    (
+                        self.snapshot_replay_latest_turn_id.as_deref(),
+                        turn_id.as_deref()
+                    ),
+                    (Some(latest_turn_id), Some(hook_turn_id)) if latest_turn_id == hook_turn_id
+                )
+            }
+            _ => true,
+        };
+        let replay_event_generation_is_current = match replay_kind {
+            Some(ReplayKind::ThreadSnapshotEvents) => {
+                match (
+                    self.snapshot_replay_session_auto_generation_epoch,
+                    hook_runtime_follow_up_generation_epoch(meta.as_ref()),
+                ) {
+                    (Some(snapshot_generation_epoch), Some(hook_generation_epoch)) => {
+                        hook_generation_epoch >= snapshot_generation_epoch
+                    }
+                    (Some(_), None) => false,
+                    _ => true,
+                }
+            }
+            _ => true,
+        };
+        if is_nero_runtime_after_agent_event
+            && !is_snapshot_turn_replay
+            && replay_event_targets_latest_turn
+            && replay_event_generation_is_current
+            && let Some(expected_wait_seconds) =
+                hook_runtime_follow_up_expected_wait_seconds(meta.as_ref())
+            && let Some(expected_wait_seconds) =
+                if matches!(replay_kind, Some(ReplayKind::ThreadSnapshotEvents)) {
+                    replay_follow_up_remaining_wait_seconds(expected_wait_seconds, completed_at)
+                } else {
+                    Some(expected_wait_seconds)
+                }
+        {
+            let queued_count = meta
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|item| item.get("follow_up"))
+                .and_then(serde_json::Value::as_object)
+                .and_then(|item| item.get("queued_count"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(1) as usize;
+            self.arm_auto_follow_up_countdown(expected_wait_seconds, queued_count);
+        }
         if is_after_agent_runtime_event
             && entries.is_empty()
             && runtime_meta_lines.is_empty()
@@ -4371,6 +4575,16 @@ impl ChatWidget {
 
     pub(crate) fn pre_draw_tick(&mut self) {
         self.bottom_pane.pre_draw_tick();
+        if let Some(countdown) = self.auto_follow_up_countdown.as_ref() {
+            let now = Instant::now();
+            if countdown.is_expired(now) {
+                self.refresh_status_line();
+            } else {
+                self.refresh_status_line();
+                self.frame_requester
+                    .schedule_frame_in(Duration::from_secs(1));
+            }
+        }
         if self.should_animate_terminal_title_spinner() {
             self.refresh_terminal_title();
         }
@@ -5072,6 +5286,9 @@ impl ChatWidget {
             nero_auto_runtime,
             is_subagent_session: false,
             nero_auto_hotkey_inflight: false,
+            auto_follow_up_countdown: None,
+            snapshot_replay_latest_turn_id: None,
+            snapshot_replay_session_auto_generation_epoch: None,
             last_non_retry_error: None,
         };
 
@@ -5319,6 +5536,16 @@ impl ChatWidget {
 
     pub(crate) fn composer_text_with_pending(&self) -> String {
         self.bottom_pane.composer_text_with_pending()
+    }
+
+    pub(crate) fn composer_input_activity_marker(&self) -> (String, usize, usize, usize, usize) {
+        (
+            self.bottom_pane.composer_text_with_pending(),
+            self.bottom_pane.composer_local_image_count(),
+            self.bottom_pane.composer_remote_image_url_count(),
+            self.bottom_pane.composer_pending_paste_count(),
+            self.bottom_pane.composer_mention_binding_count(),
+        )
     }
 
     pub(crate) fn apply_external_edit(&mut self, text: String) {
@@ -6246,6 +6473,9 @@ impl ChatWidget {
     /// avoid triggering side effects. Event ids are passed as `None` to
     /// distinguish replayed events from live ones.
     pub(crate) fn replay_thread_turns(&mut self, turns: Vec<Turn>, replay_kind: ReplayKind) {
+        if self.snapshot_replay_latest_turn_id.is_none() {
+            self.snapshot_replay_latest_turn_id = turns.last().map(|turn| turn.id.clone());
+        }
         for turn in turns {
             let Turn {
                 id: turn_id,
@@ -6581,6 +6811,9 @@ impl ChatWidget {
                 prompt,
                 model,
                 reasoning_effort,
+                context_inheritance_requested,
+                context_inheritance_effective,
+                context_inheritance_telemetry,
                 agents_states,
             } => self.on_collab_agent_tool_call(ThreadItem::CollabAgentToolCall {
                 id,
@@ -6591,12 +6824,15 @@ impl ChatWidget {
                 prompt,
                 model,
                 reasoning_effort,
+                context_inheritance_requested,
+                context_inheritance_effective,
+                context_inheritance_telemetry,
                 agents_states,
             }),
             ThreadItem::DynamicToolCall { .. } => {}
         }
 
-        if matches!(replay_kind, Some(ReplayKind::ThreadSnapshot)) && turn_id.is_empty() {
+        if replay_kind.is_some_and(ReplayKind::is_thread_snapshot) && turn_id.is_empty() {
             self.request_redraw();
         }
     }
@@ -6750,7 +6986,10 @@ impl ChatWidget {
                 self.on_hook_started(hook_started_event_from_notification(notification));
             }
             ServerNotification::HookCompleted(notification) => {
-                self.on_hook_completed(hook_completed_event_from_notification(notification));
+                self.on_hook_completed(
+                    hook_completed_event_from_notification(notification),
+                    replay_kind,
+                );
             }
             ServerNotification::Error(notification) => {
                 if notification.will_retry {
@@ -7039,6 +7278,9 @@ impl ChatWidget {
                 prompt,
                 model,
                 reasoning_effort,
+                context_inheritance_requested,
+                context_inheritance_effective,
+                context_inheritance_telemetry,
                 agents_states,
             } => self.on_collab_agent_tool_call(ThreadItem::CollabAgentToolCall {
                 id,
@@ -7049,6 +7291,9 @@ impl ChatWidget {
                 prompt,
                 model,
                 reasoning_effort,
+                context_inheritance_requested,
+                context_inheritance_effective,
+                context_inheritance_telemetry,
                 agents_states,
             }),
             ThreadItem::EnteredReviewMode { review, .. } => {
@@ -7145,7 +7390,7 @@ impl ChatWidget {
         if matches!(msg, EventMsg::ShutdownComplete) {
             return;
         }
-        self.dispatch_event_msg(/*id*/ None, msg, Some(ReplayKind::ThreadSnapshot));
+        self.dispatch_event_msg(/*id*/ None, msg, Some(ReplayKind::ThreadSnapshotTurns));
     }
 
     /// Dispatch a protocol `EventMsg` to the appropriate handler.
@@ -7183,7 +7428,7 @@ impl ChatWidget {
             EventMsg::SessionConfigured(e) => self.on_session_configured(e),
             EventMsg::ThreadNameUpdated(e) => self.on_thread_name_updated(e),
             EventMsg::AgentMessage(AgentMessageEvent { .. })
-                if matches!(replay_kind, Some(ReplayKind::ThreadSnapshot))
+                if replay_kind.is_some_and(ReplayKind::is_thread_snapshot)
                     && !self.is_review_mode => {}
             EventMsg::AgentMessage(AgentMessageEvent { message, .. })
                 if from_replay || self.is_review_mode =>
@@ -7382,7 +7627,7 @@ impl ChatWidget {
             | EventMsg::DynamicToolCallRequest(_)
             | EventMsg::DynamicToolCallResponse(_) => {}
             EventMsg::HookStarted(event) => self.on_hook_started(event),
-            EventMsg::HookCompleted(event) => self.on_hook_completed(event),
+            EventMsg::HookCompleted(event) => self.on_hook_completed(event, replay_kind),
             EventMsg::RealtimeConversationStarted(ev) => {
                 if !from_replay {
                     self.on_realtime_conversation_started(ev);

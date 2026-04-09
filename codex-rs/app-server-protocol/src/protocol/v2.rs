@@ -77,6 +77,9 @@ use codex_protocol::protocol::SkillInterface as CoreSkillInterface;
 use codex_protocol::protocol::SkillMetadata as CoreSkillMetadata;
 use codex_protocol::protocol::SkillScope as CoreSkillScope;
 use codex_protocol::protocol::SkillToolDependency as CoreSkillToolDependency;
+use codex_protocol::protocol::SpawnContextInheritanceEffectiveMode;
+use codex_protocol::protocol::SpawnContextInheritanceMode;
+use codex_protocol::protocol::SpawnContextInheritanceTelemetry;
 use codex_protocol::protocol::SubAgentSource as CoreSubAgentSource;
 use codex_protocol::protocol::TokenUsage as CoreTokenUsage;
 use codex_protocol::protocol::TokenUsageInfo as CoreTokenUsageInfo;
@@ -4662,6 +4665,12 @@ pub enum ThreadItem {
         model: Option<String>,
         /// Reasoning effort requested for the spawned agent, when applicable.
         reasoning_effort: Option<ReasoningEffort>,
+        /// Requested parent-context inheritance mode for spawn calls, when available.
+        context_inheritance_requested: Option<SpawnContextInheritanceMode>,
+        /// Effective parent-context inheritance mode after runtime budgeting and validation.
+        context_inheritance_effective: Option<SpawnContextInheritanceEffectiveMode>,
+        /// Runtime budgeting telemetry for the effective inheritance decision.
+        context_inheritance_telemetry: Option<SpawnContextInheritanceTelemetry>,
         /// Last known status of the target agents, when available.
         agents_states: HashMap<String, CollabAgentState>,
     },

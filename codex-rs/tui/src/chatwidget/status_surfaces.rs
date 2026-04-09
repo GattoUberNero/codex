@@ -135,7 +135,8 @@ impl ChatWidget {
     }
 
     fn refresh_status_line_from_selections(&mut self, selections: &StatusSurfaceSelections) {
-        let enabled = !selections.status_line_items.is_empty();
+        let enabled =
+            !selections.status_line_items.is_empty() || self.auto_follow_up_countdown.is_some();
         self.bottom_pane.set_status_line_enabled(enabled);
         if !enabled {
             self.set_status_line(/*status_line*/ None);
@@ -149,12 +150,35 @@ impl ChatWidget {
             }
         }
 
+        if let Some(countdown) = self.auto_follow_up_countdown_text(Instant::now()) {
+            parts.push(countdown);
+        }
+
         let line = if parts.is_empty() {
             None
         } else {
             Some(Line::from(parts.join(" · ")))
         };
         self.set_status_line(line);
+    }
+
+    fn auto_follow_up_countdown_text(&self, now: Instant) -> Option<String> {
+        let countdown = self.auto_follow_up_countdown.as_ref()?;
+        let queued_suffix = if countdown.queued_count > 1 {
+            format!(" · {} queued", countdown.queued_count)
+        } else {
+            String::new()
+        };
+        if countdown.is_expired(now) {
+            Some(format!(
+                "Nero auto countdown: auto reply pending (typing cancels){queued_suffix}"
+            ))
+        } else {
+            let remaining_seconds = countdown.remaining_seconds(now);
+            Some(format!(
+                "Nero auto countdown: next auto reply in {remaining_seconds}s (typing cancels){queued_suffix}"
+            ))
+        }
     }
 
     /// Clears the terminal title Codex most recently wrote, if any.

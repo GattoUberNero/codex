@@ -376,6 +376,7 @@ pub(crate) fn create_apply_patch_json_tool() -> ToolSpec {
     properties.insert(
         "input".to_string(),
         JsonSchema::String {
+            enum_values: None,
             description: Some(r#"The entire contents of the apply_patch command"#.to_string()),
         },
     );

@@ -17,12 +17,14 @@ fn spawn_agents_on_csv_tool_requires_csv_and_instruction() {
                     (
                         "csv_path".to_string(),
                         JsonSchema::String {
+                enum_values: None,
                             description: Some("Path to the CSV file containing input rows.".to_string()),
                         },
                     ),
                     (
                         "instruction".to_string(),
                         JsonSchema::String {
+                enum_values: None,
                             description: Some(
                                 "Instruction template to apply to each CSV row. Use {column_name} placeholders to inject values from the row."
                                     .to_string(),
@@ -32,12 +34,14 @@ fn spawn_agents_on_csv_tool_requires_csv_and_instruction() {
                     (
                         "id_column".to_string(),
                         JsonSchema::String {
+                enum_values: None,
                             description: Some("Optional column name to use as stable item id.".to_string()),
                         },
                     ),
                     (
                         "output_csv_path".to_string(),
                         JsonSchema::String {
+                enum_values: None,
                             description: Some("Optional output CSV path for exported results.".to_string()),
                         },
                     ),
@@ -100,12 +104,14 @@ fn report_agent_job_result_tool_requires_result_payload() {
                     (
                         "job_id".to_string(),
                         JsonSchema::String {
+                enum_values: None,
                             description: Some("Identifier of the job.".to_string()),
                         },
                     ),
                     (
                         "item_id".to_string(),
                         JsonSchema::String {
+                enum_values: None,
                             description: Some("Identifier of the job item.".to_string()),
                         },
                     ),

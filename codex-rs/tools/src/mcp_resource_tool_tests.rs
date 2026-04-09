@@ -16,6 +16,7 @@ fn list_mcp_resources_tool_matches_expected_spec() {
                     (
                         "server".to_string(),
                         JsonSchema::String {
+                enum_values: None,
                             description: Some(
                                 "Optional MCP server name. When omitted, lists resources from every configured server."
                                     .to_string(),
@@ -25,6 +26,7 @@ fn list_mcp_resources_tool_matches_expected_spec() {
                     (
                         "cursor".to_string(),
                         JsonSchema::String {
+                enum_values: None,
                             description: Some(
                                 "Opaque cursor returned by a previous list_mcp_resources call for the same server."
                                     .to_string(),
@@ -54,6 +56,7 @@ fn list_mcp_resource_templates_tool_matches_expected_spec() {
                     (
                         "server".to_string(),
                         JsonSchema::String {
+                enum_values: None,
                             description: Some(
                                 "Optional MCP server name. When omitted, lists resource templates from all configured servers."
                                     .to_string(),
@@ -63,6 +66,7 @@ fn list_mcp_resource_templates_tool_matches_expected_spec() {
                     (
                         "cursor".to_string(),
                         JsonSchema::String {
+                enum_values: None,
                             description: Some(
                                 "Opaque cursor returned by a previous list_mcp_resource_templates call for the same server."
                                     .to_string(),
@@ -94,6 +98,7 @@ fn read_mcp_resource_tool_matches_expected_spec() {
                     (
                         "server".to_string(),
                         JsonSchema::String {
+                enum_values: None,
                             description: Some(
                                 "MCP server name exactly as configured. Must match the 'server' field returned by list_mcp_resources."
                                     .to_string(),
@@ -103,6 +108,7 @@ fn read_mcp_resource_tool_matches_expected_spec() {
                     (
                         "uri".to_string(),
                         JsonSchema::String {
+                enum_values: None,
                             description: Some(
                                 "Resource URI to read. Must be one of the URIs returned by list_mcp_resources."
                                     .to_string(),

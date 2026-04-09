@@ -3,6 +3,7 @@ use crate::CodexAuth;
 use crate::CodexThread;
 use crate::ThreadManager;
 use crate::agent::agent_status_from_event;
+use crate::agent::fork_context::select_bounded_fork_context;
 use crate::config::AgentRoleConfig;
 use crate::config::Config;
 use crate::config::ConfigBuilder;
@@ -14,11 +15,15 @@ use codex_features::Feature;
 use codex_protocol::AgentPath;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SpawnContextInheritanceEffectiveMode;
+use codex_protocol::protocol::SpawnContextInheritanceMode;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
@@ -588,7 +593,7 @@ async fn spawn_agent_can_fork_parent_thread_history() {
         .await;
     parent_thread.codex.session.flush_rollout().await;
 
-    let child_thread_id = harness
+    let spawned = harness
         .control
         .spawn_agent_with_metadata(
             harness.config.clone(),
@@ -602,11 +607,30 @@ async fn spawn_agent_can_fork_parent_thread_history() {
             })),
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id),
+                fork_context_requested_mode: SpawnContextInheritanceMode::Exact,
+                bounded_fork_usable_context_budget_tokens: None,
             },
         )
         .await
-        .expect("forked spawn should succeed")
-        .thread_id;
+        .expect("forked spawn should succeed");
+    assert_eq!(
+        spawned.fork_context_report.requested_mode,
+        SpawnContextInheritanceMode::Exact
+    );
+    assert_eq!(
+        spawned.fork_context_report.effective_mode,
+        SpawnContextInheritanceEffectiveMode::Exact
+    );
+    let telemetry = spawned
+        .fork_context_report
+        .telemetry
+        .as_ref()
+        .expect("exact fork should report telemetry");
+    assert!(telemetry.parent_replay_safe_turn_count.is_some());
+    assert!(telemetry.shipped_replay_safe_turn_count.is_some());
+    assert!(telemetry.estimated_shipped_tokens.is_some());
+    assert_eq!(telemetry.suppression_reason, None);
+    let child_thread_id = spawned.thread_id;
 
     let child_thread = harness
         .manager
@@ -673,7 +697,7 @@ async fn spawn_agent_fork_injects_output_for_parent_spawn_call() {
         .await;
     parent_thread.codex.session.flush_rollout().await;
 
-    let child_thread_id = harness
+    let spawned = harness
         .control
         .spawn_agent_with_metadata(
             harness.config.clone(),
@@ -687,11 +711,25 @@ async fn spawn_agent_fork_injects_output_for_parent_spawn_call() {
             })),
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
+                fork_context_requested_mode: SpawnContextInheritanceMode::Exact,
+                bounded_fork_usable_context_budget_tokens: None,
             },
         )
         .await
-        .expect("forked spawn should succeed")
-        .thread_id;
+        .expect("forked spawn should succeed");
+    assert_eq!(
+        spawned.fork_context_report.effective_mode,
+        SpawnContextInheritanceEffectiveMode::Exact
+    );
+    assert!(
+        spawned
+            .fork_context_report
+            .telemetry
+            .as_ref()
+            .and_then(|telemetry| telemetry.estimated_shipped_tokens)
+            .is_some()
+    );
+    let child_thread_id = spawned.thread_id;
 
     let child_thread = harness
         .manager
@@ -745,7 +783,7 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
         .record_conversation_items(turn_context.as_ref(), &[parent_spawn_call])
         .await;
 
-    let child_thread_id = harness
+    let spawned = harness
         .control
         .spawn_agent_with_metadata(
             harness.config.clone(),
@@ -759,11 +797,25 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
             })),
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
+                fork_context_requested_mode: SpawnContextInheritanceMode::Exact,
+                bounded_fork_usable_context_budget_tokens: None,
             },
         )
         .await
-        .expect("forked spawn should flush parent rollout before loading history")
-        .thread_id;
+        .expect("forked spawn should flush parent rollout before loading history");
+    assert_eq!(
+        spawned.fork_context_report.effective_mode,
+        SpawnContextInheritanceEffectiveMode::Exact
+    );
+    assert_eq!(
+        spawned
+            .fork_context_report
+            .telemetry
+            .as_ref()
+            .and_then(|telemetry| telemetry.suppression_reason),
+        None
+    );
+    let child_thread_id = spawned.thread_id;
 
     let child_thread = harness
         .manager
@@ -797,6 +849,322 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
     let _ = harness
         .control
         .shutdown_live_agent(child_thread_id)
+        .await
+        .expect("child shutdown should submit");
+    let _ = parent_thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("parent shutdown should submit");
+}
+
+#[tokio::test]
+async fn spawn_agent_bounded_fork_suppresses_when_budget_is_too_small() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    parent_thread
+        .inject_user_message_without_turn("parent seed context".to_string())
+        .await;
+    let turn_context = parent_thread.codex.session.new_default_turn().await;
+    let parent_spawn_call_id = "spawn-call-bounded".to_string();
+    let parent_spawn_call = ResponseItem::FunctionCall {
+        id: None,
+        name: "spawn_agent".to_string(),
+        namespace: None,
+        arguments: "{}".to_string(),
+        call_id: parent_spawn_call_id.clone(),
+    };
+    parent_thread
+        .codex
+        .session
+        .record_conversation_items(turn_context.as_ref(), &[parent_spawn_call])
+        .await;
+    parent_thread
+        .codex
+        .session
+        .ensure_rollout_materialized()
+        .await;
+    parent_thread.codex.session.flush_rollout().await;
+
+    let spawned = harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("child task"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(parent_spawn_call_id),
+                fork_context_requested_mode: SpawnContextInheritanceMode::Bounded,
+                bounded_fork_usable_context_budget_tokens: Some(1),
+            },
+        )
+        .await
+        .expect("bounded fork spawn should succeed with suppression");
+
+    assert_eq!(
+        spawned.fork_context_report.requested_mode,
+        SpawnContextInheritanceMode::Bounded
+    );
+    assert_eq!(
+        spawned.fork_context_report.effective_mode,
+        SpawnContextInheritanceEffectiveMode::BoundedSuppressed
+    );
+    assert_eq!(
+        spawned
+            .fork_context_report
+            .telemetry
+            .as_ref()
+            .and_then(|telemetry| telemetry.suppression_reason),
+        Some(codex_protocol::protocol::SpawnContextInheritanceSuppressionReason::BudgetExceeded)
+    );
+
+    let child_thread = harness
+        .manager
+        .get_thread(spawned.thread_id)
+        .await
+        .expect("child thread should be registered");
+    let history = child_thread.codex.session.clone_history().await;
+    assert!(!history_contains_text(
+        history.raw_items(),
+        "parent seed context"
+    ));
+
+    let _ = harness
+        .control
+        .shutdown_live_agent(spawned.thread_id)
+        .await
+        .expect("child shutdown should submit");
+    let _ = parent_thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("parent shutdown should submit");
+}
+
+#[tokio::test]
+async fn spawn_agent_bounded_fork_full_replays_parent_history_on_live_child() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    parent_thread
+        .inject_user_message_without_turn("parent seed context".to_string())
+        .await;
+    let turn_context = parent_thread.codex.session.new_default_turn().await;
+    let parent_spawn_call_id = "spawn-call-bounded-full".to_string();
+    let parent_spawn_call = ResponseItem::FunctionCall {
+        id: None,
+        name: "spawn_agent".to_string(),
+        namespace: None,
+        arguments: "{}".to_string(),
+        call_id: parent_spawn_call_id.clone(),
+    };
+    parent_thread
+        .codex
+        .session
+        .record_conversation_items(turn_context.as_ref(), &[parent_spawn_call])
+        .await;
+    parent_thread
+        .codex
+        .session
+        .ensure_rollout_materialized()
+        .await;
+    parent_thread.codex.session.flush_rollout().await;
+
+    let spawned = harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("child task"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
+                fork_context_requested_mode: SpawnContextInheritanceMode::Bounded,
+                bounded_fork_usable_context_budget_tokens: Some(50_000),
+            },
+        )
+        .await
+        .expect("bounded full spawn should succeed");
+
+    assert_eq!(
+        spawned.fork_context_report.effective_mode,
+        SpawnContextInheritanceEffectiveMode::BoundedFull
+    );
+
+    let child_thread = harness
+        .manager
+        .get_thread(spawned.thread_id)
+        .await
+        .expect("child thread should be registered");
+    let history = child_thread.codex.session.clone_history().await;
+    assert!(history_contains_text(
+        history.raw_items(),
+        "parent seed context"
+    ));
+    let injected_output = history.raw_items().iter().find_map(|item| match item {
+        ResponseItem::FunctionCallOutput { call_id, output }
+            if call_id == &parent_spawn_call_id =>
+        {
+            Some(output)
+        }
+        _ => None,
+    });
+    let injected_output =
+        injected_output.expect("bounded full child should contain synthetic tool output");
+    assert_eq!(
+        injected_output.text_content(),
+        Some(FORKED_SPAWN_AGENT_OUTPUT_MESSAGE)
+    );
+
+    let _ = harness
+        .control
+        .shutdown_live_agent(spawned.thread_id)
+        .await
+        .expect("child shutdown should submit");
+    let _ = parent_thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("parent shutdown should submit");
+}
+
+#[tokio::test]
+async fn spawn_agent_bounded_fork_trimmed_replays_selected_history_on_live_child() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    parent_thread
+        .inject_user_message_without_turn("oldest parent seed context".to_string())
+        .await;
+    parent_thread
+        .inject_user_message_without_turn("latest parent seed context".to_string())
+        .await;
+    let turn_context = parent_thread.codex.session.new_default_turn().await;
+    let parent_spawn_call_id = "spawn-call-bounded-trimmed".to_string();
+    let parent_spawn_call = ResponseItem::FunctionCall {
+        id: None,
+        name: "spawn_agent".to_string(),
+        namespace: None,
+        arguments: "{}".to_string(),
+        call_id: parent_spawn_call_id.clone(),
+    };
+    parent_thread
+        .codex
+        .session
+        .record_conversation_items(turn_context.as_ref(), &[parent_spawn_call])
+        .await;
+    parent_thread
+        .codex
+        .session
+        .ensure_rollout_materialized()
+        .await;
+    parent_thread.codex.session.flush_rollout().await;
+
+    let mut forked_rollout_items = parent_thread
+        .codex
+        .session
+        .clone_history()
+        .await
+        .raw_items()
+        .iter()
+        .cloned()
+        .map(RolloutItem::ResponseItem)
+        .collect::<Vec<_>>();
+    let mut output =
+        FunctionCallOutputPayload::from_text(FORKED_SPAWN_AGENT_OUTPUT_MESSAGE.to_string());
+    output.success = Some(true);
+    forked_rollout_items.push(RolloutItem::ResponseItem(
+        ResponseItem::FunctionCallOutput {
+            call_id: parent_spawn_call_id.clone(),
+            output,
+        },
+    ));
+    let full_tokens = i64::try_from(codex_utils_output_truncation::approx_token_count(
+        &serde_json::to_string(&forked_rollout_items).expect("serialize bounded candidate"),
+    ))
+    .expect("token estimate should fit in i64");
+    let expected_selection = select_bounded_fork_context(
+        forked_rollout_items,
+        &parent_spawn_call_id,
+        full_tokens - 1,
+        SpawnContextInheritanceMode::Bounded,
+    )
+    .expect("selector should build bounded trimmed candidate");
+    assert_eq!(
+        expected_selection.report.effective_mode,
+        SpawnContextInheritanceEffectiveMode::BoundedTrimmed
+    );
+
+    let spawned = harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("child task"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
+                fork_context_requested_mode: SpawnContextInheritanceMode::Bounded,
+                bounded_fork_usable_context_budget_tokens: Some(full_tokens - 1),
+            },
+        )
+        .await
+        .expect("bounded trimmed spawn should succeed");
+
+    assert_eq!(
+        spawned.fork_context_report.effective_mode,
+        SpawnContextInheritanceEffectiveMode::BoundedTrimmed
+    );
+    let telemetry = spawned
+        .fork_context_report
+        .telemetry
+        .as_ref()
+        .expect("bounded trimmed spawn should report telemetry");
+    assert!(telemetry.shipped_replay_safe_turn_count < telemetry.parent_replay_safe_turn_count);
+
+    let child_thread = harness
+        .manager
+        .get_thread(spawned.thread_id)
+        .await
+        .expect("child thread should be registered");
+    let history = child_thread.codex.session.clone_history().await;
+    assert!(!history_contains_text(
+        history.raw_items(),
+        "oldest parent seed context"
+    ));
+    assert!(history_contains_text(
+        history.raw_items(),
+        "latest parent seed context"
+    ));
+    let injected_output = history.raw_items().iter().find_map(|item| match item {
+        ResponseItem::FunctionCallOutput { call_id, output }
+            if call_id == &parent_spawn_call_id =>
+        {
+            Some(output)
+        }
+        _ => None,
+    });
+    let injected_output =
+        injected_output.expect("bounded trimmed child should contain synthetic tool output");
+    assert_eq!(
+        injected_output.text_content(),
+        Some(FORKED_SPAWN_AGENT_OUTPUT_MESSAGE)
+    );
+
+    let _ = harness
+        .control
+        .shutdown_live_agent(spawned.thread_id)
         .await
         .expect("child shutdown should submit");
     let _ = parent_thread

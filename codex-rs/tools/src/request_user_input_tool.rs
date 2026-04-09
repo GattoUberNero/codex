@@ -8,12 +8,14 @@ pub fn create_request_user_input_tool(description: String) -> ToolSpec {
         (
             "label".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some("User-facing label (1-5 words).".to_string()),
             },
         ),
         (
             "description".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "One short sentence explaining impact/tradeoff if selected.".to_string(),
                 ),
@@ -37,6 +39,7 @@ pub fn create_request_user_input_tool(description: String) -> ToolSpec {
         (
             "id".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "Stable identifier for mapping answers (snake_case).".to_string(),
                 ),
@@ -45,6 +48,7 @@ pub fn create_request_user_input_tool(description: String) -> ToolSpec {
         (
             "header".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "Short header label shown in the UI (12 or fewer chars).".to_string(),
                 ),
@@ -53,6 +57,7 @@ pub fn create_request_user_input_tool(description: String) -> ToolSpec {
         (
             "question".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some("Single-sentence prompt shown to the user.".to_string()),
             },
         ),

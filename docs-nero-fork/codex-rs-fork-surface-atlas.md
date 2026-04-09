@@ -2,11 +2,17 @@
 
 Purpose: authoritative, current map of fork-owned `codex-rs` capability surfaces and the external contracts exposed from `codex-rs`.
 
+Companion doc:
+
+- `docs-nero-fork/codex-rs-fork-guide.md`
+  - higher-level guide for capability intent, user experience, helper services, and extension boundaries
+
 ## Ownership Legend
 
 - `NATIVE`: upstream Codex/runtime surface that Nero depends on but does not own.
 - `NERO-INTERNAL`: fork-owned implementation/state internal to `codex-rs`.
-- `NERO-EXPOSED`: fork-owned contract exported from `codex-rs` (wire, RPC, protocol field, event payload, env/config interface).
+- `NERO-EXPOSED`: fork-owned typed/stable contract exported from `codex-rs` (wire, RPC, protocol field, env/config interface).
+- `NERO-DIAGNOSTIC`: fork-owned diagnostic/user-visible payload convention carried on native surfaces, but not versioned as typed public API.
 - `EXTERNAL-CONSUMER`: system outside `codex-rs` consuming exposed contracts (for this map: `codex-nero-sdk`, `nerobar-ui`, operator command surface).
 
 ## Top-Level Capability Matrix
@@ -15,12 +21,13 @@ Purpose: authoritative, current map of fork-owned `codex-rs` capability surfaces
 | --- | --- | --- | --- | --- |
 | Hook Msg | Runtime msg composition and delivery decisions for turn lifecycle | `NERO-EXPOSED` + `NERO-INTERNAL` on `NATIVE` hooks | `NeroHookAction::NeroHookMsg`, hook action envelope | `hooks/src/response.rs`, `core/src/codex.rs`, `hooks/src/user_notification.rs` |
 | Hook Auto | Stop-centric auto continuation decision and enqueue contract | `NERO-EXPOSED` + `NERO-INTERNAL` on `NATIVE` STOP | `NeroHookAction::AutoUserReply`, stop checkpoint contract meta | `hooks/src/response.rs`, `core/src/codex.rs`, `tui/src/chatwidget.rs` |
-| User-visible warning/reporting lane | User-visible runtime status and warning rendering | Carrier `NATIVE`, formatter/control `NERO-INTERNAL`, output `NERO-EXPOSED` | `EventMsg::Warning`, `HookCompletedEvent`, nero warning formatter/delivery | `core/src/codex.rs`, `tui/src/chatwidget.rs` |
-| Session-auto authority / F1-F5 | Runtime auto parameter changes through authority path | `NERO-EXPOSED` + `NERO-INTERNAL` on `NATIVE` protocol stream | F1-F5 hotkeys, app-server `thread/sessionAuto/*`, protocol `nero_auto_runtime` | `tui/src/chatwidget.rs`, `tui/src/app.rs`, `app-server/src/codex_message_processor.rs`, `app-server/src/thread_session_auto.rs`, `app-server-protocol/src/protocol/common.rs` |
+| User-visible warning/reporting lane | User-visible runtime status and warning rendering | Carrier `NATIVE`, formatter/control `NERO-INTERNAL`, output `NERO-DIAGNOSTIC` | `EventMsg::Warning`, `HookCompletedEvent`, nero warning formatter/delivery | `core/src/codex.rs`, `tui/src/chatwidget.rs` |
+| Session-auto authority / F1-F5 | Runtime auto parameter changes through authority path | `NERO-EXPOSED` + `NERO-INTERNAL` on native app-server RPC and session protocol surfaces | F1-F5 hotkeys, app-server `thread/sessionAuto/*`, protocol `nero_auto_runtime` | `tui/src/chatwidget.rs`, `tui/src/app.rs`, `app-server/src/codex_message_processor.rs`, `app-server/src/thread_session_auto.rs`, `app-server-protocol/src/protocol/v2.rs` |
+| Pre-turn auto booster | Read session-auto state, resolve auto contract, and inject a pre-turn hook prompt when runtime policy allows it | `NERO-INTERNAL` on shared-seam read + `NATIVE` prompt injection carrier | `read-session-auto`, auto contract resolver, `HookPrompt` injection | `core/src/codex.rs`, `core/src/config/mod.rs` |
 | Dynamic account switching / auth rotation | Recovery from quota/usage-limit through controlled rotate command path | `NERO-EXPOSED` + `NERO-INTERNAL` | `CODEXN_AUTH_ROTATE_CMD*`, `CODEXN_ROTATION_REASON` | `core/src/client.rs` |
 | Model fallback | Controlled model ladder switching on eligible model failures | `NERO-EXPOSED` config + `NERO-INTERNAL` runtime state | `[nero.model_fallback]`, fallback runtime state/methods | `core/src/config/mod.rs`, `core/src/codex.rs`, `core/src/state/session.rs` |
 | Native hook dependency surfaces | Native lifecycle checkpoints and completion summary used by Nero capabilities | `NATIVE` | `HookEventName::{Stop, AfterAgent, AfterCompaction}`, `HookCompletedEvent` | `protocol/src/protocol.rs`, runtime hook dispatch in `core/src/codex.rs` |
-| Runtime/config authority boundary | External control/config ingress and bridge authority layer | `NERO-EXPOSED` + `NERO-INTERNAL` | app-server RPC, protocol session fields, env/config overlays, bridge module | `app-server/src/thread_session_auto.rs`, `core/src/config/mod.rs`, `core/src/codex.rs`, `protocol/src/protocol.rs` |
+| Runtime/config authority boundary | External control/config ingress and narrower shared-seam helper boundary | `NERO-EXPOSED` + `NERO-INTERNAL` | app-server RPC, protocol session fields, env/config overlays, bridge helper module | `app-server/src/thread_session_auto.rs`, `core/src/config/mod.rs`, `core/src/codex.rs`, `protocol/src/protocol.rs` |
 
 ## Detailed Surfaces
 
@@ -35,13 +42,13 @@ Purpose: authoritative, current map of fork-owned `codex-rs` capability surfaces
   - `NeroHookAction::NeroHookMsg`
   - `NeroHookMsgMode`, `NeroHookMsgShow`, `NeroHookMsgContent`, `NeroHookMsgFormat`, `NeroHookMsgStatus`
   - `parse_nero_hook_actions_from_stdout(...)`
-- Exact external inputs:
+- External inputs:
   - Hook action envelope `{"actions":[...]}`
   - Action wire `type: "nero_hook_msg"`
   - Mode values: `"synced"`, `"tui-short"` (`"tui_short"` alias accepted)
   - Format values: `"block"`, `"inline"`
-- Exact external outputs:
-  - Runtime-applied msg action in after-agent processing
+- External outputs:
+  - Runtime-applied msg action in after-agent processing for confirmed main-session delivery lanes
   - User-visible status blocks and/or summary entries through the reporting lane
 - Runtime state ownership:
   - Turn-local delivery counters and status assembly in `core/src/codex.rs`
@@ -54,6 +61,13 @@ Purpose: authoritative, current map of fork-owned `codex-rs` capability surfaces
   - Capability symbols are branded (`Nero*`, `nero_*`)
 - Confirmed residues:
   - none for this surface in current active path
+- Parsing caveats:
+  - parser ignores unknown action types instead of failing the whole envelope
+  - parser can recover a trailing canonical JSON envelope if hook stdout prefixed plaintext log lines
+  - malformed known actions can still fail parse; the channel is stable but not strict “exact bytes” identity
+- Delivery caveats:
+  - subagent sessions suppress the active `msg/auto` lane
+  - `visible_note` remains the only hook action that still emits directly for subagent-visible warning delivery
 
 ### 2) Hook Auto
 
@@ -70,7 +84,7 @@ Purpose: authoritative, current map of fork-owned `codex-rs` capability surfaces
   - STOP hook lifecycle checkpoint
 - Exact external outputs:
   - Auto user reply enqueue decision path
-  - Hook completion metadata consumed by TUI (`protocol.stop_checkpoint_expected`, `protocol.stop_checkpoint_delivered`)
+  - Diagnostic hook completion metadata consumed by TUI (`protocol.stop_checkpoint_expected`, `protocol.stop_checkpoint_delivered`)
 - Runtime state ownership:
   - Session runtime config + turn-local follow-up counters in `core/src/codex.rs`
 - Native dependencies:
@@ -83,6 +97,9 @@ Purpose: authoritative, current map of fork-owned `codex-rs` capability surfaces
   - Branded action and stop-centric meta naming are active
 - Confirmed residues:
   - none in active `msg/auto` action set
+- Delivery caveats:
+  - `auto_user_reply` is ignored for subagent session sources
+  - duplicate `auto_user_reply` actions in the same turn are ignored after the first selected action
 
 ### 3) User-visible warning/reporting lane
 
@@ -96,10 +113,10 @@ Purpose: authoritative, current map of fork-owned `codex-rs` capability surfaces
   - `NeroHookAction::VisibleNote`
 - Exact external inputs:
   - Hook action `type: "visible_note"`
-  - Hook runtime status/meta produced in after-agent path
+  - Hook runtime status/meta produced in after-agent path for the summary/reporting branch
 - Exact external outputs:
-  - `EventMsg::Warning(WarningEvent { message })`
-  - `HookCompletedEvent` entries/meta shown in TUI
+  - direct `EventMsg::Warning(WarningEvent { message })` for `visible_note`
+  - `HookCompletedEvent` entries/meta shown in TUI for the after-agent reporting branch
 - Runtime state ownership:
   - Core owns composition and emission; TUI owns projection/render state
 - Native dependencies:
@@ -111,6 +128,12 @@ Purpose: authoritative, current map of fork-owned `codex-rs` capability surfaces
   - Nero formatter/delivery functions are branded; carriers remain native by design
 - Confirmed residues:
   - none required for active behavior
+- Flow caveat:
+  - `visible_note` does not travel through after-agent status/meta assembly before warning emission
+  - it emits warning + audit directly in the hook action application path
+- Stability caveat:
+  - warning text and hook summary `meta` are diagnostic payload conventions assembled in core
+  - they are not schema-locked RPC/protocol contracts and should not be treated as versioned public API
 
 ### 4) Session-auto authority / F1-F5
 
@@ -120,32 +143,42 @@ Purpose: authoritative, current map of fork-owned `codex-rs` capability surfaces
   - `codex-rs/tui/src/app.rs`
   - `codex-rs/app-server/src/codex_message_processor.rs`
   - `codex-rs/app-server/src/thread_session_auto.rs`
-  - `codex-rs/app-server-protocol/src/protocol/common.rs`
+  - `codex-rs/app-server-protocol/src/protocol/v2.rs`
   - `codex-rs/protocol/src/protocol.rs`
 - Active Rust symbols:
   - `detect_nero_auto_hotkey_action(...)`
   - `AppEvent::ApplyNeroAutoHotkey`
   - `handle_nero_auto_hotkey_event(...)`
   - `NeroThreadSessionAutoContext`
-  - `NeroBridgeReadRequest`, `NeroBridgeApplyRequest`
-- Exact external inputs:
+  - `NeroAutoBridgeReadRequest` (shared-seam read helper used by core booster path)
+- External inputs:
   - F1-F5 key actions
-  - RPC methods: `thread/sessionAuto/read`, `thread/sessionAuto/update`
+  - RPC methods: `thread/sessionAuto/read`, `thread/sessionAuto/inputActivity`, `thread/sessionAuto/update`
   - update request contract:
-    - required: `expectedVersion`
+    - required: `threadId`, `expectedVersion`
     - optional: `expectedSessionSource`
+    - mutable runtime knobs:
+      - nullable merge-patch fields: `enabled`, `autonomyLevel`, `autonomyStepPerRound`, `maxAutoRounds`, `doneStopScope`, `autoRounds`
+      - plain bool field: `resetCounter`
+    - omission keeps the current override, `null` clears the override
+  - input-activity request contract:
+    - `threadId`
+    - `activity`, currently `DraftChanged`
+    - active gate: loaded thread plus confirmed main session
   - read/update response contract carries `authority` and `state`
   - Protocol field: `nero_auto_runtime`
-  - Bridge module: `nero_hook_runtime.session_auto_bridge`
-- Exact external outputs:
-  - `ThreadSessionAutoReadResponse { authority, state }`
-  - `ThreadSessionAutoUpdateResponse { authority, applied, conflict, message, error_code, reason_code, state }`
-  - authority enum/value contract used by both responses: `ThreadSessionAutoAuthorityMode::BridgeProxy`
-  - Updated runtime state in session snapshots/updates
+  - shared-seam bridge read module for core booster path: `nero_hook_runtime.session_auto_bridge`
+- External outputs:
+  - `ThreadSessionAutoReadResponse { thread_id, authority, state }`
+  - `ThreadSessionAutoInputActivityResponse { thread_id, applied, authority, generation_epoch }`
+  - `ThreadSessionAutoUpdateResponse { thread_id, authority, applied, conflict, message, error_code, reason_code, state }`
+  - live read/update path currently returns `ThreadSessionAutoAuthorityMode::AppServerAuthority`
+  - persisted session-auto state for later projection into runtime context on read/update paths
   - User-visible authority feedback in TUI
 - Runtime state ownership:
   - Source of authority: app-server + protocol session state
-  - Runtime application: core session configuration
+  - Runtime application: persisted session-auto state later projected by TUI/core into runtime context
+  - read path may also persist refreshed `main_session_confirmed` into the snapshot before returning
 - Native dependencies:
   - Native app-server RPC transport
   - Native protocol event stream
@@ -157,6 +190,10 @@ Purpose: authoritative, current map of fork-owned `codex-rs` capability surfaces
 - Confirmed residues:
   - One retained compatibility alias inside bridge module resolution: retired module alias `nero_hook_runtime.state_runtime_control` (normalization only; active default remains `nero_hook_runtime.session_auto_bridge`)
   - Validation guard: app-server rejects empty `expectedVersion` on update requests
+- Ownership caveats:
+  - current `thread/sessionAuto/read|inputActivity|update` are handled locally inside app-server
+  - the bridge/apply flow is not the primary active implementation for these RPC methods
+  - shared-seam bridge read remains a narrower helper used by core auto-booster preparation
 
 ### 5) Dynamic account switching / auth rotation
 
@@ -183,6 +220,9 @@ Purpose: authoritative, current map of fork-owned `codex-rs` capability surfaces
   - rotation entrypoint symbols are branded for fork-owned behavior
 - Confirmed residues:
   - none in primary recovery path
+- Policy caveats:
+  - command fallback is one-shot per active recovery budget
+  - a new request budget resets the command-attempt guard
 
 ### 6) Model fallback
 
@@ -215,6 +255,9 @@ Purpose: authoritative, current map of fork-owned `codex-rs` capability surfaces
   - capability and config/runtime symbols are branded
 - Confirmed residues:
   - none required for active fallback behavior
+- Policy caveats:
+  - fallback is disabled for `SessionSource::SubAgent(_)`
+  - this is a deliberate policy boundary, not an accidental omission
 
 ### 7) Native hook dependency surfaces
 
@@ -251,8 +294,8 @@ Purpose: authoritative, current map of fork-owned `codex-rs` capability surfaces
 - Active Rust symbols:
   - Nero config resolver/read functions for fallback and auto runtime
   - bridge resolution/settings helpers in app-server thread session auto lane
-- Exact external inputs:
-  - RPC: `thread/sessionAuto/read`, `thread/sessionAuto/update`
+- External inputs:
+  - RPC: `thread/sessionAuto/read`, `thread/sessionAuto/inputActivity`, `thread/sessionAuto/update`
   - protocol session field: `nero_auto_runtime`
   - env/config ingress:
     - `CODEXN_ROOT` (bridge bootstrap/default cwd resolution)
@@ -260,16 +303,35 @@ Purpose: authoritative, current map of fork-owned `codex-rs` capability surfaces
     - `CODEXN_CONFIG_NERO_MSG_PATH`
     - `CODEXN_CONFIG_NERO_AUTO_PATH`
     - `CODEXN_CONFIG_NERO_DEV_PATH`
-    - bridge/runtime envs in thread-session-auto lane (`NERO_RUNTIME_STATE_CONTROL_*`, compat `NEROBAR_NERO_RUNTIME_*`)
-- Exact external outputs:
+    - `CODEXN_CONFIG_NERO_MERGE_PATHS`
+    - runtime default overrides:
+      - `NERO_HOOK_AUTO_ENABLED`
+      - `NERO_HOOK_AUTO_AUTONOMY_LEVEL`
+      - `NERO_HOOK_AUTO_MAX_ROUNDS`
+      - `NERO_HOOK_AUTO_STEP_PER_ROUND`
+      - effective semantics:
+        - `autonomyLevel` clamps to `1..=10`
+        - `maxAutoRounds` floors at `0`
+        - `autonomyStepPerRound` clamps to `0..=10` and is rounded to 3 decimal places
+        - `effective.enabled=false` when the resolved session is subagent or `main_session_confirmed=false`, regardless of `NERO_HOOK_AUTO_ENABLED`
+        - `enabled=true` can still be rejected on update when runtime-msg delivery is required but the thread has no name
+    - bridge/runtime envs in thread-session-auto lane:
+      - `NERO_RUNTIME_STATE_CONTROL_CWD`
+      - `NERO_RUNTIME_STATE_CONTROL_MODULE`
+      - `NERO_RUNTIME_CONTROL_TIMEOUT_MS`
+      - `NERO_RUNTIME_PYTHON_BIN`
+      - compat aliases `NEROBAR_NERO_RUNTIME_STATE_CONTROL_CWD`, `NEROBAR_NERO_RUNTIME_STATE_CONTROL_MODULE`, `NEROBAR_NERO_RUNTIME_CONTROL_TIMEOUT_MS`, `NEROBAR_NERO_RUNTIME_PYTHON_BIN`
+- External outputs:
   - effective runtime settings applied to session config
-  - normalized bridge command requests (`read-session-auto`, `apply-session-auto`)
+  - app-server authority responses for active `thread/sessionAuto/*`
+  - normalized bridge command requests for the narrower shared seam (`read-session-auto`)
 - Runtime state ownership:
   - core session configuration + app-server authority mediation
 - Native dependencies:
   - session lifecycle and protocol update stream
 - External consumers:
-  - `codex-nero-sdk` bridge module endpoint
+  - app-server and TUI authority clients
+  - optional shared-seam bridge module endpoint for booster/runtime read helpers
   - `nerobar-ui` authority clients
 - Branding status:
   - majority of capability-level surfaces are branded
@@ -296,6 +358,8 @@ Purpose: authoritative, current map of fork-owned `codex-rs` capability surfaces
 
 ### Hook summary/meta contracts used by stop-centric lane
 
+These are diagnostic keys carried in hook summary meta, not typed public RPC schema:
+
 - `protocol.stop_checkpoint_expected`
 - `protocol.stop_checkpoint_delivered`
 - `protocol.contract_satisfied`
@@ -304,11 +368,19 @@ Purpose: authoritative, current map of fork-owned `codex-rs` capability surfaces
 ### App-server RPC contracts
 
 - `thread/sessionAuto/read`
+- `thread/sessionAuto/inputActivity`
 - `thread/sessionAuto/update`
-- authority enum/value contract: `ThreadSessionAutoAuthorityMode::BridgeProxy`
-- read response: `ThreadSessionAutoReadResponse { authority, state }`
-- update request: required `expectedVersion`, optional `expectedSessionSource`
-- update response: `ThreadSessionAutoUpdateResponse { authority, applied, conflict, message, error_code, reason_code, state }`
+- authority enum type on the wire: `ThreadSessionAutoAuthorityMode::{BridgeProxy, AppServerAuthority}`
+- live read/update path currently returns: `AppServerAuthority`
+- read response wire shape: `{ threadId, authority, state }`
+- input-activity response wire shape: `{ threadId, applied, authority, generationEpoch }`
+- update request:
+  - required `threadId`, `expectedVersion`
+  - optional `expectedSessionSource`
+  - nullable merge-patch fields: `enabled`, `autonomyLevel`, `autonomyStepPerRound`, `maxAutoRounds`, `doneStopScope`, `autoRounds`
+  - plain bool field: `resetCounter`
+  - omission keeps current override, `null` clears override
+- update response wire shape: `{ threadId, authority, applied, conflict, message?, errorCode?, reasonCode?, state? }`
 
 ### Protocol session contract
 
@@ -327,8 +399,9 @@ Purpose: authoritative, current map of fork-owned `codex-rs` capability surfaces
 
 ### Bridge command/module contracts
 
-- module: `nero_hook_runtime.session_auto_bridge`
-- commands: `read-session-auto`, `apply-session-auto`
+- configured module name for the shared-seam runtime bridge contract: `nero_hook_runtime.session_auto_bridge`
+- actively used command in current `codex-rs`: `read-session-auto`, which short-circuits to in-process shared-seam logic before any external module invocation
+- historical/compatibility naming may reference apply-style flows, but current active `thread/sessionAuto/*` RPC does not depend on a bridge `apply-session-auto` path
 
 ## Flowcharts
 
@@ -337,17 +410,25 @@ Purpose: authoritative, current map of fork-owned `codex-rs` capability surfaces
 ```mermaid
 %%{ init: { 'theme': 'dark' } }%%
 flowchart TD
-    A[User msg or queued auto msg] --> B[Native hook lifecycle enters STOP]
-    B --> C[Nero command prompt + JSON request in STOP lane]
-    C --> D[Assistant auto-report reply]
-    D --> E{JSON valid and stop contract satisfied?}
-    E -- yes --> F[Queue AutoUserReply]
-    E -- no --> G[No auto enqueue]
-    F --> H[AfterAgent runtime report]
-    G --> H
-    H --> I[Nero warning formatter/delivery]
-    I --> J[Native EventMsg::Warning to TUI]
-    H --> K[Native HookCompleted summary/meta]
+    A[STOP parser classifies output] --> B{continue_processing == false?}
+    B -- yes --> C[Set should_stop and break before AfterAgent]
+    B -- no --> D{blocked with valid continuation reason?}
+    D -- yes --> E[build_hook_prompt_message]
+    E --> F{Prompt built?}
+    F -- no --> G[Fail-closed abort with EventMsg::Error]
+    F -- yes --> H[Persist HookPrompt]
+    H --> I[STOP debug reporting from final HookPrompt]
+    I --> J[STOP checkpoint delivered]
+    D -- no --> K[No HookPrompt injection on this STOP path]
+    J --> L[Turn loop continues immediately]
+    K --> M[Continue to AfterAgent in current pass]
+    L --> N[Later pass reaches AfterAgent]
+    M --> O[AfterAgent consumes pending auto_user_reply]
+    N --> O
+    O --> S[Nero warning formatter and HookCompleted meta]
+    O --> P{STOP delivery contract satisfied?}
+    P -- yes --> Q[Queue follow-up]
+    P -- no --> R[Block follow-up and emit warning]
 ```
 
 ### B) Session-auto Authority / F1-F5
@@ -359,12 +440,15 @@ flowchart TD
     B --> C[AppEvent::ApplyNeroAutoHotkey]
     C --> D[handle_nero_auto_hotkey_event]
     D --> E[RPC thread/sessionAuto/read]
-    E --> F[ReadResponse returns authority and state]
-    F --> G[Build requested runtime update]
-    G --> H[RPC thread/sessionAuto/update]
-    H --> I[UpdateResponse returns authority/applied/conflict/state]
-    I --> J[TUI derives runtime context from returned state]
-    J --> K[Session/protocol surfaces also carry nero_auto_runtime context]
+    E --> F[App-server local read resolves context and state]
+    F --> G[ReadResponse authority=AppServerAuthority]
+    G --> H[Build requested runtime update]
+    H --> I[RPC thread/sessionAuto/update]
+    I --> J{Confirmed main session and CAS valid?}
+    J -- no --> K[Conflict or rejected update]
+    J -- yes --> L[App-server local update and persisted state]
+    L --> M[UpdateResponse authority=AppServerAuthority]
+    M --> N[TUI derives runtime context from returned state]
 ```
 
 ### C) Dynamic Account Switching / Auth Rotation
@@ -377,11 +461,13 @@ flowchart TD
     B -- yes --> D[External auth recovery path]
     D --> E{Recovered?}
     E -- yes --> F[Reload auth and retry]
-    E -- no --> G[try_recover_with_nero_auth_rotate_command]
-    G --> H[Run CODEXN_AUTH_ROTATE_CMD with CODEXN_ROTATION_REASON]
-    H --> I{Rotate success?}
-    I -- yes --> F
-    I -- no --> J[Fail request]
+    E -- no --> G{Permanent external failure?}
+    G -- yes --> H[Return refresh/auth failure]
+    G -- no --> I[try_recover_with_nero_auth_rotate_command]
+    I --> J[Run CODEXN_AUTH_ROTATE_CMD with CODEXN_ROTATION_REASON]
+    J --> K{Rotate success?}
+    K -- yes --> F
+    K -- no --> L[Fail request]
 ```
 
 ### D) Model Fallback
@@ -389,20 +475,22 @@ flowchart TD
 ```mermaid
 %%{ init: { 'theme': 'dark' } }%%
 flowchart TD
-    A[Turn requested with model] --> B[apply_model_fallback_pre_turn]
-    B --> C{Fallback switch needed now?}
-    C -- yes --> D[Use next ladder step]
-    C -- no --> E[Use requested model]
-    D --> F[Run turn]
-    E --> F
-    F --> G{Eligible model failure?}
-    G -- no --> H[Keep current state]
-    G -- yes --> I[try_model_fallback_after_error]
-    I --> J[Set cooldown and choose next step]
-    J --> K{Step available within policy?}
-    K -- yes --> L[Retry on fallback model]
-    K -- no --> M[Return failure]
-    L --> N[mark_model_fallback_success on success]
+    A[Turn requested with model] --> B{Subagent session source?}
+    B -- yes --> C[Fallback disabled]
+    B -- no --> D[apply_model_fallback_pre_turn]
+    D --> E{Fallback switch needed now?}
+    E -- yes --> F[Use next ladder step]
+    E -- no --> G[Use requested model]
+    F --> H[Run turn]
+    G --> H
+    H --> I{Eligible model failure?}
+    I -- no --> J[Keep current state]
+    I -- yes --> K[try_model_fallback_after_error]
+    K --> L[Set cooldown and choose next step]
+    L --> M{Step available within policy?}
+    M -- yes --> N[Retry on fallback model]
+    M -- no --> O[Return failure]
+    N --> P[mark_model_fallback_success on success]
 ```
 
 ## Out-of-Scope Appendix
@@ -410,8 +498,8 @@ flowchart TD
 This atlas maps `codex-rs` only. The systems below are external and included only through boundary contracts:
 
 - `codex-nero-sdk` (`EXTERNAL-CONSUMER`):
-  - consumes/emits hook action contracts
-  - provides bridge module endpoint `nero_hook_runtime.session_auto_bridge`
+  - is a major consumer/producer around hook action contracts in the Nero ecosystem
+  - may provide bridge module endpoint `nero_hook_runtime.session_auto_bridge` for shared-seam reads
 - `nerobar-ui` (`EXTERNAL-CONSUMER`):
   - consumes app-server RPC and protocol surfaces exposed by `codex-rs`
   - does not redefine `codex-rs` internal capability ownership

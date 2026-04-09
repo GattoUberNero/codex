@@ -1041,6 +1041,9 @@ pub(crate) async fn apply_bespoke_event_handling(
                 prompt: Some(begin_event.prompt),
                 model: Some(begin_event.model),
                 reasoning_effort: Some(begin_event.reasoning_effort),
+                context_inheritance_requested: None,
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
                 agents_states: HashMap::new(),
             };
             let notification = ItemStartedNotification {
@@ -1060,28 +1063,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 _ if has_receiver => V2CollabToolCallStatus::Completed,
                 _ => V2CollabToolCallStatus::Failed,
             };
-            let (receiver_thread_ids, agents_states) = match end_event.new_thread_id {
-                Some(id) => {
-                    let receiver_id = id.to_string();
-                    let received_status = V2CollabAgentStatus::from(end_event.status.clone());
-                    (
-                        vec![receiver_id.clone()],
-                        [(receiver_id, received_status)].into_iter().collect(),
-                    )
-                }
-                None => (Vec::new(), HashMap::new()),
-            };
-            let item = ThreadItem::CollabAgentToolCall {
-                id: end_event.call_id,
-                tool: CollabAgentTool::SpawnAgent,
-                status,
-                sender_thread_id: end_event.sender_thread_id.to_string(),
-                receiver_thread_ids,
-                prompt: Some(end_event.prompt),
-                model: Some(end_event.model),
-                reasoning_effort: Some(end_event.reasoning_effort),
-                agents_states,
-            };
+            let item = collab_spawn_end_item(end_event, status);
             let notification = ItemCompletedNotification {
                 thread_id: conversation_id.to_string(),
                 turn_id: event_turn_id.clone(),
@@ -1102,6 +1084,9 @@ pub(crate) async fn apply_bespoke_event_handling(
                 prompt: Some(begin_event.prompt),
                 model: None,
                 reasoning_effort: None,
+                context_inheritance_requested: None,
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
                 agents_states: HashMap::new(),
             };
             let notification = ItemStartedNotification {
@@ -1130,6 +1115,9 @@ pub(crate) async fn apply_bespoke_event_handling(
                 prompt: Some(end_event.prompt),
                 model: None,
                 reasoning_effort: None,
+                context_inheritance_requested: None,
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
                 agents_states: [(receiver_id, received_status)].into_iter().collect(),
             };
             let notification = ItemCompletedNotification {
@@ -1156,6 +1144,9 @@ pub(crate) async fn apply_bespoke_event_handling(
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
+                context_inheritance_requested: None,
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
                 agents_states: HashMap::new(),
             };
             let notification = ItemStartedNotification {
@@ -1194,6 +1185,9 @@ pub(crate) async fn apply_bespoke_event_handling(
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
+                context_inheritance_requested: None,
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
                 agents_states,
             };
             let notification = ItemCompletedNotification {
@@ -1215,6 +1209,9 @@ pub(crate) async fn apply_bespoke_event_handling(
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
+                context_inheritance_requested: None,
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
                 agents_states: HashMap::new(),
             };
             let notification = ItemStartedNotification {
@@ -1257,6 +1254,9 @@ pub(crate) async fn apply_bespoke_event_handling(
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
+                context_inheritance_requested: None,
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
                 agents_states,
             };
             let notification = ItemCompletedNotification {
@@ -2770,7 +2770,41 @@ fn collab_resume_begin_item(
         prompt: None,
         model: None,
         reasoning_effort: None,
+        context_inheritance_requested: None,
+        context_inheritance_effective: None,
+        context_inheritance_telemetry: None,
         agents_states: HashMap::new(),
+    }
+}
+
+fn collab_spawn_end_item(
+    end_event: codex_protocol::protocol::CollabAgentSpawnEndEvent,
+    status: V2CollabToolCallStatus,
+) -> ThreadItem {
+    let (receiver_thread_ids, agents_states) = match end_event.new_thread_id {
+        Some(id) => {
+            let receiver_id = id.to_string();
+            let received_status = V2CollabAgentStatus::from(end_event.status.clone());
+            (
+                vec![receiver_id.clone()],
+                [(receiver_id, received_status)].into_iter().collect(),
+            )
+        }
+        None => (Vec::new(), HashMap::new()),
+    };
+    ThreadItem::CollabAgentToolCall {
+        id: end_event.call_id,
+        tool: CollabAgentTool::SpawnAgent,
+        status,
+        sender_thread_id: end_event.sender_thread_id.to_string(),
+        receiver_thread_ids,
+        prompt: Some(end_event.prompt),
+        model: Some(end_event.model),
+        reasoning_effort: Some(end_event.reasoning_effort),
+        context_inheritance_requested: end_event.context_inheritance_requested,
+        context_inheritance_effective: end_event.context_inheritance_effective,
+        context_inheritance_telemetry: end_event.context_inheritance_telemetry,
+        agents_states,
     }
 }
 
@@ -2796,6 +2830,9 @@ fn collab_resume_end_item(end_event: codex_protocol::protocol::CollabResumeEndEv
         prompt: None,
         model: None,
         reasoning_effort: None,
+        context_inheritance_requested: None,
+        context_inheritance_effective: None,
+        context_inheritance_telemetry: None,
         agents_states,
     }
 }
@@ -2890,12 +2927,17 @@ mod tests {
     use codex_protocol::models::NetworkPermissions as CoreNetworkPermissions;
     use codex_protocol::plan_tool::PlanItemArg;
     use codex_protocol::plan_tool::StepStatus;
+    use codex_protocol::protocol::CollabAgentSpawnEndEvent;
     use codex_protocol::protocol::CollabResumeBeginEvent;
     use codex_protocol::protocol::CollabResumeEndEvent;
     use codex_protocol::protocol::CreditsSnapshot;
     use codex_protocol::protocol::McpInvocation;
     use codex_protocol::protocol::RateLimitSnapshot;
     use codex_protocol::protocol::RateLimitWindow;
+    use codex_protocol::protocol::SpawnContextInheritanceEffectiveMode;
+    use codex_protocol::protocol::SpawnContextInheritanceMode;
+    use codex_protocol::protocol::SpawnContextInheritanceSuppressionReason;
+    use codex_protocol::protocol::SpawnContextInheritanceTelemetry;
     use codex_protocol::protocol::TokenUsage;
     use codex_protocol::protocol::TokenUsageInfo;
     use codex_utils_absolute_path::AbsolutePathBuf;
@@ -3222,6 +3264,9 @@ mod tests {
             prompt: None,
             model: None,
             reasoning_effort: None,
+            context_inheritance_requested: None,
+            context_inheritance_effective: None,
+            context_inheritance_telemetry: None,
             agents_states: HashMap::new(),
         };
         assert_eq!(item, expected);
@@ -3249,9 +3294,72 @@ mod tests {
             prompt: None,
             model: None,
             reasoning_effort: None,
+            context_inheritance_requested: None,
+            context_inheritance_effective: None,
+            context_inheritance_telemetry: None,
             agents_states: [(
                 receiver_id,
                 V2CollabAgentStatus::from(codex_protocol::protocol::AgentStatus::NotFound),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        assert_eq!(item, expected);
+    }
+
+    #[test]
+    fn collab_spawn_end_maps_context_inheritance_fields() {
+        let event = CollabAgentSpawnEndEvent {
+            call_id: "call-3".to_string(),
+            sender_thread_id: ThreadId::new(),
+            new_thread_id: Some(ThreadId::new()),
+            new_agent_nickname: Some("Scout".to_string()),
+            new_agent_role: Some("researcher".to_string()),
+            prompt: "inspect repo".to_string(),
+            model: "gpt-5.4-mini".to_string(),
+            reasoning_effort: codex_protocol::openai_models::ReasoningEffort::Medium,
+            context_inheritance_requested: Some(SpawnContextInheritanceMode::Bounded),
+            context_inheritance_effective: Some(
+                SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
+            ),
+            context_inheritance_telemetry: Some(SpawnContextInheritanceTelemetry {
+                parent_replay_safe_turn_count: Some(12),
+                shipped_replay_safe_turn_count: Some(4),
+                estimated_shipped_tokens: Some(3_210),
+                usable_context_budget_tokens: Some(9_876),
+                suppression_reason: Some(SpawnContextInheritanceSuppressionReason::BudgetExceeded),
+            }),
+            status: codex_protocol::protocol::AgentStatus::PendingInit,
+        };
+
+        let item = collab_spawn_end_item(event.clone(), V2CollabToolCallStatus::Completed);
+        let receiver_id = event
+            .new_thread_id
+            .expect("spawn end test should include receiver thread")
+            .to_string();
+        let expected = ThreadItem::CollabAgentToolCall {
+            id: event.call_id,
+            tool: CollabAgentTool::SpawnAgent,
+            status: V2CollabToolCallStatus::Completed,
+            sender_thread_id: event.sender_thread_id.to_string(),
+            receiver_thread_ids: vec![receiver_id.clone()],
+            prompt: Some("inspect repo".to_string()),
+            model: Some("gpt-5.4-mini".to_string()),
+            reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium),
+            context_inheritance_requested: Some(SpawnContextInheritanceMode::Bounded),
+            context_inheritance_effective: Some(
+                SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
+            ),
+            context_inheritance_telemetry: Some(SpawnContextInheritanceTelemetry {
+                parent_replay_safe_turn_count: Some(12),
+                shipped_replay_safe_turn_count: Some(4),
+                estimated_shipped_tokens: Some(3_210),
+                usable_context_budget_tokens: Some(9_876),
+                suppression_reason: Some(SpawnContextInheritanceSuppressionReason::BudgetExceeded),
+            }),
+            agents_states: [(
+                receiver_id,
+                V2CollabAgentStatus::from(codex_protocol::protocol::AgentStatus::PendingInit),
             )]
             .into_iter()
             .collect(),

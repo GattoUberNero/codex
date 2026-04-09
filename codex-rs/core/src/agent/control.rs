@@ -1,4 +1,9 @@
 use crate::agent::AgentStatus;
+use crate::agent::fork_context::BoundedForkContextSelection;
+use crate::agent::fork_context::SpawnContextInheritanceReport;
+use crate::agent::fork_context::select_bounded_fork_context;
+use crate::agent::fork_context::should_fork_parent_context;
+use crate::agent::fork_context::spawn_call_output_pairing_is_valid;
 use crate::agent::registry::AgentMetadata;
 use crate::agent::registry::AgentRegistry;
 use crate::agent::role::DEFAULT_ROLE_NAME;
@@ -25,6 +30,9 @@ use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SpawnContextInheritanceMode;
+use codex_protocol::protocol::SpawnContextInheritanceSuppressionReason;
+use codex_protocol::protocol::SpawnContextInheritanceTelemetry;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::user_input::UserInput;
@@ -44,6 +52,8 @@ const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SpawnAgentOptions {
     pub(crate) fork_parent_spawn_call_id: Option<String>,
+    pub(crate) fork_context_requested_mode: SpawnContextInheritanceMode,
+    pub(crate) bounded_fork_usable_context_budget_tokens: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -51,6 +61,7 @@ pub(crate) struct LiveAgent {
     pub(crate) thread_id: ThreadId,
     pub(crate) metadata: AgentMetadata,
     pub(crate) status: AgentStatus,
+    pub(crate) fork_context_report: SpawnContextInheritanceReport,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -146,6 +157,13 @@ impl AgentControl {
         session_source: Option<SessionSource>,
         options: SpawnAgentOptions,
     ) -> CodexResult<LiveAgent> {
+        if should_fork_parent_context(options.fork_context_requested_mode)
+            && options.fork_parent_spawn_call_id.is_none()
+        {
+            return Err(CodexErr::Fatal(
+                "spawn_agent fork requested without parent spawn call id".to_string(),
+            ));
+        }
         let state = self.upgrade()?;
         let mut reservation = self.state.reserve_spawn_slot(config.agent_max_threads)?;
         let inherited_shell_snapshot = self
@@ -176,6 +194,7 @@ impl AgentControl {
             other => (other, AgentMetadata::default()),
         };
         let notification_source = session_source.clone();
+        let fork_context_report;
 
         // The same `AgentControl` is sent to spawn the thread.
         let new_thread = match session_source {
@@ -228,19 +247,171 @@ impl AgentControl {
                             output,
                         },
                     ));
-                    let initial_history = InitialHistory::Forked(forked_rollout_items);
-                    state
-                        .fork_thread_with_source(
-                            config,
-                            initial_history,
-                            self.clone(),
-                            session_source,
-                            /*persist_extended_history*/ false,
-                            inherited_shell_snapshot,
-                            inherited_exec_policy,
-                        )
-                        .await?
+                    match options.fork_context_requested_mode {
+                        SpawnContextInheritanceMode::Off => {
+                            fork_context_report = SpawnContextInheritanceReport::off(
+                                options.fork_context_requested_mode,
+                            );
+                            state
+                                .spawn_new_thread_with_source(
+                                    config,
+                                    self.clone(),
+                                    session_source,
+                                    /*persist_extended_history*/ false,
+                                    /*metrics_service_name*/ None,
+                                    inherited_shell_snapshot,
+                                    inherited_exec_policy,
+                                )
+                                .await?
+                        }
+                        SpawnContextInheritanceMode::Exact => {
+                            let parent_replay_safe_turn_count = u32::try_from(
+                                crate::agent::fork_context::replay_safe_turn_boundary_positions_in_rollout(
+                                    &forked_rollout_items,
+                                )
+                                .len(),
+                            )
+                            .unwrap_or(u32::MAX);
+                            let full_tokens = i64::try_from(
+                                codex_utils_output_truncation::approx_token_count(
+                                    &serde_json::to_string(&forked_rollout_items).map_err(|err| {
+                                        CodexErr::Fatal(format!(
+                                            "failed to serialize exact fork rollout payload: {err}"
+                                        ))
+                                    })?,
+                                ),
+                            )
+                            .unwrap_or(i64::MAX);
+                            if spawn_call_output_pairing_is_valid(&forked_rollout_items, call_id) {
+                                fork_context_report =
+                                    SpawnContextInheritanceReport::exact_with_telemetry(
+                                        options.fork_context_requested_mode,
+                                        SpawnContextInheritanceTelemetry {
+                                            parent_replay_safe_turn_count: Some(
+                                                parent_replay_safe_turn_count,
+                                            ),
+                                            shipped_replay_safe_turn_count: Some(
+                                                parent_replay_safe_turn_count,
+                                            ),
+                                            estimated_shipped_tokens: Some(full_tokens),
+                                            usable_context_budget_tokens: None,
+                                            suppression_reason: None,
+                                        },
+                                    );
+                                let initial_history = InitialHistory::Forked(forked_rollout_items);
+                                state
+                                    .fork_thread_with_source(
+                                        config,
+                                        initial_history,
+                                        self.clone(),
+                                        session_source,
+                                        /*persist_extended_history*/ false,
+                                        inherited_shell_snapshot,
+                                        inherited_exec_policy,
+                                    )
+                                    .await?
+                            } else {
+                                fork_context_report =
+                                    SpawnContextInheritanceReport::off_with_telemetry(
+                                        options.fork_context_requested_mode,
+                                        SpawnContextInheritanceTelemetry {
+                                            parent_replay_safe_turn_count: Some(
+                                                parent_replay_safe_turn_count,
+                                            ),
+                                            shipped_replay_safe_turn_count: None,
+                                            estimated_shipped_tokens: None,
+                                            usable_context_budget_tokens: None,
+                                            suppression_reason: Some(
+                                                SpawnContextInheritanceSuppressionReason::InvalidParentSpawnPairing,
+                                            ),
+                                        },
+                                    );
+                                state
+                                    .spawn_new_thread_with_source(
+                                        config,
+                                        self.clone(),
+                                        session_source,
+                                        /*persist_extended_history*/ false,
+                                        /*metrics_service_name*/ None,
+                                        inherited_shell_snapshot,
+                                        inherited_exec_policy,
+                                    )
+                                    .await?
+                            }
+                        }
+                        SpawnContextInheritanceMode::Bounded => {
+                            let parent_replay_safe_turn_count = u32::try_from(
+                                crate::agent::fork_context::replay_safe_turn_boundary_positions_in_rollout(
+                                    &forked_rollout_items,
+                                )
+                                .len(),
+                            )
+                            .unwrap_or(u32::MAX);
+                            let bounded_selection = if let Some(usable_budget_tokens) =
+                                options.bounded_fork_usable_context_budget_tokens
+                            {
+                                select_bounded_fork_context(
+                                    forked_rollout_items,
+                                    call_id,
+                                    usable_budget_tokens,
+                                    options.fork_context_requested_mode,
+                                )
+                                .map_err(|err| {
+                                    CodexErr::Fatal(format!(
+                                        "failed to build bounded fork rollout payload: {err}"
+                                    ))
+                                })?
+                            } else {
+                                BoundedForkContextSelection {
+                                    report: SpawnContextInheritanceReport::bounded_suppressed(
+                                        options.fork_context_requested_mode,
+                                        SpawnContextInheritanceTelemetry {
+                                            parent_replay_safe_turn_count: Some(
+                                                parent_replay_safe_turn_count,
+                                            ),
+                                            shipped_replay_safe_turn_count: None,
+                                            estimated_shipped_tokens: None,
+                                            usable_context_budget_tokens: None,
+                                            suppression_reason: Some(
+                                                SpawnContextInheritanceSuppressionReason::MissingBudgetProxy,
+                                            ),
+                                        },
+                                    ),
+                                    rollout_items: None,
+                                }
+                            };
+                            fork_context_report = bounded_selection.report;
+                            if let Some(forked_rollout_items) = bounded_selection.rollout_items {
+                                let initial_history = InitialHistory::Forked(forked_rollout_items);
+                                state
+                                    .fork_thread_with_source(
+                                        config,
+                                        initial_history,
+                                        self.clone(),
+                                        session_source,
+                                        /*persist_extended_history*/ false,
+                                        inherited_shell_snapshot,
+                                        inherited_exec_policy,
+                                    )
+                                    .await?
+                            } else {
+                                state
+                                    .spawn_new_thread_with_source(
+                                        config,
+                                        self.clone(),
+                                        session_source,
+                                        /*persist_extended_history*/ false,
+                                        /*metrics_service_name*/ None,
+                                        inherited_shell_snapshot,
+                                        inherited_exec_policy,
+                                    )
+                                    .await?
+                            }
+                        }
+                    }
                 } else {
+                    fork_context_report =
+                        SpawnContextInheritanceReport::off(options.fork_context_requested_mode);
                     state
                         .spawn_new_thread_with_source(
                             config,
@@ -254,7 +425,11 @@ impl AgentControl {
                         .await?
                 }
             }
-            None => state.spawn_new_thread(config, self.clone()).await?,
+            None => {
+                fork_context_report =
+                    SpawnContextInheritanceReport::off(options.fork_context_requested_mode);
+                state.spawn_new_thread(config, self.clone()).await?
+            }
         };
         agent_metadata.agent_id = Some(new_thread.thread_id);
         reservation.commit(agent_metadata.clone());
@@ -289,6 +464,7 @@ impl AgentControl {
             thread_id: new_thread.thread_id,
             metadata: agent_metadata,
             status: self.get_status(new_thread.thread_id).await,
+            fork_context_report,
         })
     }
 

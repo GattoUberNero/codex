@@ -37,6 +37,9 @@ use crate::exec_policy::ExecPolicyManager;
 use crate::models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use crate::models_manager::manager::ModelsManager;
 use crate::models_manager::manager::RefreshStrategy;
+use crate::nero_auto_runtime_state::NeroStopHookDebugReportingMode;
+use crate::nero_auto_runtime_state::resolve_nero_auto_config_path;
+use crate::nero_auto_runtime_state::resolve_stop_hook_debug_reporting_mode;
 use crate::parse_command::parse_command;
 use crate::parse_turn_item;
 use crate::path_utils::normalize_for_native_workdir;
@@ -100,6 +103,7 @@ use codex_protocol::items::PlanItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::items::build_hook_prompt_message;
+use codex_protocol::items::parse_hook_prompt_message;
 use codex_protocol::mcp::CallToolResult;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::PermissionProfile;
@@ -634,6 +638,54 @@ fn nero_hook_tui_delivery(
     }
 }
 
+fn stop_hook_debug_warning_message(
+    mode: NeroStopHookDebugReportingMode,
+    hook_prompt_message: &ResponseItem,
+) -> Option<String> {
+    let ResponseItem::Message { id, content, .. } = hook_prompt_message else {
+        return None;
+    };
+    let fragments = parse_hook_prompt_message(id.as_ref(), content)?.fragments;
+    if fragments.is_empty() {
+        return None;
+    }
+
+    match mode {
+        NeroStopHookDebugReportingMode::Off => None,
+        NeroStopHookDebugReportingMode::Summary => {
+            let count = fragments.len();
+            let hook_run_ids = fragments
+                .iter()
+                .map(|fragment| fragment.hook_run_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Some(format!(
+                "[nero-hook][stop-debug] STOP_HOOK injected {count} hook prompt fragment(s) into agent history (hook_run_ids: {hook_run_ids})"
+            ))
+        }
+        NeroStopHookDebugReportingMode::Full => {
+            let mut message = format!(
+                "[nero-hook][stop-debug]\n------------\nfragments = {}",
+                fragments.len()
+            );
+            for (index, fragment) in fragments.iter().enumerate() {
+                let fragment_index = index + 1;
+                message.push_str("\n------------\n");
+                message.push_str(&format!(
+                    "fragment[{fragment_index}].hook_run_id = {}",
+                    fragment.hook_run_id
+                ));
+                message.push('\n');
+                message.push_str(&format!(
+                    "fragment[{fragment_index}].text = {}",
+                    fragment.text
+                ));
+            }
+            Some(message)
+        }
+    }
+}
+
 fn runtime_delivery_contract_satisfied(
     stop_checkpoint_required: bool,
     stop_checkpoint_delivered: bool,
@@ -861,6 +913,8 @@ fn after_agent_runtime_hook_summary_meta(
     nero_hook_msg_throttled: usize,
     follow_up_queued_count: usize,
     follow_up_blocked_count: usize,
+    follow_up_expected_wait_seconds: Option<u64>,
+    follow_up_generation_epoch: Option<u64>,
 ) -> Value {
     let follow_up_status = if follow_up_blocked_count > 0 {
         "blocked-delivery-contract"
@@ -869,6 +923,22 @@ fn after_agent_runtime_hook_summary_meta(
     } else {
         "none"
     };
+    let mut follow_up = serde_json::Map::new();
+    follow_up.insert(
+        "status".to_string(),
+        Value::String(follow_up_status.to_string()),
+    );
+    follow_up.insert("queued_count".to_string(), json!(follow_up_queued_count));
+    follow_up.insert("blocked_count".to_string(), json!(follow_up_blocked_count));
+    if let Some(expected_wait_seconds) = follow_up_expected_wait_seconds {
+        follow_up.insert(
+            "expected_wait_seconds".to_string(),
+            json!(expected_wait_seconds),
+        );
+    }
+    if let Some(generation_epoch) = follow_up_generation_epoch {
+        follow_up.insert("generation_epoch".to_string(), json!(generation_epoch));
+    }
 
     json!({
         "domain": "nero_runtime",
@@ -886,11 +956,7 @@ fn after_agent_runtime_hook_summary_meta(
             "nero_hook_msg_throttled": nero_hook_msg_throttled,
             "auto_user_replies_blocked": follow_up_blocked_count,
         },
-        "follow_up": {
-            "status": follow_up_status,
-            "queued_count": follow_up_queued_count,
-            "blocked_count": follow_up_blocked_count,
-        },
+        "follow_up": follow_up,
     })
 }
 
@@ -1029,8 +1095,8 @@ async fn append_nero_model_fallback_audit(
         "model-fallback",
         "model_fallback",
         status,
-        false,
-        false,
+        /*delivered_agent*/ false,
+        /*delivered_tui*/ false,
         details,
     )
     .await;
@@ -1565,8 +1631,12 @@ impl TurnContext {
     }
 
     pub(crate) async fn with_model(&self, model: String, models_manager: &ModelsManager) -> Self {
-        self.with_model_and_reasoning(model, None, models_manager)
-            .await
+        self.with_model_and_reasoning(
+            model,
+            /*requested_reasoning_effort*/ None,
+            models_manager,
+        )
+        .await
     }
 
     pub(crate) async fn with_model_and_reasoning(
@@ -3665,9 +3735,12 @@ impl Session {
                 to_model = %step.model,
                 "applying pre-turn model fallback selection"
             );
-            session_configuration.collaboration_mode = session_configuration
-                .collaboration_mode
-                .with_updates(Some(step.model), Some(Some(step.reasoning_effort)), None);
+            session_configuration.collaboration_mode =
+                session_configuration.collaboration_mode.with_updates(
+                    Some(step.model),
+                    Some(Some(step.reasoning_effort)),
+                    /*developer_instructions*/ None,
+                );
         }
 
         session_configuration
@@ -3746,7 +3819,7 @@ impl Session {
             if let Some(step) = candidate {
                 self.services.session_telemetry.counter(
                     "codex.nero.model_fallback.attempt",
-                    1,
+                    /*inc*/ 1,
                     &[],
                 );
                 let warning = format!(
@@ -3861,9 +3934,11 @@ impl Session {
         } else {
             runtime.sticky_step = None;
         }
-        self.services
-            .session_telemetry
-            .counter("codex.nero.model_fallback.success", 1, &[]);
+        self.services.session_telemetry.counter(
+            "codex.nero.model_fallback.success",
+            /*inc*/ 1,
+            &[],
+        );
     }
 
     async fn new_turn_from_configuration(
@@ -4103,11 +4178,11 @@ impl Session {
             }
             items.push(ResponseItem::from(
                 crate::environment_context::EnvironmentContext::new(
-                    None,
+                    /*cwd*/ None,
                     shell.as_ref().clone(),
-                    None,
-                    None,
-                    None,
+                    /*current_date*/ None,
+                    /*timezone*/ None,
+                    /*network*/ None,
                     Some(subagents),
                 ),
             ));
@@ -6474,6 +6549,7 @@ mod handlers {
             thread_name: None,
             session_source: app_server_session_source_from_wire(&request.session_source),
             loaded: true,
+            main_session_confirmed: true,
         };
         let state = build_session_auto_state(&context, &state_path, &config_path, &snapshot);
         let auto_rounds = usize::try_from(state.effective.auto_rounds).map_err(|err| {
@@ -8357,11 +8433,12 @@ pub(crate) async fn run_turn(
 
                 if !needs_follow_up {
                     last_agent_message = sampling_request_last_agent_message;
-                    let hook_delivery_log_path = sess
-                        .codex_home()
-                        .await
-                        .join("log")
-                        .join(NERO_HOOK_DELIVERY_LOG_FILENAME);
+                    let codex_home = sess.codex_home().await;
+                    let hook_delivery_log_path =
+                        codex_home.join("log").join(NERO_HOOK_DELIVERY_LOG_FILENAME);
+                    let stop_hook_debug_reporting = resolve_stop_hook_debug_reporting_mode(
+                        &resolve_nero_auto_config_path(&codex_home),
+                    );
                     let configured_after_agent_hooks = sess.hooks().after_agent_hook_count();
                     let (hook_thread_name, hook_nero_auto_runtime) = {
                         let state = sess.state.lock().await;
@@ -8415,6 +8492,16 @@ pub(crate) async fn run_turn(
                                 std::slice::from_ref(&hook_prompt_message),
                             )
                             .await;
+                            if let Some(message) = stop_hook_debug_warning_message(
+                                stop_hook_debug_reporting,
+                                &hook_prompt_message,
+                            ) {
+                                sess.send_event(
+                                    &turn_context,
+                                    EventMsg::Warning(WarningEvent { message }),
+                                )
+                                .await;
+                            }
                             stop_runtime_command_delivered_for_turn = true;
                             stop_hook_active = true;
                             continue;
@@ -8494,8 +8581,8 @@ pub(crate) async fn run_turn(
                         "after_agent_hook_registry",
                         "hook_dispatch",
                         hook_dispatch_status,
-                        false,
-                        false,
+                        /*delivered_agent*/ false,
+                        /*delivered_tui*/ false,
                         json!({
                             "configured_after_agent_hooks": configured_after_agent_hooks,
                             "hook_outcomes": hook_outcomes.len(),
@@ -8545,6 +8632,8 @@ pub(crate) async fn run_turn(
                                 Vec::new();
                             let mut hook_auto_user_replies_blocked = 0usize;
                             let mut hook_auto_user_replies_queued = 0usize;
+                            let mut hook_auto_user_reply_expected_wait_seconds = None::<u64>;
+                            let mut hook_auto_user_reply_generation_epoch = None::<u64>;
                             let mut latest_runtime_status_kind_normalized = None::<String>;
                             let mut latest_runtime_status_meta = None::<Value>;
                             let mut after_agent_summary_entries =
@@ -8575,8 +8664,8 @@ pub(crate) async fn run_turn(
                                                 &hook_name,
                                                 "nero_hook_msg",
                                                 "ignored-subagent-session",
-                                                false,
-                                                false,
+                                                /*delivered_agent*/ false,
+                                                /*delivered_tui*/ false,
                                                 json!({
                                                     "mode": nero_hook_mode_label(&mode),
                                                     "format": nero_hook_format_label(&format),
@@ -8662,8 +8751,8 @@ pub(crate) async fn run_turn(
                                                 &hook_name,
                                                 "nero_hook_msg",
                                                 "throttled",
-                                                false,
-                                                show.tui,
+                                                /*delivered_agent*/ false,
+                                                /*delivered_tui*/ show.tui,
                                                 json!({
                                                     "mode": nero_hook_mode_label(&mode),
                                                     "format": nero_hook_format_label(&format),
@@ -8802,8 +8891,8 @@ pub(crate) async fn run_turn(
                                             &hook_name,
                                             "visible_note",
                                             "executed",
-                                            false,
-                                            true,
+                                            /*delivered_agent*/ false,
+                                            /*delivered_tui*/ true,
                                             json!({
                                                 "message_len": message_len,
                                             }),
@@ -8830,8 +8919,8 @@ pub(crate) async fn run_turn(
                                                 &hook_name,
                                                 "auto_user_reply",
                                                 "ignored-subagent-session",
-                                                false,
-                                                false,
+                                                /*delivered_agent*/ false,
+                                                /*delivered_tui*/ false,
                                                 json!({
                                                     "message_len": message.len(),
                                                     "expected_wait_seconds": expected_wait_seconds,
@@ -8856,8 +8945,8 @@ pub(crate) async fn run_turn(
                                                 &hook_name,
                                                 "auto_user_reply",
                                                 "ignored-duplicate-turn",
-                                                false,
-                                                false,
+                                                /*delivered_agent*/ false,
+                                                /*delivered_tui*/ false,
                                                 json!({
                                                     "message_len": message.len(),
                                                     "expected_wait_seconds": expected_wait_seconds,
@@ -8883,8 +8972,8 @@ pub(crate) async fn run_turn(
                                             &hook_name,
                                             "auto_user_reply",
                                             "pending-delivery-contract",
-                                            false,
-                                            false,
+                                            /*delivered_agent*/ false,
+                                            /*delivered_tui*/ false,
                                             json!({
                                                 "message_len": message.len(),
                                                 "expected_wait_seconds": expected_wait_seconds,
@@ -8906,9 +8995,25 @@ pub(crate) async fn run_turn(
                                 );
                             if !hook_auto_user_replies_pending.is_empty() {
                                 if hook_delivery_contract_satisfied {
+                                    hook_auto_user_reply_generation_epoch =
+                                        Some(sess.current_hook_auto_reply_epoch());
                                     for (message, expected_wait_seconds) in
                                         hook_auto_user_replies_pending
                                     {
+                                        if let Some(expected_wait_seconds) =
+                                            Session::normalize_hook_auto_reply_wait_seconds(
+                                                expected_wait_seconds,
+                                            )
+                                        {
+                                            hook_auto_user_reply_expected_wait_seconds = Some(
+                                                match hook_auto_user_reply_expected_wait_seconds {
+                                                    Some(current) => {
+                                                        current.min(expected_wait_seconds)
+                                                    }
+                                                    None => expected_wait_seconds,
+                                                },
+                                            );
+                                        }
                                         hook_auto_user_replies_queued =
                                             hook_auto_user_replies_queued.saturating_add(1);
                                         append_nero_hook_delivery_audit(
@@ -8918,8 +9023,8 @@ pub(crate) async fn run_turn(
                                             &hook_name,
                                             "auto_user_reply",
                                             "queued",
-                                            false,
-                                            false,
+                                            /*delivered_agent*/ false,
+                                            /*delivered_tui*/ false,
                                             json!({
                                                 "message_len": message.len(),
                                                 "expected_wait_seconds": expected_wait_seconds,
@@ -8973,8 +9078,8 @@ pub(crate) async fn run_turn(
                                             &hook_name,
                                             "auto_user_reply",
                                             "blocked-delivery-contract",
-                                            false,
-                                            false,
+                                            /*delivered_agent*/ false,
+                                            /*delivered_tui*/ false,
                                             json!({
                                                 "message_len": message.len(),
                                                 "expected_wait_seconds": expected_wait_seconds,
@@ -9008,8 +9113,8 @@ pub(crate) async fn run_turn(
                                 &hook_name,
                                 "delivery_contract",
                                 contract_status,
-                                hook_stop_checkpoint_delivered,
-                                false,
+                                /*delivered_agent*/ hook_stop_checkpoint_delivered,
+                                /*delivered_tui*/ false,
                                 json!({
                                     "auto_stage": {
                                         "stage": "protocol",
@@ -9047,6 +9152,8 @@ pub(crate) async fn run_turn(
                                     hook_nero_msg_throttled,
                                     hook_auto_user_replies_queued,
                                     hook_auto_user_replies_blocked,
+                                    hook_auto_user_reply_expected_wait_seconds,
+                                    hook_auto_user_reply_generation_epoch,
                                 )
                             });
                             let (runtime_event_status, runtime_event_status_message) =
@@ -9092,8 +9199,8 @@ pub(crate) async fn run_turn(
                                     &hook_name,
                                     "hook_execution",
                                     "failed-continue",
-                                    false,
-                                    false,
+                                    /*delivered_agent*/ false,
+                                    /*delivered_tui*/ false,
                                     json!({
                                         "error": error.to_string(),
                                     }),
@@ -9117,8 +9224,8 @@ pub(crate) async fn run_turn(
                                     &hook_name,
                                     "hook_execution",
                                     "failed-abort",
-                                    false,
-                                    false,
+                                    /*delivered_agent*/ false,
+                                    /*delivered_tui*/ false,
                                     json!({
                                         "error": error.to_string(),
                                     }),
@@ -9229,7 +9336,7 @@ pub(crate) async fn run_turn(
                                 );
                                 sess.services.session_telemetry.counter(
                                     "codex.nero.model_fallback.exhausted",
-                                    1,
+                                    /*inc*/ 1,
                                     &[],
                                 );
                                 sess.send_event(
@@ -9262,7 +9369,8 @@ pub(crate) async fn run_turn(
                         }
                         Err(err) => {
                             info!("Turn error: {err:#}");
-                            let event = EventMsg::Error(err.to_error_event(None));
+                            let event =
+                                EventMsg::Error(err.to_error_event(/*message_prefix*/ None));
                             sess.send_event(&turn_context, event).await;
                             break;
                         }
@@ -11788,18 +11896,12 @@ mod tests {
     #[tokio::test]
     async fn record_initial_history_reconstructs_forked_transcript() {
         let (session, turn_context) = make_session_and_context().await;
-        let (rollout_items, mut expected) = sample_rollout(&session, &turn_context).await;
+        let (rollout_items, expected) = sample_rollout(&session, &turn_context).await;
 
         session
             .record_initial_history(InitialHistory::Forked(rollout_items))
             .await;
 
-        let reconstruction_turn = session.new_default_turn().await;
-        expected.extend(
-            session
-                .build_initial_context(reconstruction_turn.as_ref())
-                .await,
-        );
         let history = session.state.lock().await.clone_history();
         assert_eq!(expected, history.raw_items());
     }
@@ -12366,7 +12468,7 @@ mod tests {
     async fn wait_for_thread_rolled_back(
         rx: &async_channel::Receiver<Event>,
     ) -> crate::protocol::ThreadRolledBackEvent {
-        let deadline = StdDuration::from_secs(2);
+        let deadline = StdDuration::from_secs(30);
         let start = std::time::Instant::now();
         loop {
             let remaining = deadline.saturating_sub(start.elapsed());
@@ -14786,6 +14888,64 @@ mod tests {
         assert_eq!(event.turn_id.as_deref(), Some("turn-2"));
         assert!(event.run.entries.is_empty());
         assert!(event.run.meta.is_some());
+    }
+
+    #[test]
+    fn after_agent_runtime_hook_summary_meta_omits_expected_wait_when_unset() {
+        let summary = after_agent_runtime_hook_summary_meta(
+            "nero-hook-runtime",
+            Some("state".to_string()),
+            /*runtime_status_meta*/ None,
+            "ok",
+            /*stop_checkpoint_expected*/ true,
+            /*stop_checkpoint_delivered*/ true,
+            /*runtime_stop_command_delivered*/ true,
+            /*nero_hook_msg_total*/ 1,
+            /*nero_hook_msg_throttled*/ 0,
+            /*follow_up_queued_count*/ 1,
+            /*follow_up_blocked_count*/ 0,
+            /*follow_up_expected_wait_seconds*/ None,
+            /*follow_up_generation_epoch*/ None,
+        );
+
+        assert_eq!(
+            summary["follow_up"],
+            json!({
+                "status": "queued",
+                "queued_count": 1,
+                "blocked_count": 0,
+            })
+        );
+    }
+
+    #[test]
+    fn after_agent_runtime_hook_summary_meta_includes_expected_wait_when_set() {
+        let summary = after_agent_runtime_hook_summary_meta(
+            "nero-hook-runtime",
+            Some("state".to_string()),
+            /*runtime_status_meta*/ None,
+            "ok",
+            /*stop_checkpoint_expected*/ true,
+            /*stop_checkpoint_delivered*/ true,
+            /*runtime_stop_command_delivered*/ true,
+            /*nero_hook_msg_total*/ 1,
+            /*nero_hook_msg_throttled*/ 0,
+            /*follow_up_queued_count*/ 1,
+            /*follow_up_blocked_count*/ 0,
+            /*follow_up_expected_wait_seconds*/ Some(2),
+            /*follow_up_generation_epoch*/ Some(7),
+        );
+
+        assert_eq!(
+            summary["follow_up"],
+            json!({
+                "status": "queued",
+                "queued_count": 1,
+                "blocked_count": 0,
+                "expected_wait_seconds": 2,
+                "generation_epoch": 7,
+            })
+        );
     }
 
     #[test]

@@ -3625,30 +3625,17 @@ impl CodexMessageProcessor {
                 None
             }
         };
-        if let Some(thread) = loaded_thread {
-            let config_snapshot = thread.config_snapshot().await;
-            return Ok(NeroThreadSessionAutoContext {
-                thread_id: thread_uuid.to_string(),
-                thread_name,
-                session_source: config_snapshot.session_source.into(),
-                loaded: true,
-            });
-        }
-
-        let thread = if let Some(summary) =
+        let historical_thread = if let Some(summary) =
             read_summary_from_state_db_by_thread_id(&self.config, thread_uuid).await
         {
-            summary_to_thread(summary)
-        } else {
-            let Some(rollout_path) =
-                find_thread_path_by_id_str(&self.config.codex_home, &thread_uuid.to_string())
-                    .await
-                    .map_err(|err| {
-                        format!("failed to locate rollout for thread {thread_uuid}: {err}")
-                    })?
-            else {
-                return Err(format!("thread not found: {thread_uuid}"));
-            };
+            Some(summary_to_thread(summary))
+        } else if let Some(rollout_path) =
+            find_thread_path_by_id_str(&self.config.codex_home, &thread_uuid.to_string())
+                .await
+                .map_err(|err| {
+                    format!("failed to locate rollout for thread {thread_uuid}: {err}")
+                })?
+        {
             let fallback_provider = self.config.model_provider_id.as_str();
             let summary = read_summary_from_rollout(&rollout_path, fallback_provider)
                 .await
@@ -3658,14 +3645,46 @@ impl CodexMessageProcessor {
                         rollout_path.display()
                     )
                 })?;
-            summary_to_thread(summary)
+            Some(summary_to_thread(summary))
+        } else {
+            None
         };
+        if let Some(thread) = loaded_thread {
+            let config_snapshot = thread.config_snapshot().await;
+            let live_session_source: SessionSource = config_snapshot.session_source.into();
+            let historical_session_source = historical_thread
+                .as_ref()
+                .map(|thread| thread.source.clone());
+            let live_is_subagent = matches!(&live_session_source, SessionSource::SubAgent(_));
+            let historical_is_subagent = historical_session_source
+                .as_ref()
+                .is_some_and(|source| matches!(source, SessionSource::SubAgent(_)));
+            let main_session_confirmed = !live_is_subagent
+                && !historical_is_subagent
+                && !matches!(&live_session_source, SessionSource::Unknown)
+                && historical_session_source
+                    .as_ref()
+                    .is_none_or(|source| *source == live_session_source);
+            return Ok(NeroThreadSessionAutoContext {
+                thread_id: thread_uuid.to_string(),
+                thread_name,
+                session_source: live_session_source,
+                loaded: true,
+                main_session_confirmed,
+            });
+        }
+        let Some(thread) = historical_thread else {
+            return Err(format!("thread not found: {thread_uuid}"));
+        };
+        let main_session_confirmed = !matches!(&thread.source, SessionSource::SubAgent(_))
+            && !matches!(&thread.source, SessionSource::Unknown);
 
         Ok(NeroThreadSessionAutoContext {
             thread_id: thread_uuid.to_string(),
             thread_name,
             session_source: thread.source,
             loaded: false,
+            main_session_confirmed,
         })
     }
 
@@ -3733,10 +3752,13 @@ impl CodexMessageProcessor {
                 return;
             }
         };
-        if matches!(context.session_source, SessionSource::SubAgent(_)) {
+        if matches!(context.session_source, SessionSource::SubAgent(_))
+            || !context.main_session_confirmed
+        {
             self.send_invalid_request_error(
                 request_id,
-                "session-auto updates are unsupported for subagent sessions".to_string(),
+                "session-auto updates are unsupported unless the session is a confirmed main session."
+                    .to_string(),
             )
             .await;
             return;
@@ -3793,10 +3815,13 @@ impl CodexMessageProcessor {
                 return;
             }
         };
-        if matches!(context.session_source, SessionSource::SubAgent(_)) {
+        if matches!(context.session_source, SessionSource::SubAgent(_))
+            || !context.main_session_confirmed
+        {
             self.send_invalid_request_error(
                 request_id,
-                "session-auto inputActivity is unsupported for subagent sessions".to_string(),
+                "session-auto inputActivity is unsupported unless the session is a confirmed main session."
+                    .to_string(),
             )
             .await;
             return;

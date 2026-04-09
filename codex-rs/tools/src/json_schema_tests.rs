@@ -8,7 +8,13 @@ use std::collections::BTreeMap;
 fn parse_tool_input_schema_coerces_boolean_schemas() {
     let schema = parse_tool_input_schema(&serde_json::json!(true)).expect("parse schema");
 
-    assert_eq!(schema, JsonSchema::String { description: None });
+    assert_eq!(
+        schema,
+        JsonSchema::String {
+            enum_values: None,
+            description: None
+        }
+    );
 }
 
 #[test]
@@ -26,6 +32,7 @@ fn parse_tool_input_schema_infers_object_shape_and_defaults_properties() {
             properties: BTreeMap::from([(
                 "query".to_string(),
                 JsonSchema::String {
+                    enum_values: None,
                     description: Some("search query".to_string()),
                 },
             )]),
@@ -54,7 +61,10 @@ fn parse_tool_input_schema_normalizes_integer_and_missing_array_items() {
                 (
                     "tags".to_string(),
                     JsonSchema::Array {
-                        items: Box::new(JsonSchema::String { description: None }),
+                        items: Box::new(JsonSchema::String {
+                            enum_values: None,
+                            description: None
+                        }),
                         description: None,
                     },
                 ),
@@ -87,12 +97,69 @@ fn parse_tool_input_schema_sanitizes_additional_properties_schema() {
                 JsonSchema::Object {
                     properties: BTreeMap::from([(
                         "value".to_string(),
-                        JsonSchema::String { description: None },
+                        JsonSchema::String {
+                            enum_values: None,
+                            description: None
+                        },
                     )]),
                     required: Some(vec!["value".to_string()]),
                     additional_properties: None,
                 },
             ))),
+        }
+    );
+}
+
+#[test]
+fn parse_tool_input_schema_preserves_string_enum_values() {
+    let schema = parse_tool_input_schema(&serde_json::json!({
+        "type": "string",
+        "enum": ["off", "exact", "bounded"]
+    }))
+    .expect("parse schema");
+
+    assert_eq!(
+        schema,
+        JsonSchema::String {
+            description: None,
+            enum_values: Some(vec![
+                "off".to_string(),
+                "exact".to_string(),
+                "bounded".to_string(),
+            ]),
+        }
+    );
+}
+
+#[test]
+fn parse_tool_input_schema_drops_non_string_enum_when_type_is_inferred() {
+    let schema = parse_tool_input_schema(&serde_json::json!({
+        "enum": [1, 2, 3]
+    }))
+    .expect("parse schema");
+
+    assert_eq!(
+        schema,
+        JsonSchema::String {
+            description: None,
+            enum_values: None,
+        }
+    );
+}
+
+#[test]
+fn parse_tool_input_schema_drops_non_string_enum_for_explicit_string_type() {
+    let schema = parse_tool_input_schema(&serde_json::json!({
+        "type": "string",
+        "enum": ["off", 7, null]
+    }))
+    .expect("parse schema");
+
+    assert_eq!(
+        schema,
+        JsonSchema::String {
+            description: None,
+            enum_values: None,
         }
     );
 }

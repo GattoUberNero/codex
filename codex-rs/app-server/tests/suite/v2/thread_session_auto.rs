@@ -803,12 +803,7 @@ async fn thread_session_auto_update_rejects_subagent_threads() -> Result<()> {
     )
     .await??;
     assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
-    assert!(
-        error
-            .error
-            .message
-            .contains("unsupported for subagent sessions")
-    );
+    assert!(error.error.message.contains("confirmed main session"));
     Ok(())
 }
 

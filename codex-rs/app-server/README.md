@@ -138,9 +138,9 @@ Example with notification opt-out:
 - `thread/list` — page through stored rollouts; supports cursor-based pagination and optional `modelProviders`, `sourceKinds`, `archived`, `cwd`, and `searchTerm` filters. Each returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded.
 - `thread/loaded/list` — list the thread ids currently loaded in memory.
 - `thread/read` — read a stored thread by id without resuming it; optionally include turns via `includeTurns`. The returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded.
-- `thread/sessionAuto/read` — read the bridge-backed runtime `session-auto` state for a thread through app-server v2, including CAS `version`, effective/default/applied values, and the current authority mode.
-- `thread/sessionAuto/inputActivity` — notify a loaded thread that the user changed composer draft input so runtime-owned delayed nero-auto follow-ups can cancel before the next submitted turn.
-- `thread/sessionAuto/update` — update the bridge-backed runtime `session-auto` state for a thread via app-server v2 using `expectedVersion` compare-and-swap semantics; returns the refreshed state on success and the current state on conflicts when available.
+- `thread/sessionAuto/read` — read the current runtime `session-auto` state for a thread through app-server v2, including CAS `version`, effective/default/applied values, and the current authority mode returned by the local app-server authority lane.
+- `thread/sessionAuto/inputActivity` — notify a loaded, confirmed main-session thread that the user changed composer draft input so runtime-owned delayed nero-auto follow-ups can cancel before the next submitted turn.
+- `thread/sessionAuto/update` — update the runtime `session-auto` state for a thread via app-server v2 using `expectedVersion` compare-and-swap semantics; returns the refreshed state on success and the current state on conflicts when available.
 - `thread/metadata/update` — patch stored thread metadata in sqlite; currently supports updating persisted `gitInfo` fields and returns the refreshed `thread`.
 - `thread/status/changed` — notification emitted when a loaded thread’s status changes (`threadId` + new `status`).
 - `thread/archive` — move a thread’s rollout file into the archived directory; returns `{}` on success and emits `thread/archived`.
@@ -396,13 +396,13 @@ Use `thread/metadata/update` to patch sqlite-backed metadata for a thread withou
 
 ### Example: Read and update thread session-auto runtime state
 
-Use `thread/sessionAuto/read` to fetch the current bridge-backed runtime control state for a thread without talking to Nero-specific side channels directly. The response carries a compare-and-swap `version` plus the current authority mode so clients know which writer path owns the state.
+Use `thread/sessionAuto/read` to fetch the current runtime control state for a thread through the local app-server authority lane without talking to Nero-specific side channels directly. The response carries a compare-and-swap `version` plus the current authority mode so clients know which writer path owns the state.
 
 ```json
 { "method": "thread/sessionAuto/read", "id": 26, "params": { "threadId": "thr_123" } }
 { "id": 26, "result": {
     "threadId": "thr_123",
-    "authority": "bridgeProxy",
+    "authority": "appServerAuthority",
     "state": {
         "version": "sha256:...",
         "loaded": true,
@@ -416,7 +416,7 @@ Use `thread/sessionAuto/read` to fetch the current bridge-backed runtime control
 } }
 ```
 
-Use `thread/sessionAuto/update` with the last observed `expectedVersion` to preserve single-writer CAS semantics while clients migrate to the native app-server channel.
+Use `thread/sessionAuto/update` with the last observed `expectedVersion` to preserve single-writer CAS semantics through the native app-server control lane.
 
 ```json
 { "method": "thread/sessionAuto/update", "id": 27, "params": {
@@ -426,13 +426,13 @@ Use `thread/sessionAuto/update` with the last observed `expectedVersion` to pres
     "autonomyLevel": 8,
     "autonomyStepPerRound": 0.75,
     "maxAutoRounds": 12,
-    "doneStopScope": "task",
+    "doneStopScope": "active_phase",
     "autoRounds": 3,
     "resetCounter": true
 } }
 { "id": 27, "result": {
     "threadId": "thr_123",
-    "authority": "bridgeProxy",
+    "authority": "appServerAuthority",
     "applied": true,
     "conflict": false,
     "message": null,
@@ -441,7 +441,7 @@ Use `thread/sessionAuto/update` with the last observed `expectedVersion` to pres
         "effective": {
             "runtime": { "enabled": true, "autonomyLevel": 8, "maxAutoRounds": 12 },
             "autonomyStepPerRound": 0.75,
-            "doneStopScope": "task",
+            "doneStopScope": "active_phase",
             "source": "session-override",
             "autoRounds": 3
         }
@@ -449,7 +449,7 @@ Use `thread/sessionAuto/update` with the last observed `expectedVersion` to pres
 } }
 ```
 
-Use `thread/sessionAuto/inputActivity` when the user changes draft input in the composer. This call requires a loaded thread and returns the new hook-auto generation epoch so delayed auto-follow-ups from older generations are canceled before the next submitted turn.
+Use `thread/sessionAuto/inputActivity` when the user changes draft input in the composer. This call requires a loaded thread that is also a confirmed main session, and it returns the new hook-auto generation epoch so delayed auto-follow-ups from older generations are canceled before the next submitted turn.
 
 ```json
 { "method": "thread/sessionAuto/inputActivity", "id": 28, "params": {
@@ -464,9 +464,9 @@ Use `thread/sessionAuto/inputActivity` when the user changes draft input in the 
 } }
 ```
 
-The v2 `thread/sessionAuto/update` surface is bridge-proxied in this migration phase, so it preserves the existing compare-and-swap writer semantics while removing direct client coupling to the Python runtime bridge. Updates are rejected for subagent sessions because this cut intentionally keeps a single writable authority boundary for main-session runtime control.
+The v2 `thread/sessionAuto/update` surface is handled locally inside app-server and returns `appServerAuthority` in the active fork path. Updates are rejected for subagent sessions and for sessions that are not confirmed main sessions because this cut intentionally keeps a single writable authority boundary for main-session runtime control.
 
-When a bridge-backed update is rejected without applying, the response can also carry `errorCode` and `reasonCode` so control-plane clients can preserve deterministic HTTP/status mapping without parsing free-form messages.
+When an update is rejected without applying, the response can also carry `errorCode` and `reasonCode` so control-plane clients can preserve deterministic HTTP/status mapping without parsing free-form messages. The narrower bridge/shared-seam read path still exists for the core pre-turn auto booster, but it is not the primary implementation of the public `thread/sessionAuto/*` RPC methods.
 
 ### Example: Archive a thread
 

@@ -801,7 +801,10 @@ async fn remote_pre_turn_compaction_usage_limit_recovers_via_auth_rotate_command
         vec![
             sse(vec![
                 responses::ev_assistant_message("initial-assistant", "initial turn complete"),
-                responses::ev_completed_with_tokens("initial-response", 500_000),
+                responses::ev_completed_with_tokens(
+                    "initial-response",
+                    /*total_tokens*/ 500_000,
+                ),
             ]),
             sse(vec![
                 responses::ev_assistant_message(
@@ -911,7 +914,10 @@ async fn remote_pre_turn_compaction_quota_recovers_via_auth_rotate_command() -> 
         vec![
             sse(vec![
                 responses::ev_assistant_message("initial-assistant", "initial turn complete"),
-                responses::ev_completed_with_tokens("initial-response", 500_000),
+                responses::ev_completed_with_tokens(
+                    "initial-response",
+                    /*total_tokens*/ 500_000,
+                ),
             ]),
             sse(vec![
                 responses::ev_assistant_message(
@@ -1019,7 +1025,7 @@ async fn remote_pre_turn_compaction_rotation_command_failure_stops_turn() -> Res
         harness.server(),
         vec![sse(vec![
             responses::ev_assistant_message("initial-assistant", "initial turn complete"),
-            responses::ev_completed_with_tokens("initial-response", 500_000),
+            responses::ev_completed_with_tokens("initial-response", /*total_tokens*/ 500_000),
         ])],
     )
     .await;

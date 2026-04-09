@@ -480,7 +480,12 @@ mod tests {
             Some(true),
             Some(vec!["reviewer"]),
         );
-        let unguarded = skill_with_policy("/tmp/unguarded/SKILL.md", None, Some(false), None);
+        let unguarded = skill_with_policy(
+            "/tmp/unguarded/SKILL.md",
+            /*agent_filter_mode*/ None,
+            Some(false),
+            /*allowed_agent_types*/ None,
+        );
         let outcome = SkillLoadOutcome {
             skills: vec![allowed.clone(), blocked, unguarded.clone()],
             errors: Vec::new(),
@@ -507,13 +512,13 @@ mod tests {
         let blocked = skill_with_policy(
             "/tmp/blocked/SKILL.md",
             Some(SkillAgentFilterMode::Blacklist),
-            None,
+            /*allow_agent_whitelist*/ None,
             Some(vec!["architect"]),
         );
         let allowed = skill_with_policy(
             "/tmp/allowed/SKILL.md",
             Some(SkillAgentFilterMode::Blacklist),
-            None,
+            /*allow_agent_whitelist*/ None,
             Some(vec!["explorer"]),
         );
         let outcome = SkillLoadOutcome {
@@ -536,7 +541,12 @@ mod tests {
 
     #[test]
     fn filter_for_agent_identity_uses_default_mode_for_unguarded_skills() {
-        let unguarded = skill_with_policy("/tmp/unguarded/SKILL.md", None, None, None);
+        let unguarded = skill_with_policy(
+            "/tmp/unguarded/SKILL.md",
+            /*agent_filter_mode*/ None,
+            /*allow_agent_whitelist*/ None,
+            /*allowed_agent_types*/ None,
+        );
         let outcome = SkillLoadOutcome {
             skills: vec![unguarded],
             errors: Vec::new(),
@@ -584,13 +594,13 @@ mod tests {
         let allow_all = skill_with_policy(
             "/tmp/allow-all/SKILL.md",
             Some(SkillAgentFilterMode::AllowAll),
-            None,
+            /*allow_agent_whitelist*/ None,
             Some(vec!["reviewer"]),
         );
         let deny_all = skill_with_policy(
             "/tmp/deny-all/SKILL.md",
             Some(SkillAgentFilterMode::DenyAll),
-            None,
+            /*allow_agent_whitelist*/ None,
             Some(vec!["architect"]),
         );
         let outcome = SkillLoadOutcome {

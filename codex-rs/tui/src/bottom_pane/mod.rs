@@ -587,6 +587,22 @@ impl BottomPane {
         self.composer.pending_pastes()
     }
 
+    pub(crate) fn composer_pending_paste_count(&self) -> usize {
+        self.composer.pending_paste_count()
+    }
+
+    pub(crate) fn composer_local_image_count(&self) -> usize {
+        self.composer.local_image_count()
+    }
+
+    pub(crate) fn composer_remote_image_url_count(&self) -> usize {
+        self.composer.remote_image_url_count()
+    }
+
+    pub(crate) fn composer_mention_binding_count(&self) -> usize {
+        self.composer.mention_binding_count()
+    }
+
     pub(crate) fn apply_external_edit(&mut self, text: String) {
         self.composer.apply_external_edit(text);
         self.request_redraw();

@@ -200,7 +200,10 @@ fn find_tool<'a>(tools: &'a [ConfiguredToolSpec], expected_name: &str) -> &'a Co
 fn strip_descriptions_schema(schema: &mut JsonSchema) {
     match schema {
         JsonSchema::Boolean { description }
-        | JsonSchema::String { description }
+        | JsonSchema::String {
+            description,
+            enum_values: _,
+        }
         | JsonSchema::Number { description } => {
             *description = None;
         }
@@ -487,13 +490,21 @@ fn test_build_specs_multi_agent_v2_uses_task_names_and_hides_resume() {
         panic!("spawn_agent should use object params");
     };
     assert!(properties.contains_key("task_name"));
+    assert!(properties.contains_key("context_inheritance"));
     assert_eq!(required.as_ref(), Some(&vec!["task_name".to_string()]));
     let output_schema = output_schema
         .as_ref()
         .expect("spawn_agent should define output schema");
     assert_eq!(
         output_schema["required"],
-        json!(["agent_id", "task_name", "nickname"])
+        json!([
+            "agent_id",
+            "task_name",
+            "nickname",
+            "context_inheritance_requested",
+            "context_inheritance_effective",
+            "context_inheritance_telemetry"
+        ])
     );
 
     let send_message = find_tool(&tools, "send_message");
@@ -695,6 +706,7 @@ fn view_image_tool_includes_detail_with_original_detail_feature() {
     };
     assert!(properties.contains_key("detail"));
     let Some(JsonSchema::String {
+        enum_values: None,
         description: Some(description),
     }) = properties.get("detail")
     else {
@@ -1759,7 +1771,10 @@ fn test_build_specs_mcp_tools_converted() {
                 properties: BTreeMap::from([
                     (
                         "string_argument".to_string(),
-                        JsonSchema::String { description: None }
+                        JsonSchema::String {
+                            enum_values: None,
+                            description: None
+                        }
                     ),
                     (
                         "number_argument".to_string(),
@@ -1771,7 +1786,10 @@ fn test_build_specs_mcp_tools_converted() {
                             properties: BTreeMap::from([
                                 (
                                     "string_property".to_string(),
-                                    JsonSchema::String { description: None }
+                                    JsonSchema::String {
+                                        enum_values: None,
+                                        description: None
+                                    }
                                 ),
                                 (
                                     "number_property".to_string(),
@@ -2478,6 +2496,7 @@ fn test_mcp_tool_property_missing_type_defaults_to_string() {
                 properties: BTreeMap::from([(
                     "query".to_string(),
                     JsonSchema::String {
+                        enum_values: None,
                         description: Some("search query".to_string())
                     }
                 )]),
@@ -2593,7 +2612,10 @@ fn test_mcp_tool_array_without_items_gets_default_string_items() {
                 properties: BTreeMap::from([(
                     "tags".to_string(),
                     JsonSchema::Array {
-                        items: Box::new(JsonSchema::String { description: None }),
+                        items: Box::new(JsonSchema::String {
+                            enum_values: None,
+                            description: None
+                        }),
                         description: None
                     }
                 )]),
@@ -2653,7 +2675,10 @@ fn test_mcp_tool_anyof_defaults_to_string() {
             parameters: JsonSchema::Object {
                 properties: BTreeMap::from([(
                     "value".to_string(),
-                    JsonSchema::String { description: None }
+                    JsonSchema::String {
+                        enum_values: None,
+                        description: None
+                    }
                 )]),
                 required: None,
                 additional_properties: None,
@@ -2728,7 +2753,10 @@ fn test_get_openai_tools_mcp_tools_with_additional_properties_schema() {
                 properties: BTreeMap::from([
                     (
                         "string_argument".to_string(),
-                        JsonSchema::String { description: None }
+                        JsonSchema::String {
+                            enum_values: None,
+                            description: None
+                        }
                     ),
                     (
                         "number_argument".to_string(),
@@ -2740,7 +2768,10 @@ fn test_get_openai_tools_mcp_tools_with_additional_properties_schema() {
                             properties: BTreeMap::from([
                                 (
                                     "string_property".to_string(),
-                                    JsonSchema::String { description: None }
+                                    JsonSchema::String {
+                                        enum_values: None,
+                                        description: None
+                                    }
                                 ),
                                 (
                                     "number_property".to_string(),
@@ -2755,7 +2786,10 @@ fn test_get_openai_tools_mcp_tools_with_additional_properties_schema() {
                                 JsonSchema::Object {
                                     properties: BTreeMap::from([(
                                         "addtl_prop".to_string(),
-                                        JsonSchema::String { description: None }
+                                        JsonSchema::String {
+                                            enum_values: None,
+                                            description: None
+                                        }
                                     ),]),
                                     required: Some(vec!["addtl_prop".to_string(),]),
                                     additional_properties: Some(false.into()),

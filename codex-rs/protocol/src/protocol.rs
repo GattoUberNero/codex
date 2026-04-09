@@ -3415,6 +3415,47 @@ pub enum TurnAbortReason {
     ReviewEnded,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SpawnContextInheritanceMode {
+    #[default]
+    Off,
+    Exact,
+    Bounded,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SpawnContextInheritanceEffectiveMode {
+    Off,
+    Exact,
+    BoundedFull,
+    BoundedTrimmed,
+    BoundedSuppressed,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SpawnContextInheritanceSuppressionReason {
+    InvalidParentSpawnPairing,
+    MissingBudgetProxy,
+    BudgetExceeded,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct SpawnContextInheritanceTelemetry {
+    /// Replay-safe parent turn count observed before trimming.
+    pub parent_replay_safe_turn_count: Option<u32>,
+    /// Replay-safe turn count shipped into the child fork payload.
+    pub shipped_replay_safe_turn_count: Option<u32>,
+    /// Approximate token count of the shipped candidate payload.
+    pub estimated_shipped_tokens: Option<i64>,
+    /// Practical child startup budget proxy used during bounded evaluation.
+    pub usable_context_budget_tokens: Option<i64>,
+    /// Explicit reason when requested inheritance was suppressed or downgraded.
+    pub suppression_reason: Option<SpawnContextInheritanceSuppressionReason>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
 pub struct CollabAgentSpawnBeginEvent {
     /// Identifier for the collab tool call.
@@ -3475,6 +3516,15 @@ pub struct CollabAgentSpawnEndEvent {
     pub model: String,
     /// Effective reasoning effort used by the spawned agent after inheritance and role overrides.
     pub reasoning_effort: ReasoningEffortConfig,
+    /// Requested parent-context inheritance mode for the spawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_inheritance_requested: Option<SpawnContextInheritanceMode>,
+    /// Effective parent-context inheritance mode after runtime budgeting and validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_inheritance_effective: Option<SpawnContextInheritanceEffectiveMode>,
+    /// Runtime budgeting telemetry for the effective inheritance decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_inheritance_telemetry: Option<SpawnContextInheritanceTelemetry>,
     /// Last known status of the new agent reported to the sender agent.
     pub status: AgentStatus,
 }

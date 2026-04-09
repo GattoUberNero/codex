@@ -42,6 +42,7 @@ pub fn create_wait_tool() -> ToolSpec {
         (
             "cell_id".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some("Identifier of the running exec cell.".to_string()),
             },
         ),

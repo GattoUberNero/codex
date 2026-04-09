@@ -863,7 +863,8 @@ pub(crate) fn trim_rollout(
             .get_ref()
             .sync_all()
             .with_context(|| format!("failed to sync {}", backup_rollout.display()))?;
-        let manifest = create_backup_manifest(&location.path, &analysis, None)?;
+        let manifest =
+            create_backup_manifest(&location.path, &analysis, /*trimmed_stats*/ None)?;
         write_backup_manifest(&manifest_path, &manifest)?;
         fs::rename(&staging_root, &backup_root).with_context(|| {
             format!(

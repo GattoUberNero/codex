@@ -1,11 +1,16 @@
 use super::*;
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::control::render_input_preview;
+use crate::agent::fork_context::SpawnContextInheritanceReport;
+use crate::agent::fork_context::should_fork_parent_context;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::apply_role_to_config;
 
 use crate::agent::exceeds_thread_spawn_depth_limit;
 use crate::agent::next_thread_spawn_depth;
+use codex_protocol::protocol::SpawnContextInheritanceEffectiveMode;
+use codex_protocol::protocol::SpawnContextInheritanceMode;
+use codex_protocol::protocol::SpawnContextInheritanceTelemetry;
 
 pub(crate) struct Handler;
 
@@ -31,6 +36,8 @@ impl ToolHandler for Handler {
         } = invocation;
         let arguments = function_arguments(payload)?;
         let args: SpawnAgentArgs = parse_arguments(&arguments)?;
+        let requested_context_inheritance =
+            resolve_spawn_context_inheritance_mode(args.fork_context, args.context_inheritance)?;
         let role_name = args
             .agent_type
             .as_deref()
@@ -74,6 +81,12 @@ impl ToolHandler for Handler {
             .map_err(FunctionCallError::RespondToModel)?;
         apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
         apply_spawn_agent_overrides(&mut config, child_depth);
+        let bounded_fork_usable_context_budget_tokens =
+            if requested_context_inheritance == SpawnContextInheritanceMode::Bounded {
+                resolve_spawn_bounded_fork_budget_proxy_tokens(&session, &config).await
+            } else {
+                None
+            };
 
         let result = session
             .services
@@ -89,18 +102,29 @@ impl ToolHandler for Handler {
                     /*task_name*/ None,
                 )?),
                 SpawnAgentOptions {
-                    fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
+                    fork_parent_spawn_call_id: should_fork_parent_context(
+                        requested_context_inheritance,
+                    )
+                    .then(|| call_id.clone()),
+                    fork_context_requested_mode: requested_context_inheritance,
+                    bounded_fork_usable_context_budget_tokens,
                 },
             )
             .await
             .map_err(collab_spawn_error);
-        let (new_thread_id, new_agent_metadata, status) = match &result {
+        let (new_thread_id, new_agent_metadata, status, fork_context_report) = match &result {
             Ok(spawned_agent) => (
                 Some(spawned_agent.thread_id),
                 Some(spawned_agent.metadata.clone()),
                 spawned_agent.status.clone(),
+                spawned_agent.fork_context_report.clone(),
             ),
-            Err(_) => (None, None, AgentStatus::NotFound),
+            Err(_) => (
+                None,
+                None,
+                AgentStatus::NotFound,
+                SpawnContextInheritanceReport::off(requested_context_inheritance),
+            ),
         };
         let agent_snapshot = match new_thread_id {
             Some(thread_id) => {
@@ -147,6 +171,9 @@ impl ToolHandler for Handler {
                     prompt,
                     model: effective_model,
                     reasoning_effort: effective_reasoning_effort,
+                    context_inheritance_requested: Some(fork_context_report.requested_mode),
+                    context_inheritance_effective: Some(fork_context_report.effective_mode),
+                    context_inheritance_telemetry: fork_context_report.telemetry.clone(),
                     status,
                 }
                 .into(),
@@ -163,6 +190,9 @@ impl ToolHandler for Handler {
         Ok(SpawnAgentResult {
             agent_id: new_thread_id.to_string(),
             nickname,
+            context_inheritance_requested: fork_context_report.requested_mode,
+            context_inheritance_effective: fork_context_report.effective_mode,
+            context_inheritance_telemetry: fork_context_report.telemetry,
         })
     }
 }
@@ -175,13 +205,17 @@ struct SpawnAgentArgs {
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
     #[serde(default)]
-    fork_context: bool,
+    fork_context: Option<bool>,
+    context_inheritance: Option<SpawnContextInheritanceMode>,
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct SpawnAgentResult {
     agent_id: String,
     nickname: Option<String>,
+    context_inheritance_requested: SpawnContextInheritanceMode,
+    context_inheritance_effective: SpawnContextInheritanceEffectiveMode,
+    context_inheritance_telemetry: Option<SpawnContextInheritanceTelemetry>,
 }
 
 impl ToolOutput for SpawnAgentResult {

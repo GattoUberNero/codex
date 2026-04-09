@@ -617,6 +617,9 @@ impl ThreadHistoryBuilder {
             prompt: Some(payload.prompt.clone()),
             model: Some(payload.model.clone()),
             reasoning_effort: Some(payload.reasoning_effort),
+            context_inheritance_requested: None,
+            context_inheritance_effective: None,
+            context_inheritance_telemetry: None,
             agents_states: HashMap::new(),
         };
         self.upsert_item_in_current_turn(item);
@@ -652,6 +655,9 @@ impl ThreadHistoryBuilder {
             prompt: Some(payload.prompt.clone()),
             model: Some(payload.model.clone()),
             reasoning_effort: Some(payload.reasoning_effort),
+            context_inheritance_requested: payload.context_inheritance_requested,
+            context_inheritance_effective: payload.context_inheritance_effective,
+            context_inheritance_telemetry: payload.context_inheritance_telemetry.clone(),
             agents_states,
         });
     }
@@ -669,6 +675,9 @@ impl ThreadHistoryBuilder {
             prompt: Some(payload.prompt.clone()),
             model: None,
             reasoning_effort: None,
+            context_inheritance_requested: None,
+            context_inheritance_effective: None,
+            context_inheritance_telemetry: None,
             agents_states: HashMap::new(),
         };
         self.upsert_item_in_current_turn(item);
@@ -693,6 +702,9 @@ impl ThreadHistoryBuilder {
             prompt: Some(payload.prompt.clone()),
             model: None,
             reasoning_effort: None,
+            context_inheritance_requested: None,
+            context_inheritance_effective: None,
+            context_inheritance_telemetry: None,
             agents_states: [(receiver_id, received_status)].into_iter().collect(),
         });
     }
@@ -714,6 +726,9 @@ impl ThreadHistoryBuilder {
             prompt: None,
             model: None,
             reasoning_effort: None,
+            context_inheritance_requested: None,
+            context_inheritance_effective: None,
+            context_inheritance_telemetry: None,
             agents_states: HashMap::new(),
         };
         self.upsert_item_in_current_turn(item);
@@ -749,6 +764,9 @@ impl ThreadHistoryBuilder {
             prompt: None,
             model: None,
             reasoning_effort: None,
+            context_inheritance_requested: None,
+            context_inheritance_effective: None,
+            context_inheritance_telemetry: None,
             agents_states,
         });
     }
@@ -766,6 +784,9 @@ impl ThreadHistoryBuilder {
             prompt: None,
             model: None,
             reasoning_effort: None,
+            context_inheritance_requested: None,
+            context_inheritance_effective: None,
+            context_inheritance_telemetry: None,
             agents_states: HashMap::new(),
         };
         self.upsert_item_in_current_turn(item);
@@ -792,6 +813,9 @@ impl ThreadHistoryBuilder {
             prompt: None,
             model: None,
             reasoning_effort: None,
+            context_inheritance_requested: None,
+            context_inheritance_effective: None,
+            context_inheritance_telemetry: None,
             agents_states,
         });
     }
@@ -809,6 +833,9 @@ impl ThreadHistoryBuilder {
             prompt: None,
             model: None,
             reasoning_effort: None,
+            context_inheritance_requested: None,
+            context_inheritance_effective: None,
+            context_inheritance_telemetry: None,
             agents_states: HashMap::new(),
         };
         self.upsert_item_in_current_turn(item);
@@ -838,6 +865,9 @@ impl ThreadHistoryBuilder {
             prompt: None,
             model: None,
             reasoning_effort: None,
+            context_inheritance_requested: None,
+            context_inheritance_effective: None,
+            context_inheritance_telemetry: None,
             agents_states,
         });
     }
@@ -2508,6 +2538,9 @@ mod tests {
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
+                context_inheritance_requested: None,
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
                 agents_states: [(
                     "00000000-0000-0000-0000-000000000002".into(),
                     CollabAgentState {
@@ -2543,6 +2576,21 @@ mod tests {
                 prompt: "inspect the repo".into(),
                 model: "gpt-5.4-mini".into(),
                 reasoning_effort: codex_protocol::openai_models::ReasoningEffort::Medium,
+                context_inheritance_requested: Some(
+                    codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
+                ),
+                context_inheritance_effective: Some(
+                    codex_protocol::protocol::SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
+                ),
+                context_inheritance_telemetry: Some(
+                    codex_protocol::protocol::SpawnContextInheritanceTelemetry {
+                        parent_replay_safe_turn_count: Some(5),
+                        shipped_replay_safe_turn_count: Some(2),
+                        estimated_shipped_tokens: Some(12_345),
+                        usable_context_budget_tokens: Some(18_000),
+                        suppression_reason: None,
+                    },
+                ),
                 status: AgentStatus::Running,
             }),
         ];
@@ -2565,6 +2613,21 @@ mod tests {
                 prompt: Some("inspect the repo".into()),
                 model: Some("gpt-5.4-mini".into()),
                 reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium),
+                context_inheritance_requested: Some(
+                    codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
+                ),
+                context_inheritance_effective: Some(
+                    codex_protocol::protocol::SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
+                ),
+                context_inheritance_telemetry: Some(
+                    codex_protocol::protocol::SpawnContextInheritanceTelemetry {
+                        parent_replay_safe_turn_count: Some(5),
+                        shipped_replay_safe_turn_count: Some(2),
+                        estimated_shipped_tokens: Some(12_345),
+                        usable_context_budget_tokens: Some(18_000),
+                        suppression_reason: None,
+                    },
+                ),
                 agents_states: [(
                     "00000000-0000-0000-0000-000000000002".into(),
                     CollabAgentState {
@@ -2633,6 +2696,9 @@ mod tests {
                 prompt: Some("new task".into()),
                 model: None,
                 reasoning_effort: None,
+                context_inheritance_requested: None,
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
                 agents_states: [(
                     receiver.to_string(),
                     CollabAgentState {

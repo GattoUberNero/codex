@@ -29,6 +29,7 @@ fn parse_dynamic_tool_sanitizes_input_schema() {
                 properties: BTreeMap::from([(
                     "id".to_string(),
                     JsonSchema::String {
+                        enum_values: None,
                         description: Some("Ticket identifier".to_string()),
                     },
                 )]),

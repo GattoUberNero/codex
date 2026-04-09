@@ -23,7 +23,8 @@ fn augment_tool_spec_for_code_mode_augments_function_tools() {
             parameters: JsonSchema::Object {
                 properties: BTreeMap::from([(
                     "order_id".to_string(),
-                    JsonSchema::String { description: None },
+                    JsonSchema::String {
+                enum_values: None, description: None },
                 )]),
                 required: Some(vec!["order_id".to_string()]),
                 additional_properties: Some(AdditionalProperties::Boolean(false)),
@@ -44,7 +45,8 @@ fn augment_tool_spec_for_code_mode_augments_function_tools() {
             parameters: JsonSchema::Object {
                 properties: BTreeMap::from([(
                     "order_id".to_string(),
-                    JsonSchema::String { description: None },
+                    JsonSchema::String {
+                enum_values: None, description: None },
                 )]),
                 required: Some(vec!["order_id".to_string()]),
                 additional_properties: Some(AdditionalProperties::Boolean(false)),
@@ -142,6 +144,7 @@ fn create_wait_tool_matches_expected_spec() {
                     (
                         "cell_id".to_string(),
                         JsonSchema::String {
+                enum_values: None,
                             description: Some("Identifier of the running exec cell.".to_string()),
                         },
                     ),

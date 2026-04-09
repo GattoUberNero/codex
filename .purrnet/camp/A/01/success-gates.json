@@ -1,0 +1,50 @@
+{
+  "schema": "purrnet/success-gates.v1",
+  "campaignId": "A",
+  "phaseId": "01",
+  "items": [
+    {
+      "id": "g1",
+      "status": "active",
+      "text": "Map the delayed auto continuation countdown data path and confirm the minimal TUI surface that can render it explicitly.",
+      "reason": "",
+      "proof": "",
+      "tags": [
+        "who:architect-orchestration",
+        "delegate:worker",
+        "parallel:max-1",
+        "what:analysis"
+      ],
+      "history": []
+    },
+    {
+      "id": "g2",
+      "status": "todo",
+      "text": "Implement a visible countdown in the TUI for delayed auto continuation, with clear user-facing wording and no hidden-only state.",
+      "reason": "",
+      "proof": "",
+      "tags": [
+        "who:architect-orchestration",
+        "delegate:worker",
+        "parallel:max-1",
+        "what:implementation"
+      ],
+      "history": []
+    },
+    {
+      "id": "g3",
+      "status": "todo",
+      "text": "Add snapshot and behavioral tests covering the countdown display and verify existing auto cancel behavior still works.",
+      "reason": "",
+      "proof": "",
+      "tags": [
+        "who:architect-orchestration",
+        "delegate:reviewer",
+        "parallel:max-1",
+        "what:review"
+      ],
+      "history": []
+    }
+  ],
+  "updatedAt": "2026-04-07T09:21:15.993Z"
+}

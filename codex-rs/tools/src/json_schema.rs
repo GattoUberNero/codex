@@ -15,6 +15,8 @@ pub enum JsonSchema {
     String {
         #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
+        #[serde(rename = "enum", skip_serializing_if = "Option::is_none")]
+        enum_values: Option<Vec<String>>,
     },
     /// MCP schema allows "number" | "integer" for Number.
     #[serde(alias = "integer")]
@@ -65,6 +67,13 @@ pub fn parse_tool_input_schema(input_schema: &JsonValue) -> Result<JsonSchema, s
     let mut input_schema = input_schema.clone();
     sanitize_json_schema(&mut input_schema);
     serde_json::from_value::<JsonSchema>(input_schema)
+}
+
+fn enum_values_are_all_strings(value: &JsonValue) -> bool {
+    let JsonValue::Array(values) = value else {
+        return false;
+    };
+    values.iter().all(JsonValue::is_string)
 }
 
 /// Sanitize a JSON Schema (as serde_json::Value) so it can fit our limited
@@ -131,7 +140,7 @@ fn sanitize_json_schema(value: &mut JsonValue) {
                     schema_type = Some("object".to_string());
                 } else if map.contains_key("items") || map.contains_key("prefixItems") {
                     schema_type = Some("array".to_string());
-                } else if map.contains_key("enum")
+                } else if map.get("enum").is_some_and(enum_values_are_all_strings)
                     || map.contains_key("const")
                     || map.contains_key("format")
                 {
@@ -148,6 +157,13 @@ fn sanitize_json_schema(value: &mut JsonValue) {
 
             let schema_type = schema_type.unwrap_or_else(|| "string".to_string());
             map.insert("type".to_string(), JsonValue::String(schema_type.clone()));
+
+            if map
+                .get("enum")
+                .is_some_and(|enum_values| !enum_values_are_all_strings(enum_values))
+            {
+                map.remove("enum");
+            }
 
             if schema_type == "object" {
                 if !map.contains_key("properties") {

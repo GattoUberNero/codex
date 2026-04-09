@@ -56,16 +56,60 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     assert!(description.contains("visible display (`visible-model`)"));
     assert!(!description.contains("hidden display (`hidden-model`)"));
     assert!(properties.contains_key("task_name"));
+    assert!(properties.contains_key("context_inheritance"));
     assert_eq!(
         properties.get("agent_type"),
         Some(&JsonSchema::String {
+            enum_values: None,
             description: Some("role help".to_string()),
         })
     );
     assert_eq!(required, Some(vec!["task_name".to_string()]));
     assert_eq!(
-        output_schema.expect("spawn_agent output schema")["required"],
-        json!(["agent_id", "task_name", "nickname"])
+        properties.get("context_inheritance"),
+        Some(&JsonSchema::String {
+            description: Some(
+                "Optional explicit inheritance mode. Use `off` for no parent history, `exact` to preserve full fork semantics, or `bounded` to request replay-safe budgeted inheritance. If both context_inheritance and fork_context are provided, they must agree."
+                    .to_string(),
+            ),
+            enum_values: Some(vec![
+                "off".to_string(),
+                "exact".to_string(),
+                "bounded".to_string(),
+            ]),
+        })
+    );
+    let output_schema = output_schema.expect("spawn_agent output schema");
+    assert_eq!(
+        output_schema["required"],
+        json!([
+            "agent_id",
+            "task_name",
+            "nickname",
+            "context_inheritance_requested",
+            "context_inheritance_effective",
+            "context_inheritance_telemetry"
+        ])
+    );
+    assert_eq!(
+        output_schema["properties"]["context_inheritance_effective"]["enum"],
+        json!([
+            "off",
+            "exact",
+            "bounded_full",
+            "bounded_trimmed",
+            "bounded_suppressed"
+        ])
+    );
+    assert_eq!(
+        output_schema["properties"]["context_inheritance_telemetry"]["properties"]["suppression_reason"]
+            ["enum"],
+        json!([
+            null,
+            "invalid_parent_spawn_pairing",
+            "missing_budget_proxy",
+            "budget_exceeded"
+        ])
     );
 }
 

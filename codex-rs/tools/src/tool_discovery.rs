@@ -125,6 +125,7 @@ pub fn create_tool_search_tool(app_tools: &[ToolSearchAppInfo], default_limit: u
         (
             "query".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some("Search query for apps tools.".to_string()),
             },
         ),
@@ -188,6 +189,7 @@ pub fn create_tool_suggest_tool(discoverable_tools: &[ToolSuggestEntry]) -> Tool
         (
             "tool_type".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "Type of discoverable tool to suggest. Use \"connector\" or \"plugin\"."
                         .to_string(),
@@ -197,6 +199,7 @@ pub fn create_tool_suggest_tool(discoverable_tools: &[ToolSuggestEntry]) -> Tool
         (
             "action_type".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "Suggested action for the tool. Use \"install\" or \"enable\".".to_string(),
                 ),
@@ -205,6 +208,7 @@ pub fn create_tool_suggest_tool(discoverable_tools: &[ToolSuggestEntry]) -> Tool
         (
             "tool_id".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(format!(
                     "Connector or plugin id to suggest. Must be one of: {discoverable_tool_ids}."
                 )),
@@ -213,6 +217,7 @@ pub fn create_tool_suggest_tool(discoverable_tools: &[ToolSuggestEntry]) -> Tool
         (
             "suggest_reason".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "Concise one-line user-facing reason why this tool can help with the current request."
                         .to_string(),

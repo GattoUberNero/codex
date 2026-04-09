@@ -19,6 +19,7 @@ use codex_protocol::protocol::CollabAgentRef;
 use codex_protocol::protocol::CollabAgentStatusEntry;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SpawnContextInheritanceMode;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::user_input::UserInput;
 use serde::Serialize;
@@ -191,6 +192,57 @@ pub(crate) fn parse_collab_input(
             Ok(items.into())
         }
     }
+}
+
+pub(crate) fn resolve_spawn_context_inheritance_mode(
+    fork_context: Option<bool>,
+    context_inheritance: Option<SpawnContextInheritanceMode>,
+) -> Result<SpawnContextInheritanceMode, FunctionCallError> {
+    let fork_context_mode = fork_context.map(|fork_context| {
+        if fork_context {
+            SpawnContextInheritanceMode::Exact
+        } else {
+            SpawnContextInheritanceMode::Off
+        }
+    });
+
+    if let Some(context_inheritance) = context_inheritance {
+        if let Some(fork_context_mode) = fork_context_mode
+            && context_inheritance != fork_context_mode
+        {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "conflicting spawn context inheritance arguments: fork_context={fork_context} conflicts with context_inheritance={context_inheritance:?}. Provide one setting or make both match.",
+                fork_context = fork_context_mode == SpawnContextInheritanceMode::Exact
+            )));
+        }
+        return Ok(context_inheritance);
+    }
+
+    Ok(fork_context_mode.unwrap_or(SpawnContextInheritanceMode::Off))
+}
+
+pub(crate) async fn resolve_spawn_bounded_fork_budget_proxy_tokens(
+    session: &Session,
+    config: &Config,
+) -> Option<i64> {
+    let model = session
+        .services
+        .models_manager
+        .get_default_model(&config.model, RefreshStrategy::Offline)
+        .await;
+    if model.is_empty() {
+        return None;
+    }
+    let auto_compact_token_limit = session
+        .services
+        .models_manager
+        .get_model_info(&model, config)
+        .await
+        .auto_compact_token_limit()?;
+    let usable_budget_tokens = auto_compact_token_limit
+        .saturating_sub(config.agent_bounded_fork_startup_reserve_tokens)
+        .max(0);
+    Some(usable_budget_tokens)
 }
 
 /// Builds the base config snapshot for a newly spawned sub-agent.

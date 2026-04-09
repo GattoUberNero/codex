@@ -27,6 +27,7 @@ fn list_dir_tool_matches_expected_spec() {
                     (
                         "dir_path".to_string(),
                         JsonSchema::String {
+                enum_values: None,
                             description: Some(
                                 "Absolute path to the directory to list.".to_string(),
                             ),
@@ -77,6 +78,7 @@ fn test_sync_tool_matches_expected_spec() {
                                 (
                                     "id".to_string(),
                                     JsonSchema::String {
+                enum_values: None,
                                         description: Some(
                                             "Identifier shared by concurrent calls that should rendezvous"
                                                 .to_string(),

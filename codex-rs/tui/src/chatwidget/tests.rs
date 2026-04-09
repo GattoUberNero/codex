@@ -2228,6 +2228,9 @@ async fn make_chatwidget_manual(
         nero_auto_runtime: codex_protocol::protocol::NeroAutoRuntimeConfig::default(),
         is_subagent_session: false,
         nero_auto_hotkey_inflight: false,
+        auto_follow_up_countdown: None,
+        snapshot_replay_latest_turn_id: None,
+        snapshot_replay_session_auto_generation_epoch: None,
         last_non_retry_error: None,
     };
     widget.set_model(&resolved_model);
@@ -2415,6 +2418,21 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
             prompt: "Explore the repo".to_string(),
             model: "gpt-5".to_string(),
             reasoning_effort: ReasoningEffortConfig::High,
+            context_inheritance_requested: Some(
+                codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
+            ),
+            context_inheritance_effective: Some(
+                codex_protocol::protocol::SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
+            ),
+            context_inheritance_telemetry: Some(
+                codex_protocol::protocol::SpawnContextInheritanceTelemetry {
+                    parent_replay_safe_turn_count: Some(6),
+                    shipped_replay_safe_turn_count: Some(2),
+                    estimated_shipped_tokens: Some(18_500),
+                    usable_context_budget_tokens: Some(24_000),
+                    suppression_reason: None,
+                },
+            ),
             status: AgentStatus::PendingInit,
         }),
     });
@@ -4957,6 +4975,9 @@ async fn live_app_server_collab_wait_items_render_history() {
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
+                context_inheritance_requested: None,
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
                 agents_states: HashMap::new(),
             },
         }),
@@ -4979,6 +5000,9 @@ async fn live_app_server_collab_wait_items_render_history() {
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
+                context_inheritance_requested: None,
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
                 agents_states: HashMap::from([
                     (
                         receiver_thread_id.to_string(),
@@ -5029,6 +5053,9 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                 prompt: Some("Explore the repo".to_string()),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
+                context_inheritance_requested: None,
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
                 agents_states: HashMap::new(),
             },
         }),
@@ -5048,6 +5075,21 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                 prompt: Some("Explore the repo".to_string()),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
+                context_inheritance_requested: Some(
+                    codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
+                ),
+                context_inheritance_effective: Some(
+                    codex_protocol::protocol::SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
+                ),
+                context_inheritance_telemetry: Some(
+                    codex_protocol::protocol::SpawnContextInheritanceTelemetry {
+                        parent_replay_safe_turn_count: Some(6),
+                        shipped_replay_safe_turn_count: Some(2),
+                        estimated_shipped_tokens: Some(18_500),
+                        usable_context_budget_tokens: Some(24_000),
+                        suppression_reason: None,
+                    },
+                ),
                 agents_states: HashMap::from([(
                     spawned_thread_id.to_string(),
                     AppServerCollabAgentState {
@@ -5141,7 +5183,7 @@ async fn replayed_retryable_app_server_error_keeps_turn_running() {
                 error: None,
             },
         }),
-        Some(ReplayKind::ThreadSnapshot),
+        Some(ReplayKind::ThreadSnapshotEvents),
     );
     drain_insert_history(&mut rx);
 
@@ -5156,7 +5198,7 @@ async fn replayed_retryable_app_server_error_keeps_turn_running() {
             thread_id: "thread-1".to_string(),
             turn_id: "turn-1".to_string(),
         }),
-        Some(ReplayKind::ThreadSnapshot),
+        Some(ReplayKind::ThreadSnapshotEvents),
     );
 
     assert!(drain_insert_history(&mut rx).is_empty());
@@ -5304,7 +5346,7 @@ async fn replayed_thread_closed_notification_does_not_exit_tui() {
         ServerNotification::ThreadClosed(ThreadClosedNotification {
             thread_id: "thread-1".to_string(),
         }),
-        Some(ReplayKind::ThreadSnapshot),
+        Some(ReplayKind::ThreadSnapshotEvents),
     );
 
     assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
@@ -5344,7 +5386,7 @@ async fn replayed_reasoning_item_hides_raw_reasoning_when_disabled() {
             content: vec!["Raw reasoning".to_string()],
         },
         "turn-1".to_string(),
-        ReplayKind::ThreadSnapshot,
+        ReplayKind::ThreadSnapshotTurns,
     );
 
     let rendered = match rx.try_recv() {
@@ -5391,7 +5433,7 @@ async fn replayed_reasoning_item_shows_raw_reasoning_when_enabled() {
             content: vec!["Raw reasoning".to_string()],
         },
         "turn-1".to_string(),
-        ReplayKind::ThreadSnapshot,
+        ReplayKind::ThreadSnapshotTurns,
     );
 
     let rendered = match rx.try_recv() {
@@ -13352,6 +13394,33 @@ async fn status_line_fast_mode_footer_snapshot() {
 }
 
 #[tokio::test]
+async fn status_line_auto_follow_up_countdown_footer_snapshot() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.show_welcome_banner = false;
+    chat.config.tui_status_line = Some(vec![]);
+    chat.arm_auto_follow_up_countdown(15, 1);
+
+    assert_eq!(
+        status_line_text(&chat),
+        Some("Nero auto countdown: next auto reply in 15s (typing cancels)".to_string())
+    );
+
+    let width = 80;
+    let height = chat.desired_height(width);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("create terminal");
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("draw countdown footer");
+    assert_snapshot!(
+        "status_line_auto_follow_up_countdown_footer",
+        normalized_backend_snapshot(terminal.backend())
+    );
+}
+
+#[tokio::test]
 async fn status_line_model_with_reasoning_includes_fast_for_gpt54_only() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     chat.config.cwd = test_project_path().abs();
@@ -13940,6 +14009,7 @@ fn hook_runtime_meta_lines_use_warning_and_error_labels() {
             "status": "queued",
             "queued_count": 1,
             "blocked_count": 0,
+            "expected_wait_seconds": 15,
         },
     });
     let error_meta = serde_json::json!({
@@ -13963,6 +14033,7 @@ fn hook_runtime_meta_lines_use_warning_and_error_labels() {
             "status": "queued",
             "queued_count": 1,
             "blocked_count": 0,
+            "expected_wait_seconds": 15,
         },
     });
 
@@ -13971,6 +14042,7 @@ fn hook_runtime_meta_lines_use_warning_and_error_labels() {
         vec![
             "  hook-warning protocol: ok (expected=true, delivered=true)".to_string(),
             "  hook-warning follow-up: queued (queued=1, blocked=0)".to_string(),
+            "  hook-warning countdown: next auto reply in 15s (typing cancels)".to_string(),
             "  hook-warning decision: continue (reason=score_above_threshold, campaign=D (active))"
                 .to_string(),
         ]
@@ -13980,6 +14052,7 @@ fn hook_runtime_meta_lines_use_warning_and_error_labels() {
         vec![
             "  hook-error protocol: ok (expected=true, delivered=true)".to_string(),
             "  hook-error follow-up: queued (queued=1, blocked=0)".to_string(),
+            "  hook-error countdown: next auto reply in 15s (typing cancels)".to_string(),
             "  hook-error decision: continue (reason=score_above_threshold, campaign=D (active))"
                 .to_string(),
         ]
@@ -14092,6 +14165,150 @@ async fn after_agent_app_server_hook_notifications_runtime_warning_error_use_run
     assert_eq!(
         combined,
         "AfterAgent hook (completed)\n  hook-warning instruction: runtime warning\n  hook-warning instruction: runtime error\n"
+    );
+}
+
+#[tokio::test]
+async fn after_agent_replay_hook_completed_does_not_arm_live_countdown() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.handle_server_notification(
+        ServerNotification::HookCompleted(AppServerHookCompletedNotification {
+            thread_id: ThreadId::new().to_string(),
+            turn_id: Some("turn-runtime-replay".to_string()),
+            run: AppServerHookRunSummary {
+                id: "after-agent:nero-hook-runtime:turn-runtime-replay".to_string(),
+                event_name: AppServerHookEventName::AfterAgent,
+                handler_type: AppServerHookHandlerType::Agent,
+                execution_mode: AppServerHookExecutionMode::Sync,
+                scope: AppServerHookScope::Turn,
+                source_path: PathBuf::from("legacy://after_agent/nero-hook-runtime"),
+                display_order: 0,
+                status: AppServerHookRunStatus::Completed,
+                status_message: None,
+                started_at: 1,
+                completed_at: Some(1),
+                duration_ms: Some(0),
+                meta: Some(serde_json::json!({
+                    "domain": "nero_runtime",
+                    "status": {
+                        "kind_normalized": "auto",
+                    },
+                    "follow_up": {
+                        "status": "queued",
+                        "queued_count": 1,
+                        "blocked_count": 0,
+                        "expected_wait_seconds": 15,
+                    },
+                })),
+                entries: Vec::new(),
+            },
+        }),
+        Some(ReplayKind::ThreadSnapshotTurns),
+    );
+
+    assert!(
+        !status_line_text(&chat)
+            .map(|line| line.contains("Nero auto countdown:"))
+            .unwrap_or(false)
+    );
+}
+
+#[tokio::test]
+async fn after_agent_replay_hook_completed_without_generation_epoch_does_not_arm_countdown() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.begin_thread_snapshot_replay(Some("turn-runtime-replay".to_string()), Some(4));
+
+    chat.handle_server_notification(
+        ServerNotification::HookCompleted(AppServerHookCompletedNotification {
+            thread_id: ThreadId::new().to_string(),
+            turn_id: Some("turn-runtime-replay".to_string()),
+            run: AppServerHookRunSummary {
+                id: "after-agent:nero-hook-runtime:turn-runtime-replay".to_string(),
+                event_name: AppServerHookEventName::AfterAgent,
+                handler_type: AppServerHookHandlerType::Agent,
+                execution_mode: AppServerHookExecutionMode::Sync,
+                scope: AppServerHookScope::Turn,
+                source_path: PathBuf::from("legacy://after_agent/nero-hook-runtime"),
+                display_order: 0,
+                status: AppServerHookRunStatus::Completed,
+                status_message: None,
+                started_at: 1,
+                completed_at: Some(1),
+                duration_ms: Some(0),
+                meta: Some(serde_json::json!({
+                    "domain": "nero_runtime",
+                    "status": {
+                        "kind_normalized": "auto",
+                    },
+                    "follow_up": {
+                        "status": "queued",
+                        "queued_count": 1,
+                        "blocked_count": 0,
+                        "expected_wait_seconds": 15,
+                    },
+                })),
+                entries: Vec::new(),
+            },
+        }),
+        Some(ReplayKind::ThreadSnapshotEvents),
+    );
+
+    assert!(
+        !status_line_text(&chat)
+            .map(|line| line.contains("Nero auto countdown:"))
+            .unwrap_or(false)
+    );
+}
+
+#[tokio::test]
+async fn after_agent_non_queued_runtime_event_does_not_clear_existing_countdown() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.arm_auto_follow_up_countdown(15, 1);
+    assert!(
+        status_line_text(&chat)
+            .map(|line| line.contains("Nero auto countdown:"))
+            .unwrap_or(false)
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::HookCompleted(AppServerHookCompletedNotification {
+            thread_id: ThreadId::new().to_string(),
+            turn_id: Some("turn-runtime-non-queued".to_string()),
+            run: AppServerHookRunSummary {
+                id: "after-agent:nero-hook-runtime:turn-runtime-non-queued".to_string(),
+                event_name: AppServerHookEventName::AfterAgent,
+                handler_type: AppServerHookHandlerType::Agent,
+                execution_mode: AppServerHookExecutionMode::Sync,
+                scope: AppServerHookScope::Turn,
+                source_path: PathBuf::from("legacy://after_agent/nero-hook-runtime"),
+                display_order: 0,
+                status: AppServerHookRunStatus::Completed,
+                status_message: None,
+                started_at: 1,
+                completed_at: Some(1),
+                duration_ms: Some(0),
+                meta: Some(serde_json::json!({
+                    "domain": "nero_runtime",
+                    "status": {
+                        "kind_normalized": "auto",
+                    },
+                    "follow_up": {
+                        "status": "none",
+                        "queued_count": 0,
+                        "blocked_count": 0,
+                    },
+                })),
+                entries: Vec::new(),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    assert!(
+        status_line_text(&chat)
+            .map(|line| line.contains("Nero auto countdown:"))
+            .unwrap_or(false)
     );
 }
 

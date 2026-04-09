@@ -143,7 +143,10 @@ fn create_tools_json_for_responses_api_includes_top_level_name() {
             parameters: JsonSchema::Object {
                 properties: BTreeMap::from([(
                     "foo".to_string(),
-                    JsonSchema::String { description: None },
+                    JsonSchema::String {
+                        enum_values: None,
+                        description: None
+                    },
                 )]),
                 required: None,
                 additional_properties: None,
@@ -214,6 +217,7 @@ fn tool_search_tool_spec_serializes_expected_wire_shape() {
                 properties: BTreeMap::from([(
                     "query".to_string(),
                     JsonSchema::String {
+                        enum_values: None,
                         description: Some("Tool search query".to_string()),
                     },
                 )]),

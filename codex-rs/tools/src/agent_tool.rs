@@ -49,6 +49,7 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions<'_>) -> ToolSpe
     properties.insert(
         "task_name".to_string(),
         JsonSchema::String {
+            enum_values: None,
             description: Some(
                 "Task name for the new agent. Use lowercase letters, digits, and underscores."
                     .to_string(),
@@ -78,12 +79,14 @@ pub fn create_send_input_tool_v1() -> ToolSpec {
         (
             "target".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some("Agent id to message (from spawn_agent).".to_string()),
             },
         ),
         (
             "message".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "Legacy plain-text message to send to the agent. Use either message or items."
                         .to_string(),
@@ -122,6 +125,7 @@ pub fn create_send_message_tool() -> ToolSpec {
         (
             "target".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "Agent id or canonical task name to message (from spawn_agent).".to_string(),
                 ),
@@ -159,6 +163,7 @@ pub fn create_assign_task_tool() -> ToolSpec {
         (
             "target".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "Agent id or canonical task name to message (from spawn_agent).".to_string(),
                 ),
@@ -195,6 +200,7 @@ pub fn create_resume_agent_tool() -> ToolSpec {
     let properties = BTreeMap::from([(
         "id".to_string(),
         JsonSchema::String {
+            enum_values: None,
             description: Some("Agent id to resume.".to_string()),
         },
     )]);
@@ -243,6 +249,7 @@ pub fn create_list_agents_tool() -> ToolSpec {
     let properties = BTreeMap::from([(
         "path_prefix".to_string(),
         JsonSchema::String {
+                enum_values: None,
             description: Some(
                 "Optional task-path prefix. Accepts the same relative or absolute task-path syntax as other MultiAgentV2 agent targets."
                     .to_string(),
@@ -270,6 +277,7 @@ pub fn create_close_agent_tool_v1() -> ToolSpec {
     let properties = BTreeMap::from([(
         "target".to_string(),
         JsonSchema::String {
+            enum_values: None,
             description: Some("Agent id to close (from spawn_agent).".to_string()),
         },
     )]);
@@ -292,6 +300,7 @@ pub fn create_close_agent_tool_v2() -> ToolSpec {
     let properties = BTreeMap::from([(
         "target".to_string(),
         JsonSchema::String {
+            enum_values: None,
             description: Some(
                 "Agent id or canonical task name to close (from spawn_agent).".to_string(),
             ),
@@ -354,9 +363,41 @@ fn spawn_agent_output_schema_v1() -> Value {
             "nickname": {
                 "type": ["string", "null"],
                 "description": "User-facing nickname for the spawned agent when available."
+            },
+            "context_inheritance_requested": {
+                "type": "string",
+                "enum": ["off", "exact", "bounded"],
+                "description": "Requested context inheritance mode for this spawn."
+            },
+            "context_inheritance_effective": {
+                "type": "string",
+                "enum": ["off", "exact", "bounded_full", "bounded_trimmed", "bounded_suppressed"],
+                "description": "Effective context inheritance mode used for this spawn."
+            },
+            "context_inheritance_telemetry": {
+                "type": ["object", "null"],
+                "description": "Runtime budgeting telemetry for the effective inheritance decision.",
+                "properties": {
+                    "parent_replay_safe_turn_count": {"type": ["integer", "null"]},
+                    "shipped_replay_safe_turn_count": {"type": ["integer", "null"]},
+                    "estimated_shipped_tokens": {"type": ["integer", "null"]},
+                    "usable_context_budget_tokens": {"type": ["integer", "null"]},
+                    "suppression_reason": {
+                        "type": ["string", "null"],
+                        "enum": [null, "invalid_parent_spawn_pairing", "missing_budget_proxy", "budget_exceeded"]
+                    }
+                },
+                "required": [
+                    "parent_replay_safe_turn_count",
+                    "shipped_replay_safe_turn_count",
+                    "estimated_shipped_tokens",
+                    "usable_context_budget_tokens",
+                    "suppression_reason"
+                ],
+                "additionalProperties": false
             }
         },
-        "required": ["agent_id", "nickname"],
+        "required": ["agent_id", "nickname", "context_inheritance_requested", "context_inheritance_effective", "context_inheritance_telemetry"],
         "additionalProperties": false
     })
 }
@@ -376,9 +417,41 @@ fn spawn_agent_output_schema_v2() -> Value {
             "nickname": {
                 "type": ["string", "null"],
                 "description": "User-facing nickname for the spawned agent when available."
+            },
+            "context_inheritance_requested": {
+                "type": "string",
+                "enum": ["off", "exact", "bounded"],
+                "description": "Requested context inheritance mode for this spawn."
+            },
+            "context_inheritance_effective": {
+                "type": "string",
+                "enum": ["off", "exact", "bounded_full", "bounded_trimmed", "bounded_suppressed"],
+                "description": "Effective context inheritance mode used for this spawn."
+            },
+            "context_inheritance_telemetry": {
+                "type": ["object", "null"],
+                "description": "Runtime budgeting telemetry for the effective inheritance decision.",
+                "properties": {
+                    "parent_replay_safe_turn_count": {"type": ["integer", "null"]},
+                    "shipped_replay_safe_turn_count": {"type": ["integer", "null"]},
+                    "estimated_shipped_tokens": {"type": ["integer", "null"]},
+                    "usable_context_budget_tokens": {"type": ["integer", "null"]},
+                    "suppression_reason": {
+                        "type": ["string", "null"],
+                        "enum": [null, "invalid_parent_spawn_pairing", "missing_budget_proxy", "budget_exceeded"]
+                    }
+                },
+                "required": [
+                    "parent_replay_safe_turn_count",
+                    "shipped_replay_safe_turn_count",
+                    "estimated_shipped_tokens",
+                    "usable_context_budget_tokens",
+                    "suppression_reason"
+                ],
+                "additionalProperties": false
             }
         },
-        "required": ["agent_id", "task_name", "nickname"],
+        "required": ["agent_id", "task_name", "nickname", "context_inheritance_requested", "context_inheritance_effective", "context_inheritance_telemetry"],
         "additionalProperties": false
     })
 }
@@ -497,6 +570,7 @@ fn create_collab_input_items_schema() -> JsonSchema {
         (
             "type".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "Input item type: text, image, local_image, skill, or mention.".to_string(),
                 ),
@@ -505,18 +579,21 @@ fn create_collab_input_items_schema() -> JsonSchema {
         (
             "text".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some("Text content when type is text.".to_string()),
             },
         ),
         (
             "image_url".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some("Image URL when type is image.".to_string()),
             },
         ),
         (
             "path".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "Path when type is local_image/skill, or structured mention target such as app://<connector-id> or plugin://<plugin-name>@<marketplace-name> when type is mention."
                         .to_string(),
@@ -526,6 +603,7 @@ fn create_collab_input_items_schema() -> JsonSchema {
         (
             "name".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some("Display name when type is skill or mention.".to_string()),
             },
         ),
@@ -549,6 +627,7 @@ fn spawn_agent_common_properties(agent_type_description: &str) -> BTreeMap<Strin
         (
             "message".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "Initial plain-text task for the new agent. Use either message or items."
                         .to_string(),
@@ -559,6 +638,7 @@ fn spawn_agent_common_properties(agent_type_description: &str) -> BTreeMap<Strin
         (
             "agent_type".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(agent_type_description.to_string()),
             },
         ),
@@ -572,8 +652,23 @@ fn spawn_agent_common_properties(agent_type_description: &str) -> BTreeMap<Strin
             },
         ),
         (
+            "context_inheritance".to_string(),
+            JsonSchema::String {
+                enum_values: Some(vec![
+                    "off".to_string(),
+                    "exact".to_string(),
+                    "bounded".to_string(),
+                ]),
+                description: Some(
+                    "Optional explicit inheritance mode. Use `off` for no parent history, `exact` to preserve full fork semantics, or `bounded` to request replay-safe budgeted inheritance. If both context_inheritance and fork_context are provided, they must agree."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
             "model".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "Optional model override for the new agent. Replaces the inherited model."
                         .to_string(),
@@ -583,6 +678,7 @@ fn spawn_agent_common_properties(agent_type_description: &str) -> BTreeMap<Strin
         (
             "reasoning_effort".to_string(),
             JsonSchema::String {
+                enum_values: None,
                 description: Some(
                     "Optional reasoning effort override for the new agent. Replaces the inherited reasoning effort."
                         .to_string(),
@@ -669,7 +765,10 @@ fn wait_agent_tool_parameters_v1(options: WaitAgentTimeoutOptions) -> JsonSchema
         (
             "targets".to_string(),
             JsonSchema::Array {
-                items: Box::new(JsonSchema::String { description: None }),
+                items: Box::new(JsonSchema::String {
+                    enum_values: None,
+                    description: None,
+                }),
                 description: Some(
                     "Agent ids to wait on. Pass multiple ids to wait for whichever finishes first."
                         .to_string(),
@@ -699,7 +798,8 @@ fn wait_agent_tool_parameters_v2(options: WaitAgentTimeoutOptions) -> JsonSchema
         (
             "targets".to_string(),
             JsonSchema::Array {
-                items: Box::new(JsonSchema::String { description: None }),
+                items: Box::new(JsonSchema::String {
+                enum_values: None, description: None }),
                 description: Some(
                     "Agent ids or canonical task names to wait on. Pass multiple targets to wait for whichever finishes first."
                         .to_string(),
