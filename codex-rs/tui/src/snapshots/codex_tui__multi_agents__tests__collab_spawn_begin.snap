@@ -1,0 +1,7 @@
+---
+source: tui/src/multi_agents.rs
+expression: cell_to_text(&cell)
+---
+• Spawning agent (gpt-5 high)
+  └ Inspect the repo and report the likely failure mode.
+    Requested context inheritance: bounded

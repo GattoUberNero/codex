@@ -3467,6 +3467,9 @@ pub struct CollabAgentSpawnBeginEvent {
     pub prompt: String,
     pub model: String,
     pub reasoning_effort: ReasoningEffortConfig,
+    /// Requested parent-context inheritance mode for the spawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_inheritance_requested: Option<SpawnContextInheritanceMode>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
@@ -3495,7 +3498,7 @@ pub struct CollabAgentStatusEntry {
     pub status: AgentStatus,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+#[derive(Debug, Clone, Serialize, PartialEq, JsonSchema, TS)]
 pub struct CollabAgentSpawnEndEvent {
     /// Identifier for the collab tool call.
     pub call_id: String,
@@ -3512,6 +3515,10 @@ pub struct CollabAgentSpawnEndEvent {
     /// Initial prompt sent to the agent. Can be empty to prevent CoT leaking at the
     /// beginning.
     pub prompt: String,
+    /// Model requested when the spawn was initiated.
+    pub requested_model: String,
+    /// Reasoning effort requested when the spawn was initiated.
+    pub requested_reasoning_effort: ReasoningEffortConfig,
     /// Effective model used by the spawned agent after inheritance and role overrides.
     pub model: String,
     /// Effective reasoning effort used by the spawned agent after inheritance and role overrides.
@@ -3527,6 +3534,58 @@ pub struct CollabAgentSpawnEndEvent {
     pub context_inheritance_telemetry: Option<SpawnContextInheritanceTelemetry>,
     /// Last known status of the new agent reported to the sender agent.
     pub status: AgentStatus,
+}
+
+#[derive(Deserialize)]
+struct CollabAgentSpawnEndEventDe {
+    call_id: String,
+    sender_thread_id: ThreadId,
+    new_thread_id: Option<ThreadId>,
+    #[serde(default)]
+    new_agent_nickname: Option<String>,
+    #[serde(default, alias = "agent_type")]
+    new_agent_role: Option<String>,
+    prompt: String,
+    #[serde(default)]
+    requested_model: Option<String>,
+    #[serde(default)]
+    requested_reasoning_effort: Option<ReasoningEffortConfig>,
+    model: String,
+    reasoning_effort: ReasoningEffortConfig,
+    #[serde(default)]
+    context_inheritance_requested: Option<SpawnContextInheritanceMode>,
+    #[serde(default)]
+    context_inheritance_effective: Option<SpawnContextInheritanceEffectiveMode>,
+    #[serde(default)]
+    context_inheritance_telemetry: Option<SpawnContextInheritanceTelemetry>,
+    status: AgentStatus,
+}
+
+impl<'de> Deserialize<'de> for CollabAgentSpawnEndEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = CollabAgentSpawnEndEventDe::deserialize(deserializer)?;
+        Ok(Self {
+            call_id: wire.call_id,
+            sender_thread_id: wire.sender_thread_id,
+            new_thread_id: wire.new_thread_id,
+            new_agent_nickname: wire.new_agent_nickname,
+            new_agent_role: wire.new_agent_role,
+            prompt: wire.prompt,
+            requested_model: wire.requested_model.unwrap_or_else(|| wire.model.clone()),
+            requested_reasoning_effort: wire
+                .requested_reasoning_effort
+                .unwrap_or(wire.reasoning_effort),
+            model: wire.model,
+            reasoning_effort: wire.reasoning_effort,
+            context_inheritance_requested: wire.context_inheritance_requested,
+            context_inheritance_effective: wire.context_inheritance_effective,
+            context_inheritance_telemetry: wire.context_inheritance_telemetry,
+            status: wire.status,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
@@ -4630,6 +4689,63 @@ mod tests {
             _ => panic!("expected turn_aborted event"),
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn collab_agent_spawn_end_deserializes_legacy_payload_without_requested_fields() -> Result<()> {
+        let event: EventMsg = serde_json::from_value(json!({
+            "type": "collab_agent_spawn_end",
+            "call_id": "spawn-1",
+            "sender_thread_id": "00000000-0000-0000-0000-000000000001",
+            "new_thread_id": "00000000-0000-0000-0000-000000000002",
+            "new_agent_nickname": "Scout",
+            "new_agent_role": "researcher",
+            "prompt": "inspect repo",
+            "model": "gpt-5.4-mini",
+            "reasoning_effort": "medium",
+            "status": "running",
+        }))?;
+
+        let EventMsg::CollabAgentSpawnEnd(payload) = event else {
+            panic!("expected collab_agent_spawn_end event");
+        };
+        assert_eq!(payload.requested_model, "gpt-5.4-mini");
+        assert_eq!(
+            payload.requested_reasoning_effort,
+            ReasoningEffortConfig::Medium
+        );
+        assert_eq!(payload.model, "gpt-5.4-mini");
+        assert_eq!(payload.reasoning_effort, ReasoningEffortConfig::Medium);
+        Ok(())
+    }
+
+    #[test]
+    fn collab_agent_spawn_end_prefers_requested_fields_when_both_shapes_are_present() -> Result<()>
+    {
+        let event: EventMsg = serde_json::from_value(json!({
+            "type": "collab_agent_spawn_end",
+            "call_id": "spawn-1",
+            "sender_thread_id": "00000000-0000-0000-0000-000000000001",
+            "new_thread_id": "00000000-0000-0000-0000-000000000002",
+            "prompt": "inspect repo",
+            "requested_model": "gpt-5.4",
+            "requested_reasoning_effort": "high",
+            "model": "gpt-5.4-mini",
+            "reasoning_effort": "medium",
+            "status": "running",
+        }))?;
+
+        let EventMsg::CollabAgentSpawnEnd(payload) = event else {
+            panic!("expected collab_agent_spawn_end event");
+        };
+        assert_eq!(payload.requested_model, "gpt-5.4");
+        assert_eq!(
+            payload.requested_reasoning_effort,
+            ReasoningEffortConfig::High
+        );
+        assert_eq!(payload.model, "gpt-5.4-mini");
+        assert_eq!(payload.reasoning_effort, ReasoningEffortConfig::Medium);
         Ok(())
     }
 

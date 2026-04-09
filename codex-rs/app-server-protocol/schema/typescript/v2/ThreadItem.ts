@@ -98,6 +98,14 @@ model: string | null,
  */
 reasoningEffort: ReasoningEffort | null, 
 /**
+ * Effective model used by the spawned agent after role and runtime overrides.
+ */
+  effectiveModel: string | null,
+/**
+ * Effective reasoning effort used by the spawned agent after role and runtime overrides.
+ */
+  effectiveReasoningEffort: ReasoningEffort | null,
+/**
  * Requested parent-context inheritance mode for spawn calls, when available.
  */
 contextInheritanceRequested: SpawnContextInheritanceMode | null, 

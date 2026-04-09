@@ -36,13 +36,19 @@ impl ToolHandler for Handler {
         } = invocation;
         let arguments = function_arguments(payload)?;
         let args: SpawnAgentArgs = parse_arguments(&arguments)?;
-        let requested_context_inheritance =
-            resolve_spawn_context_inheritance_mode(args.fork_context, args.context_inheritance)?;
+        let context_inheritance_resolution = resolve_spawn_context_inheritance_mode(
+            args.fork_context,
+            args.context_inheritance,
+            &turn.session_source,
+        )?;
+        let requested_context_inheritance = context_inheritance_resolution.resolved_mode;
         let role_name = args
             .agent_type
             .as_deref()
             .map(str::trim)
             .filter(|role| !role.is_empty());
+        let requested_model = args.model.clone().unwrap_or_default();
+        let requested_reasoning_effort = args.reasoning_effort.unwrap_or_default();
         let input_items = parse_collab_input(args.message, args.items)?;
         let prompt = render_input_preview(&input_items);
         let session_source = turn.session_source.clone();
@@ -60,8 +66,10 @@ impl ToolHandler for Handler {
                     call_id: call_id.clone(),
                     sender_thread_id: session.conversation_id,
                     prompt: prompt.clone(),
-                    model: args.model.clone().unwrap_or_default(),
-                    reasoning_effort: args.reasoning_effort.unwrap_or_default(),
+                    model: requested_model.clone(),
+                    reasoning_effort: requested_reasoning_effort,
+                    context_inheritance_requested: context_inheritance_resolution
+                        .requested_mode,
                 }
                 .into(),
             )
@@ -153,11 +161,11 @@ impl ToolHandler for Handler {
         let effective_model = agent_snapshot
             .as_ref()
             .map(|snapshot| snapshot.model.clone())
-            .unwrap_or_else(|| args.model.clone().unwrap_or_default());
+            .unwrap_or_else(|| requested_model.clone());
         let effective_reasoning_effort = agent_snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.reasoning_effort)
-            .unwrap_or(args.reasoning_effort.unwrap_or_default());
+            .unwrap_or(requested_reasoning_effort);
         let nickname = new_agent_nickname.clone();
         session
             .send_event(
@@ -169,9 +177,11 @@ impl ToolHandler for Handler {
                     new_agent_nickname,
                     new_agent_role,
                     prompt,
+                    requested_model,
+                    requested_reasoning_effort,
                     model: effective_model,
                     reasoning_effort: effective_reasoning_effort,
-                    context_inheritance_requested: Some(fork_context_report.requested_mode),
+                    context_inheritance_requested: context_inheritance_resolution.requested_mode,
                     context_inheritance_effective: Some(fork_context_report.effective_mode),
                     context_inheritance_telemetry: fork_context_report.telemetry.clone(),
                     status,

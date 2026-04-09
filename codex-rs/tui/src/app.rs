@@ -11155,6 +11155,8 @@ guardian_approval = true
                             prompt: None,
                             model: None,
                             reasoning_effort: None,
+                            effective_model: None,
+                            effective_reasoning_effort: None,
                             context_inheritance_requested: None,
                             context_inheritance_effective: None,
                             context_inheritance_telemetry: None,

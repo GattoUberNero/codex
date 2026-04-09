@@ -37,8 +37,6 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::openai_models::ModelInfo;
-use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::RolloutItem;
@@ -56,9 +54,6 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
-
-use crate::models_manager::collaboration_mode_presets::CollaborationModesConfig;
-use crate::models_manager::manager::ModelsManager;
 
 fn invocation(
     session: Arc<crate::codex::Session>,
@@ -92,38 +87,6 @@ fn thread_manager() -> ThreadManager {
         CodexAuth::from_api_key("dummy"),
         built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone(),
     )
-}
-
-fn model_without_budget_proxy(slug: &str) -> ModelInfo {
-    serde_json::from_value(json!({
-        "slug": slug,
-        "display_name": slug,
-        "description": "test model without budget proxy",
-        "default_reasoning_level": "medium",
-        "supported_reasoning_levels": [
-            {"effort": "low", "description": "low"},
-            {"effort": "medium", "description": "medium"}
-        ],
-        "shell_type": "shell_command",
-        "visibility": "list",
-        "supported_in_api": true,
-        "priority": 1,
-        "availability_nux": null,
-        "upgrade": null,
-        "base_instructions": "base instructions",
-        "supports_reasoning_summaries": false,
-        "support_verbosity": false,
-        "default_verbosity": null,
-        "apply_patch_tool_type": null,
-        "truncation_policy": {"mode": "bytes", "limit": 10_000},
-        "supports_parallel_tool_calls": false,
-        "supports_image_detail_original": false,
-        "context_window": null,
-        "auto_compact_token_limit": null,
-        "experimental_supported_tools": [],
-        "input_modalities": ["text"]
-    }))
-    .expect("valid model without budget proxy")
 }
 
 struct EnvVarGuard {
@@ -402,7 +365,7 @@ async fn spawn_agent_returns_agent_id_without_task_name() {
 }
 
 #[tokio::test]
-async fn spawn_agent_rejects_conflicting_context_inheritance_arguments() {
+async fn spawn_agent_rejects_legacy_fork_context_argument() {
     let (session, turn) = make_session_and_context().await;
     let invocation = invocation(
         Arc::new(session),
@@ -410,21 +373,23 @@ async fn spawn_agent_rejects_conflicting_context_inheritance_arguments() {
         "spawn_agent",
         function_payload(json!({
             "message": "inspect this repo",
-            "fork_context": true,
-            "context_inheritance": "off"
+            "fork_context": true
         })),
     );
     let Err(err) = SpawnAgentHandler.handle(invocation).await else {
-        panic!("conflicting inheritance arguments should be rejected");
+        panic!("legacy fork_context should be rejected");
     };
     let FunctionCallError::RespondToModel(message) = err else {
-        panic!("conflicting inheritance arguments should surface as a model-facing error");
+        panic!("context inheritance rejection should surface as a model-facing error");
     };
-    assert!(message.contains("conflicting spawn context inheritance arguments"));
+    assert_eq!(
+        message,
+        "spawn_agent context inheritance is disabled; do not pass fork_context or context_inheritance"
+    );
 }
 
 #[tokio::test]
-async fn spawn_agent_rejects_fork_context_true_when_context_inheritance_is_bounded() {
+async fn spawn_agent_rejects_context_inheritance_argument() {
     let (session, turn) = make_session_and_context().await;
     let invocation = invocation(
         Arc::new(session),
@@ -432,241 +397,59 @@ async fn spawn_agent_rejects_fork_context_true_when_context_inheritance_is_bound
         "spawn_agent",
         function_payload(json!({
             "message": "inspect this repo",
-            "fork_context": true,
             "context_inheritance": "bounded"
         })),
     );
     let Err(err) = SpawnAgentHandler.handle(invocation).await else {
-        panic!("bounded inheritance must not be accepted as fork_context=true compatibility");
+        panic!("context_inheritance should be rejected");
     };
     let FunctionCallError::RespondToModel(message) = err else {
-        panic!("conflicting inheritance arguments should surface as a model-facing error");
+        panic!("context inheritance rejection should surface as a model-facing error");
     };
-    assert!(message.contains("conflicting spawn context inheritance arguments"));
+    assert_eq!(
+        message,
+        "spawn_agent context inheritance is disabled; do not pass fork_context or context_inheritance"
+    );
+}
+
+#[test]
+fn resolve_spawn_context_inheritance_defaults_to_off_when_unspecified() {
+    let unspecified = resolve_spawn_context_inheritance_mode(None, None, &SessionSource::Cli)
+        .expect("unspecified inheritance should resolve");
+
+    assert_eq!(
+        unspecified.resolved_mode,
+        codex_protocol::protocol::SpawnContextInheritanceMode::Off
+    );
+    assert_eq!(unspecified.requested_mode, None);
 }
 
 #[tokio::test]
-async fn spawn_agent_suppresses_exact_inheritance_when_fork_context_true_without_valid_pairing() {
-    let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    let root = manager
-        .start_thread((*turn.config).clone())
-        .await
-        .expect("root thread should start");
-    session.services.agent_control = manager.agent_control();
-    session.conversation_id = root.thread_id;
-    turn.config = Arc::new((*turn.config).clone());
+async fn spawn_agent_rejects_context_inheritance_for_subagent_session_too() {
+    let (session, mut turn) = make_session_and_context().await;
+    turn.session_source = SessionSource::SubAgent(SubAgentSource::Other("reviewer".to_string()));
 
-    let output = SpawnAgentHandler
+    let Err(err) = SpawnAgentHandler
         .handle(invocation(
             Arc::new(session),
             Arc::new(turn),
             "spawn_agent",
             function_payload(json!({
                 "message": "inspect this repo",
-                "fork_context": true
+                "context_inheritance": "exact"
             })),
         ))
         .await
-        .expect("spawn_agent should succeed");
-    let (content, success) = expect_text_output(output);
-    let result: serde_json::Value =
-        serde_json::from_str(&content).expect("spawn_agent result should be json");
-
-    assert!(result["agent_id"].is_string());
-    assert_eq!(result["context_inheritance_requested"], "exact");
-    assert_eq!(result["context_inheritance_effective"], "off");
+    else {
+        panic!("subagent session must not be allowed to request context inheritance");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("subagent context inheritance rejection should be model-facing");
+    };
     assert_eq!(
-        result["context_inheritance_telemetry"]["suppression_reason"],
-        "invalid_parent_spawn_pairing"
+        message,
+        "spawn_agent context inheritance is disabled; do not pass fork_context or context_inheritance"
     );
-    assert_eq!(
-        result["context_inheritance_telemetry"]["estimated_shipped_tokens"],
-        serde_json::Value::Null
-    );
-    assert_eq!(success, Some(true));
-}
-
-#[tokio::test]
-async fn spawn_agent_reports_exact_inheritance_telemetry_when_pairing_is_valid() {
-    let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    let root = manager
-        .start_thread((*turn.config).clone())
-        .await
-        .expect("root thread should start");
-    session.services.agent_control = manager.agent_control();
-    session.conversation_id = root.thread_id;
-    turn.config = Arc::new((*turn.config).clone());
-    let root_thread = manager
-        .get_thread(root.thread_id)
-        .await
-        .expect("root thread should exist");
-    let active_turn = root_thread.codex.session.new_default_turn().await;
-    root_thread
-        .codex
-        .session
-        .record_conversation_items(
-            active_turn.as_ref(),
-            &[ResponseItem::FunctionCall {
-                id: None,
-                call_id: "call-1".to_string(),
-                name: "spawn_agent".to_string(),
-                namespace: None,
-                arguments: "{}".to_string(),
-            }],
-        )
-        .await;
-    root_thread
-        .codex
-        .session
-        .ensure_rollout_materialized()
-        .await;
-    root_thread.codex.session.flush_rollout().await;
-
-    let output = SpawnAgentHandler
-        .handle(invocation(
-            Arc::new(session),
-            Arc::new(turn),
-            "spawn_agent",
-            function_payload(json!({
-                "message": "inspect this repo",
-                "fork_context": true
-            })),
-        ))
-        .await
-        .expect("spawn_agent should succeed");
-    let (content, success) = expect_text_output(output);
-    let result: serde_json::Value =
-        serde_json::from_str(&content).expect("spawn_agent result should be json");
-
-    assert!(result["agent_id"].is_string());
-    assert_eq!(result["context_inheritance_requested"], "exact");
-    assert_eq!(result["context_inheritance_effective"], "exact");
-    assert_eq!(
-        result["context_inheritance_telemetry"]["suppression_reason"],
-        serde_json::Value::Null
-    );
-    assert_eq!(
-        result["context_inheritance_telemetry"]["parent_replay_safe_turn_count"],
-        result["context_inheritance_telemetry"]["shipped_replay_safe_turn_count"]
-    );
-    assert!(
-        result["context_inheritance_telemetry"]["estimated_shipped_tokens"]
-            .as_i64()
-            .is_some_and(|value| value > 0)
-    );
-    assert_eq!(success, Some(true));
-}
-
-#[tokio::test]
-async fn spawn_agent_reports_budget_exceeded_when_bounded_budget_proxy_resolves_to_zero() {
-    let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    let root = manager
-        .start_thread((*turn.config).clone())
-        .await
-        .expect("root thread should start");
-    session.services.agent_control = manager.agent_control();
-    session.conversation_id = root.thread_id;
-    let mut config = (*turn.config).clone();
-    config.agent_bounded_fork_startup_reserve_tokens = i64::MAX;
-    turn.config = Arc::new(config);
-
-    let output = SpawnAgentHandler
-        .handle(invocation(
-            Arc::new(session),
-            Arc::new(turn),
-            "spawn_agent",
-            function_payload(json!({
-                "message": "inspect this repo",
-                "context_inheritance": "bounded"
-            })),
-        ))
-        .await
-        .expect("spawn_agent should succeed");
-    let (content, success) = expect_text_output(output);
-    let result: serde_json::Value =
-        serde_json::from_str(&content).expect("spawn_agent result should be json");
-
-    assert!(result["agent_id"].is_string());
-    assert_eq!(result["context_inheritance_requested"], "bounded");
-    assert_eq!(
-        result["context_inheritance_effective"],
-        "bounded_suppressed"
-    );
-    assert_eq!(
-        result["context_inheritance_telemetry"]["usable_context_budget_tokens"],
-        0
-    );
-    assert_eq!(
-        result["context_inheritance_telemetry"]["suppression_reason"],
-        "budget_exceeded"
-    );
-    assert_eq!(success, Some(true));
-}
-
-#[tokio::test]
-async fn spawn_agent_reports_missing_budget_proxy_for_bounded_inheritance_without_model_budget() {
-    let (mut session, turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    let root = manager
-        .start_thread((*turn.config).clone())
-        .await
-        .expect("root thread should start");
-    session.services.agent_control = manager.agent_control();
-    session.conversation_id = root.thread_id;
-    let custom_model = "test/no-budget-proxy";
-    session.services.models_manager = Arc::new(ModelsManager::new(
-        turn.config.codex_home.clone(),
-        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
-        Some(ModelsResponse {
-            models: vec![model_without_budget_proxy(custom_model)],
-        }),
-        CollaborationModesConfig::default(),
-    ));
-
-    let output = SpawnAgentHandler
-        .handle(invocation(
-            Arc::new(session),
-            Arc::new(turn),
-            "spawn_agent",
-            function_payload(json!({
-                "message": "inspect this repo",
-                "model": custom_model,
-                "context_inheritance": "bounded"
-            })),
-        ))
-        .await
-        .expect("spawn_agent should succeed");
-    let (content, success) = expect_text_output(output);
-    let result: serde_json::Value =
-        serde_json::from_str(&content).expect("spawn_agent result should be json");
-
-    assert!(result["agent_id"].is_string());
-    assert_eq!(result["context_inheritance_requested"], "bounded");
-    assert_eq!(
-        result["context_inheritance_effective"],
-        "bounded_suppressed"
-    );
-    assert_eq!(
-        result["context_inheritance_telemetry"]["usable_context_budget_tokens"],
-        serde_json::Value::Null
-    );
-    assert!(
-        result["context_inheritance_telemetry"]["parent_replay_safe_turn_count"]
-            .as_i64()
-            .is_some_and(|value| value >= 0)
-    );
-    assert_eq!(
-        result["context_inheritance_telemetry"]["estimated_shipped_tokens"],
-        serde_json::Value::Null
-    );
-    assert_eq!(
-        result["context_inheritance_telemetry"]["suppression_reason"],
-        "missing_budget_proxy"
-    );
-    assert_eq!(success, Some(true));
 }
 
 #[tokio::test]
@@ -701,6 +484,45 @@ async fn multi_agent_v2_spawn_requires_task_name() {
         panic!("missing task_name should surface as a model-facing error");
     };
     assert!(message.contains("missing field `task_name`"));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_rejects_context_inheritance_exact_for_main_session() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    turn.config = Arc::new(config);
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "inspect this repo",
+            "task_name": "test_process",
+            "context_inheritance": "exact"
+        })),
+    );
+    let Err(err) = SpawnAgentHandlerV2.handle(invocation).await else {
+        panic!("context inheritance should be rejected in v2 too");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("v2 context inheritance rejection should be model-facing");
+    };
+    assert_eq!(
+        message,
+        "spawn_agent context inheritance is disabled; do not pass fork_context or context_inheritance"
+    );
 }
 
 #[tokio::test]

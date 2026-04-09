@@ -13044,6 +13044,24 @@
                 ],
                 "description": "Runtime budgeting telemetry for the effective inheritance decision."
               },
+              "effectiveModel": {
+                "description": "Effective model used by the spawned agent after role and runtime overrides.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "effectiveReasoningEffort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/v2/ReasoningEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Effective reasoning effort used by the spawned agent after role and runtime overrides."
+              },
               "id": {
                 "description": "Unique identifier for this collab tool call.",
                 "type": "string"

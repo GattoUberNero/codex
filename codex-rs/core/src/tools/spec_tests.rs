@@ -490,7 +490,8 @@ fn test_build_specs_multi_agent_v2_uses_task_names_and_hides_resume() {
         panic!("spawn_agent should use object params");
     };
     assert!(properties.contains_key("task_name"));
-    assert!(properties.contains_key("context_inheritance"));
+    assert!(!properties.contains_key("fork_context"));
+    assert!(!properties.contains_key("context_inheritance"));
     assert_eq!(required.as_ref(), Some(&vec!["task_name".to_string()]));
     let output_schema = output_schema
         .as_ref()
@@ -600,6 +601,43 @@ fn test_build_specs_multi_agent_v2_uses_task_names_and_hides_resume() {
     );
     assert_lacks_tool_name(&tools, "send_input");
     assert_lacks_tool_name(&tools, "resume_agent");
+}
+
+#[test]
+fn test_build_specs_multi_agent_v1_root_spawn_agent_schema_omits_context_inheritance() {
+    let config = test_config();
+    let model_info = ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
+    let mut features = Features::with_defaults();
+    features.enable(Feature::Collab);
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+    let (tools, _) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*app_tools*/ None,
+        &[],
+    )
+    .build();
+
+    let spawn_agent = find_tool(&tools, "spawn_agent");
+    let ToolSpec::Function(ResponsesApiTool { parameters, .. }) = &spawn_agent.spec else {
+        panic!("spawn_agent should be a function tool");
+    };
+    let JsonSchema::Object { properties, .. } = parameters else {
+        panic!("spawn_agent should use object params");
+    };
+
+    assert!(!properties.contains_key("task_name"));
+    assert!(!properties.contains_key("fork_context"));
+    assert!(!properties.contains_key("context_inheritance"));
 }
 
 #[test]
@@ -756,6 +794,80 @@ fn test_build_specs_agent_job_worker_tools_enabled() {
         ],
     );
     assert_lacks_tool_name(&tools, "request_user_input");
+}
+
+#[test]
+fn test_build_specs_subagent_spawn_agent_schema_omits_context_inheritance() {
+    let config = test_config();
+    let model_info = ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
+    let mut features = Features::with_defaults();
+    features.enable(Feature::Collab);
+    features.enable(Feature::MultiAgentV2);
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::SubAgent(SubAgentSource::Other("reviewer".to_string())),
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+    let (tools, _) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*app_tools*/ None,
+        &[],
+    )
+    .build();
+
+    let spawn_agent = find_tool(&tools, "spawn_agent");
+    let ToolSpec::Function(ResponsesApiTool { parameters, .. }) = &spawn_agent.spec else {
+        panic!("spawn_agent should be a function tool");
+    };
+    let JsonSchema::Object { properties, .. } = parameters else {
+        panic!("spawn_agent should use object params");
+    };
+
+    assert!(!properties.contains_key("fork_context"));
+    assert!(!properties.contains_key("context_inheritance"));
+}
+
+#[test]
+fn test_build_specs_multi_agent_v1_subagent_spawn_agent_schema_omits_context_inheritance() {
+    let config = test_config();
+    let model_info = ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
+    let mut features = Features::with_defaults();
+    features.enable(Feature::Collab);
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::SubAgent(SubAgentSource::Other("reviewer".to_string())),
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+    let (tools, _) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*app_tools*/ None,
+        &[],
+    )
+    .build();
+
+    let spawn_agent = find_tool(&tools, "spawn_agent");
+    let ToolSpec::Function(ResponsesApiTool { parameters, .. }) = &spawn_agent.spec else {
+        panic!("spawn_agent should be a function tool");
+    };
+    let JsonSchema::Object { properties, .. } = parameters else {
+        panic!("spawn_agent should use object params");
+    };
+
+    assert!(!properties.contains_key("task_name"));
+    assert!(!properties.contains_key("fork_context"));
+    assert!(!properties.contains_key("context_inheritance"));
 }
 
 #[test]

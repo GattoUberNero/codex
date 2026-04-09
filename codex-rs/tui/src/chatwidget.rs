@@ -856,6 +856,7 @@ pub(crate) struct ChatWidget {
     running_commands: HashMap<String, RunningCommand>,
     collab_agent_metadata: HashMap<ThreadId, CollabAgentMetadata>,
     pending_collab_spawn_requests: HashMap<String, multi_agents::SpawnRequestSummary>,
+    replayed_collab_spawn_call_ids: HashSet<String>,
     suppressed_exec_calls: HashSet<String>,
     skills_all: Vec<ProtocolSkillMetadata>,
     skills_initial_state: Option<HashMap<PathBuf, bool>>,
@@ -2144,6 +2145,7 @@ impl ChatWidget {
     ) {
         self.snapshot_replay_latest_turn_id = latest_turn_id;
         self.snapshot_replay_session_auto_generation_epoch = session_auto_generation_epoch;
+        self.replayed_collab_spawn_call_ids.clear();
         self.clear_auto_follow_up_countdown();
     }
 
@@ -4126,7 +4128,7 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    fn on_collab_agent_tool_call(&mut self, item: ThreadItem) {
+    fn on_collab_agent_tool_call(&mut self, item: ThreadItem, from_replay: bool) {
         let ThreadItem::CollabAgentToolCall {
             id,
             tool,
@@ -4136,6 +4138,8 @@ impl ChatWidget {
             prompt,
             model,
             reasoning_effort,
+            effective_model,
+            effective_reasoning_effort,
             context_inheritance_requested,
             context_inheritance_effective,
             context_inheritance_telemetry,
@@ -4155,28 +4159,32 @@ impl ChatWidget {
 
         match tool {
             CollabAgentTool::SpawnAgent => {
-                if let (Some(model), Some(reasoning_effort)) = (model.clone(), reasoning_effort) {
-                    self.pending_collab_spawn_requests.insert(
-                        id.clone(),
-                        multi_agents::SpawnRequestSummary {
-                            model,
-                            reasoning_effort,
-                        },
-                    );
+                if from_replay && !matches!(status, CollabAgentToolCallStatus::InProgress) {
+                    self.replayed_collab_spawn_call_ids.insert(id.clone());
+                }
+                let spawn_request = multi_agents::SpawnRequestSummary {
+                    model: model.clone().unwrap_or_default(),
+                    reasoning_effort: reasoning_effort.unwrap_or_default(),
+                    context_inheritance_requested,
+                };
+
+                if matches!(status, CollabAgentToolCallStatus::InProgress) {
+                    let is_new_request = self
+                        .pending_collab_spawn_requests
+                        .insert(id.clone(), spawn_request.clone())
+                        .is_none();
+                    if is_new_request {
+                        self.on_collab_event(multi_agents::spawn_begin(
+                            prompt.as_deref().unwrap_or_default(),
+                            &spawn_request,
+                        ));
+                    }
                 }
 
                 if !matches!(status, CollabAgentToolCallStatus::InProgress) {
-                    let spawn_request =
-                        self.pending_collab_spawn_requests.remove(&id).or_else(|| {
-                            model
-                                .zip(reasoning_effort)
-                                .map(|(model, reasoning_effort)| {
-                                    multi_agents::SpawnRequestSummary {
-                                        model,
-                                        reasoning_effort,
-                                    }
-                                })
-                        });
+                    let requested_spawn_request = self.pending_collab_spawn_requests.remove(&id);
+                    let requested_model = model.unwrap_or_default();
+                    let requested_reasoning_effort = reasoning_effort.unwrap_or_default();
                     self.on_collab_event(multi_agents::spawn_end(
                         codex_protocol::protocol::CollabAgentSpawnEndEvent {
                             call_id: id,
@@ -4189,8 +4197,11 @@ impl ChatWidget {
                                 .as_ref()
                                 .and_then(|metadata| metadata.agent_role.clone()),
                             prompt: prompt.unwrap_or_default(),
-                            model: String::new(),
-                            reasoning_effort: ReasoningEffortConfig::Medium,
+                            requested_model: requested_model.clone(),
+                            requested_reasoning_effort,
+                            model: effective_model.unwrap_or(requested_model),
+                            reasoning_effort: effective_reasoning_effort
+                                .unwrap_or(requested_reasoning_effort),
                             context_inheritance_requested,
                             context_inheritance_effective,
                             context_inheritance_telemetry,
@@ -4202,7 +4213,7 @@ impl ChatWidget {
                                     AgentStatus::Errored("Agent spawn failed".into())
                                 }),
                         },
-                        spawn_request.as_ref(),
+                        requested_spawn_request.as_ref(),
                     ));
                 }
             }
@@ -5205,6 +5216,7 @@ impl ChatWidget {
             running_commands: HashMap::new(),
             collab_agent_metadata: HashMap::new(),
             pending_collab_spawn_requests: HashMap::new(),
+            replayed_collab_spawn_call_ids: HashSet::new(),
             suppressed_exec_calls: HashSet::new(),
             last_unified_wait: None,
             unified_exec_wait_streak: None,
@@ -6811,24 +6823,31 @@ impl ChatWidget {
                 prompt,
                 model,
                 reasoning_effort,
+                effective_model,
+                effective_reasoning_effort,
                 context_inheritance_requested,
                 context_inheritance_effective,
                 context_inheritance_telemetry,
                 agents_states,
-            } => self.on_collab_agent_tool_call(ThreadItem::CollabAgentToolCall {
-                id,
-                tool,
-                status,
-                sender_thread_id,
-                receiver_thread_ids,
-                prompt,
-                model,
-                reasoning_effort,
-                context_inheritance_requested,
-                context_inheritance_effective,
-                context_inheritance_telemetry,
-                agents_states,
-            }),
+            } => self.on_collab_agent_tool_call(
+                ThreadItem::CollabAgentToolCall {
+                    id,
+                    tool,
+                    status,
+                    sender_thread_id,
+                    receiver_thread_ids,
+                    prompt,
+                    model,
+                    reasoning_effort,
+                    effective_model,
+                    effective_reasoning_effort,
+                    context_inheritance_requested,
+                    context_inheritance_effective,
+                    context_inheritance_telemetry,
+                    agents_states,
+                },
+                from_replay,
+            ),
             ThreadItem::DynamicToolCall { .. } => {}
         }
 
@@ -6927,7 +6946,7 @@ impl ChatWidget {
                 self.handle_turn_completed_notification(notification, replay_kind);
             }
             ServerNotification::ItemStarted(notification) => {
-                self.handle_item_started_notification(notification, replay_kind.is_some());
+                self.handle_item_started_notification(notification, replay_kind);
             }
             ServerNotification::ItemCompleted(notification) => {
                 self.handle_item_completed_notification(notification, replay_kind);
@@ -7213,8 +7232,9 @@ impl ChatWidget {
     fn handle_item_started_notification(
         &mut self,
         notification: ItemStartedNotification,
-        from_replay: bool,
+        replay_kind: Option<ReplayKind>,
     ) {
+        let from_replay = replay_kind.is_some();
         match notification.item {
             ThreadItem::CommandExecution {
                 id,
@@ -7278,24 +7298,40 @@ impl ChatWidget {
                 prompt,
                 model,
                 reasoning_effort,
+                effective_model,
+                effective_reasoning_effort,
                 context_inheritance_requested,
                 context_inheritance_effective,
                 context_inheritance_telemetry,
                 agents_states,
-            } => self.on_collab_agent_tool_call(ThreadItem::CollabAgentToolCall {
-                id,
-                tool,
-                status,
-                sender_thread_id,
-                receiver_thread_ids,
-                prompt,
-                model,
-                reasoning_effort,
-                context_inheritance_requested,
-                context_inheritance_effective,
-                context_inheritance_telemetry,
-                agents_states,
-            }),
+            } => {
+                if replay_kind.is_some()
+                    && matches!(tool, CollabAgentTool::SpawnAgent)
+                    && self.replayed_collab_spawn_call_ids.contains(&id)
+                {
+                    return;
+                }
+
+                self.on_collab_agent_tool_call(
+                    ThreadItem::CollabAgentToolCall {
+                        id,
+                        tool,
+                        status,
+                        sender_thread_id,
+                        receiver_thread_ids,
+                        prompt,
+                        model,
+                        reasoning_effort,
+                        effective_model,
+                        effective_reasoning_effort,
+                        context_inheritance_requested,
+                        context_inheritance_effective,
+                        context_inheritance_telemetry,
+                        agents_states,
+                    },
+                    from_replay,
+                )
+            }
             ThreadItem::EnteredReviewMode { review, .. } => {
                 if !from_replay {
                     self.enter_review_mode_with_hint(review, /*from_replay*/ false);
@@ -7310,6 +7346,17 @@ impl ChatWidget {
         notification: ItemCompletedNotification,
         replay_kind: Option<ReplayKind>,
     ) {
+        if replay_kind.is_some()
+            && let ThreadItem::CollabAgentToolCall {
+                id,
+                tool: CollabAgentTool::SpawnAgent,
+                ..
+            } = &notification.item
+            && self.replayed_collab_spawn_call_ids.contains(id)
+        {
+            return;
+        }
+
         self.handle_thread_item(
             notification.item,
             notification.turn_id,
@@ -7579,21 +7626,32 @@ impl ChatWidget {
             EventMsg::ContextCompacted(_) => self.on_agent_message("Context compacted".to_owned()),
             EventMsg::CollabAgentSpawnBegin(CollabAgentSpawnBeginEvent {
                 call_id,
+                prompt,
                 model,
                 reasoning_effort,
+                context_inheritance_requested,
                 ..
             }) => {
-                self.pending_collab_spawn_requests.insert(
-                    call_id,
-                    multi_agents::SpawnRequestSummary {
-                        model,
-                        reasoning_effort,
-                    },
-                );
+                let spawn_request = multi_agents::SpawnRequestSummary {
+                    model,
+                    reasoning_effort,
+                    context_inheritance_requested,
+                };
+                let is_new_request = self
+                    .pending_collab_spawn_requests
+                    .insert(call_id, spawn_request.clone())
+                    .is_none();
+                if !from_replay && is_new_request {
+                    self.on_collab_event(multi_agents::spawn_begin(&prompt, &spawn_request));
+                }
             }
             EventMsg::CollabAgentSpawnEnd(ev) => {
-                let spawn_request = self.pending_collab_spawn_requests.remove(&ev.call_id);
-                self.on_collab_event(multi_agents::spawn_end(ev, spawn_request.as_ref()));
+                let requested_spawn_request =
+                    self.pending_collab_spawn_requests.remove(&ev.call_id);
+                self.on_collab_event(multi_agents::spawn_end(
+                    ev,
+                    requested_spawn_request.as_ref(),
+                ));
             }
             EventMsg::CollabAgentInteractionBegin(_) => {}
             EventMsg::CollabAgentInteractionEnd(ev) => {

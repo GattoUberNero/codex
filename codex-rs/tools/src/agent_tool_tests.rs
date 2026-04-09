@@ -56,7 +56,8 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     assert!(description.contains("visible display (`visible-model`)"));
     assert!(!description.contains("hidden display (`hidden-model`)"));
     assert!(properties.contains_key("task_name"));
-    assert!(properties.contains_key("context_inheritance"));
+    assert!(!properties.contains_key("fork_context"));
+    assert!(!properties.contains_key("context_inheritance"));
     assert_eq!(
         properties.get("agent_type"),
         Some(&JsonSchema::String {
@@ -65,20 +66,6 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         })
     );
     assert_eq!(required, Some(vec!["task_name".to_string()]));
-    assert_eq!(
-        properties.get("context_inheritance"),
-        Some(&JsonSchema::String {
-            description: Some(
-                "Optional explicit inheritance mode. Use `off` for no parent history, `exact` to preserve full fork semantics, or `bounded` to request replay-safe budgeted inheritance. If both context_inheritance and fork_context are provided, they must agree."
-                    .to_string(),
-            ),
-            enum_values: Some(vec![
-                "off".to_string(),
-                "exact".to_string(),
-                "bounded".to_string(),
-            ]),
-        })
-    );
     let output_schema = output_schema.expect("spawn_agent output schema");
     assert_eq!(
         output_schema["required"],
@@ -111,6 +98,25 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
             "budget_exceeded"
         ])
     );
+}
+
+#[test]
+fn spawn_agent_tool_v1_omits_context_inheritance_inputs() {
+    let tool = create_spawn_agent_tool_v1(SpawnAgentToolOptions {
+        available_models: &[model_preset("visible", /*show_in_picker*/ true)],
+        agent_type_description: "role help".to_string(),
+    });
+
+    let ToolSpec::Function(ResponsesApiTool { parameters, .. }) = tool else {
+        panic!("spawn_agent should be a function tool");
+    };
+    let JsonSchema::Object { properties, .. } = parameters else {
+        panic!("spawn_agent should use object params");
+    };
+
+    assert!(!properties.contains_key("task_name"));
+    assert!(!properties.contains_key("fork_context"));
+    assert!(!properties.contains_key("context_inheritance"));
 }
 
 #[test]

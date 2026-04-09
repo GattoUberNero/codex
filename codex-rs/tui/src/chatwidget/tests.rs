@@ -2147,6 +2147,7 @@ async fn make_chatwidget_manual(
         running_commands: HashMap::new(),
         collab_agent_metadata: HashMap::new(),
         pending_collab_spawn_requests: HashMap::new(),
+        replayed_collab_spawn_call_ids: HashSet::new(),
         suppressed_exec_calls: HashSet::new(),
         skills_all: Vec::new(),
         skills_initial_state: None,
@@ -2392,7 +2393,7 @@ fn lines_to_single_string(lines: &[ratatui::text::Line<'static>]) -> String {
 }
 
 #[tokio::test]
-async fn collab_spawn_end_shows_requested_model_and_effort() {
+async fn collab_spawn_end_uses_effective_model_and_preserves_requested_details() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
     let sender_thread_id = ThreadId::new();
     let spawned_thread_id = ThreadId::new();
@@ -2405,6 +2406,9 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
             prompt: "Explore the repo".to_string(),
             model: "gpt-5".to_string(),
             reasoning_effort: ReasoningEffortConfig::High,
+            context_inheritance_requested: Some(
+                codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
+            ),
         }),
     });
     chat.handle_codex_event(Event {
@@ -2416,8 +2420,10 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
             new_agent_nickname: Some("Robie".to_string()),
             new_agent_role: Some("explorer".to_string()),
             prompt: "Explore the repo".to_string(),
-            model: "gpt-5".to_string(),
-            reasoning_effort: ReasoningEffortConfig::High,
+            requested_model: "gpt-5".to_string(),
+            requested_reasoning_effort: ReasoningEffortConfig::High,
+            model: "gpt-5-mini".to_string(),
+            reasoning_effort: ReasoningEffortConfig::Medium,
             context_inheritance_requested: Some(
                 codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
             ),
@@ -2445,8 +2451,80 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
         .join("\n");
 
     assert!(
-        rendered.contains("Spawned Robie [explorer] (gpt-5 high)"),
-        "expected spawn line to include agent metadata and requested model, got {rendered:?}"
+        rendered.contains("Requested context inheritance: bounded"),
+        "expected begin row to include requested context inheritance, got {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Spawned Robie [explorer] (gpt-5-mini medium)"),
+        "expected completed row to use the effective model and reasoning, got {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Requested model/reasoning: (gpt-5 high)"),
+        "expected completed row to preserve requested model and reasoning details, got {rendered:?}"
+    );
+}
+
+#[tokio::test]
+async fn replayed_collab_spawn_end_preserves_requested_details_from_begin_event() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id = ThreadId::new();
+    let spawned_thread_id = ThreadId::new();
+
+    chat.handle_codex_event_replay(Event {
+        id: "spawn-begin".into(),
+        msg: EventMsg::CollabAgentSpawnBegin(CollabAgentSpawnBeginEvent {
+            call_id: "call-spawn".to_string(),
+            sender_thread_id,
+            prompt: "Explore the repo".to_string(),
+            model: "gpt-5".to_string(),
+            reasoning_effort: ReasoningEffortConfig::High,
+            context_inheritance_requested: Some(
+                codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
+            ),
+        }),
+    });
+    chat.handle_codex_event_replay(Event {
+        id: "spawn-end".into(),
+        msg: EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
+            call_id: "call-spawn".to_string(),
+            sender_thread_id,
+            new_thread_id: Some(spawned_thread_id),
+            new_agent_nickname: Some("Robie".to_string()),
+            new_agent_role: Some("explorer".to_string()),
+            prompt: "Explore the repo".to_string(),
+            requested_model: "gpt-5".to_string(),
+            requested_reasoning_effort: ReasoningEffortConfig::High,
+            model: "gpt-5-mini".to_string(),
+            reasoning_effort: ReasoningEffortConfig::Medium,
+            context_inheritance_requested: Some(
+                codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
+            ),
+            context_inheritance_effective: Some(
+                codex_protocol::protocol::SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
+            ),
+            context_inheritance_telemetry: None,
+            status: AgentStatus::PendingInit,
+        }),
+    });
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(
+        cells.len(),
+        1,
+        "expected replayed begin event to stay suppressed while still informing the completed row"
+    );
+    let rendered = lines_to_single_string(cells.first().expect("spawn cell"));
+    assert!(
+        rendered.contains("Spawned Robie [explorer] (gpt-5-mini medium)"),
+        "expected replayed completed row to use the effective model and reasoning, got {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Requested model/reasoning: (gpt-5 high)"),
+        "expected replayed completed row to preserve requested model and reasoning details, got {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("Spawning agent"),
+        "expected replayed begin row to remain suppressed, got {rendered:?}"
     );
 }
 
@@ -4975,6 +5053,8 @@ async fn live_app_server_collab_wait_items_render_history() {
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
+                effective_model: None,
+                effective_reasoning_effort: None,
                 context_inheritance_requested: None,
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
@@ -5000,6 +5080,8 @@ async fn live_app_server_collab_wait_items_render_history() {
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
+                effective_model: None,
+                effective_reasoning_effort: None,
                 context_inheritance_requested: None,
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
@@ -5053,7 +5135,11 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                 prompt: Some("Explore the repo".to_string()),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
-                context_inheritance_requested: None,
+                effective_model: None,
+                effective_reasoning_effort: None,
+                context_inheritance_requested: Some(
+                    codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
+                ),
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
                 agents_states: HashMap::new(),
@@ -5075,6 +5161,8 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                 prompt: Some("Explore the repo".to_string()),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
+                effective_model: Some("gpt-5-mini".to_string()),
+                effective_reasoning_effort: Some(ReasoningEffortConfig::Medium),
                 context_inheritance_requested: Some(
                     codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
                 ),
@@ -5110,6 +5198,446 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
     assert_snapshot!(
         "app_server_collab_spawn_completed_renders_requested_model_and_effort",
         combined
+    );
+}
+
+#[tokio::test]
+async fn replayed_in_progress_spawn_item_renders_begin_row() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000000005").expect("valid thread id");
+
+    chat.replay_thread_item(
+        AppServerThreadItem::CollabAgentToolCall {
+            id: "spawn-1".to_string(),
+            tool: AppServerCollabAgentTool::SpawnAgent,
+            status: AppServerCollabAgentToolCallStatus::InProgress,
+            sender_thread_id: sender_thread_id.to_string(),
+            receiver_thread_ids: Vec::new(),
+            prompt: Some("Explore the repo".to_string()),
+            model: Some("gpt-5".to_string()),
+            reasoning_effort: Some(ReasoningEffortConfig::High),
+            effective_model: None,
+            effective_reasoning_effort: None,
+            context_inheritance_requested: Some(
+                codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
+            ),
+            context_inheritance_effective: None,
+            context_inheritance_telemetry: None,
+            agents_states: HashMap::new(),
+        },
+        "turn-1".to_string(),
+        ReplayKind::ThreadSnapshotTurns,
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(
+        cells.len(),
+        1,
+        "expected replayed in-progress spawn item to render once"
+    );
+    let rendered = lines_to_single_string(cells.first().expect("spawn cell"));
+    assert!(
+        rendered.contains("Spawning agent"),
+        "expected replayed in-progress spawn row, got {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Requested context inheritance: bounded"),
+        "expected requested context inheritance on replayed in-progress spawn row, got {rendered:?}"
+    );
+}
+
+#[tokio::test]
+async fn replayed_spawn_begin_event_does_not_render_after_completed_spawn_item() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000000004").expect("valid thread id");
+    let spawned_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b9b39ca9ebf2").expect("valid thread id");
+
+    chat.replay_thread_item(
+        AppServerThreadItem::CollabAgentToolCall {
+            id: "spawn-1".to_string(),
+            tool: AppServerCollabAgentTool::SpawnAgent,
+            status: AppServerCollabAgentToolCallStatus::Completed,
+            sender_thread_id: sender_thread_id.to_string(),
+            receiver_thread_ids: vec![spawned_thread_id.to_string()],
+            prompt: Some("Explore the repo".to_string()),
+            model: Some("gpt-5".to_string()),
+            reasoning_effort: Some(ReasoningEffortConfig::High),
+            effective_model: Some("gpt-5-mini".to_string()),
+            effective_reasoning_effort: Some(ReasoningEffortConfig::Medium),
+            context_inheritance_requested: Some(
+                codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
+            ),
+            context_inheritance_effective: Some(
+                codex_protocol::protocol::SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
+            ),
+            context_inheritance_telemetry: None,
+            agents_states: HashMap::from([(
+                spawned_thread_id.to_string(),
+                AppServerCollabAgentState {
+                    status: AppServerCollabAgentStatus::PendingInit,
+                    message: None,
+                },
+            )]),
+        },
+        "turn-1".to_string(),
+        ReplayKind::ThreadSnapshotTurns,
+    );
+
+    chat.handle_codex_event_replay(Event {
+        id: "spawn-begin".to_string(),
+        msg: EventMsg::CollabAgentSpawnBegin(CollabAgentSpawnBeginEvent {
+            call_id: "spawn-1".to_string(),
+            sender_thread_id,
+            prompt: "Explore the repo".to_string(),
+            model: "gpt-5".to_string(),
+            reasoning_effort: ReasoningEffortConfig::High,
+            context_inheritance_requested: Some(
+                codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
+            ),
+        }),
+    });
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(
+        cells.len(),
+        1,
+        "expected replayed spawn begin event to be suppressed after completed spawn replay"
+    );
+    let rendered = lines_to_single_string(cells.first().expect("spawn cell"));
+    assert!(
+        rendered.contains("Spawned"),
+        "expected completed spawn row, got {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Requested model/reasoning: (gpt-5 high)"),
+        "expected replayed completed spawn row to keep requested model/reasoning, got {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Requested context inheritance: bounded"),
+        "expected replayed completed spawn row to keep requested context inheritance, got {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Context bounded -> bounded_trimmed"),
+        "expected replayed completed spawn row to keep effective context inheritance, got {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("Spawning agent"),
+        "expected replayed spawn begin row to be suppressed, got {rendered:?}"
+    );
+}
+
+#[tokio::test]
+async fn replayed_spawn_notifications_do_not_duplicate_completed_spawn_item() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000000006").expect("valid thread id");
+    let spawned_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000000007").expect("valid thread id");
+
+    chat.replay_thread_item(
+        AppServerThreadItem::CollabAgentToolCall {
+            id: "spawn-1".to_string(),
+            tool: AppServerCollabAgentTool::SpawnAgent,
+            status: AppServerCollabAgentToolCallStatus::Completed,
+            sender_thread_id: sender_thread_id.to_string(),
+            receiver_thread_ids: vec![spawned_thread_id.to_string()],
+            prompt: Some("Explore the repo".to_string()),
+            model: Some("gpt-5".to_string()),
+            reasoning_effort: Some(ReasoningEffortConfig::High),
+            effective_model: Some("gpt-5-mini".to_string()),
+            effective_reasoning_effort: Some(ReasoningEffortConfig::Medium),
+            context_inheritance_requested: Some(
+                codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
+            ),
+            context_inheritance_effective: Some(
+                codex_protocol::protocol::SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
+            ),
+            context_inheritance_telemetry: None,
+            agents_states: HashMap::from([(
+                spawned_thread_id.to_string(),
+                AppServerCollabAgentState {
+                    status: AppServerCollabAgentStatus::PendingInit,
+                    message: None,
+                },
+            )]),
+        },
+        "turn-1".to_string(),
+        ReplayKind::ThreadSnapshotTurns,
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::ItemStarted(ItemStartedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "spawn-1".to_string(),
+                tool: AppServerCollabAgentTool::SpawnAgent,
+                status: AppServerCollabAgentToolCallStatus::InProgress,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: Vec::new(),
+                prompt: Some("Explore the repo".to_string()),
+                model: Some("gpt-5".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::High),
+                effective_model: None,
+                effective_reasoning_effort: None,
+                context_inheritance_requested: Some(
+                    codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
+                ),
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
+                agents_states: HashMap::new(),
+            },
+        }),
+        Some(ReplayKind::ThreadSnapshotTurns),
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "spawn-1".to_string(),
+                tool: AppServerCollabAgentTool::SpawnAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![spawned_thread_id.to_string()],
+                prompt: Some("Explore the repo".to_string()),
+                model: Some("gpt-5".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::High),
+                effective_model: Some("gpt-5-mini".to_string()),
+                effective_reasoning_effort: Some(ReasoningEffortConfig::Medium),
+                context_inheritance_requested: Some(
+                    codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
+                ),
+                context_inheritance_effective: Some(
+                    codex_protocol::protocol::SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
+                ),
+                context_inheritance_telemetry: None,
+                agents_states: HashMap::from([(
+                    spawned_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::PendingInit,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+        Some(ReplayKind::ThreadSnapshotTurns),
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(
+        cells.len(),
+        1,
+        "expected replayed spawn notifications to be suppressed after completed spawn replay"
+    );
+    let rendered = lines_to_single_string(cells.first().expect("spawn cell"));
+    assert!(
+        rendered.contains("Spawned"),
+        "expected completed spawn row, got {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("Spawning agent"),
+        "expected replayed spawn notifications to avoid adding a second begin row, got {rendered:?}"
+    );
+}
+
+#[tokio::test]
+async fn replayed_thread_snapshot_event_notifications_do_not_duplicate_completed_spawn_item() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000000008").expect("valid thread id");
+    let spawned_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000000009").expect("valid thread id");
+
+    chat.replay_thread_item(
+        AppServerThreadItem::CollabAgentToolCall {
+            id: "spawn-1".to_string(),
+            tool: AppServerCollabAgentTool::SpawnAgent,
+            status: AppServerCollabAgentToolCallStatus::Completed,
+            sender_thread_id: sender_thread_id.to_string(),
+            receiver_thread_ids: vec![spawned_thread_id.to_string()],
+            prompt: Some("Explore the repo".to_string()),
+            model: Some("gpt-5".to_string()),
+            reasoning_effort: Some(ReasoningEffortConfig::High),
+            effective_model: Some("gpt-5-mini".to_string()),
+            effective_reasoning_effort: Some(ReasoningEffortConfig::Medium),
+            context_inheritance_requested: Some(
+                codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
+            ),
+            context_inheritance_effective: Some(
+                codex_protocol::protocol::SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
+            ),
+            context_inheritance_telemetry: None,
+            agents_states: HashMap::from([(
+                spawned_thread_id.to_string(),
+                AppServerCollabAgentState {
+                    status: AppServerCollabAgentStatus::PendingInit,
+                    message: None,
+                },
+            )]),
+        },
+        "turn-1".to_string(),
+        ReplayKind::ThreadSnapshotTurns,
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::ItemStarted(ItemStartedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "spawn-1".to_string(),
+                tool: AppServerCollabAgentTool::SpawnAgent,
+                status: AppServerCollabAgentToolCallStatus::InProgress,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: Vec::new(),
+                prompt: Some("Explore the repo".to_string()),
+                model: Some("gpt-5".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::High),
+                effective_model: None,
+                effective_reasoning_effort: None,
+                context_inheritance_requested: Some(
+                    codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
+                ),
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
+                agents_states: HashMap::new(),
+            },
+        }),
+        Some(ReplayKind::ThreadSnapshotEvents),
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "spawn-1".to_string(),
+                tool: AppServerCollabAgentTool::SpawnAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![spawned_thread_id.to_string()],
+                prompt: Some("Explore the repo".to_string()),
+                model: Some("gpt-5".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::High),
+                effective_model: Some("gpt-5-mini".to_string()),
+                effective_reasoning_effort: Some(ReasoningEffortConfig::Medium),
+                context_inheritance_requested: Some(
+                    codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
+                ),
+                context_inheritance_effective: Some(
+                    codex_protocol::protocol::SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
+                ),
+                context_inheritance_telemetry: None,
+                agents_states: HashMap::from([(
+                    spawned_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::PendingInit,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+        Some(ReplayKind::ThreadSnapshotEvents),
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(
+        cells.len(),
+        1,
+        "expected replayed thread-snapshot event notifications to be suppressed after completed spawn replay"
+    );
+    let rendered = lines_to_single_string(cells.first().expect("spawn cell"));
+    assert!(
+        rendered.contains("Spawned"),
+        "expected completed spawn row, got {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("Spawning agent"),
+        "expected replayed thread-snapshot event notifications to avoid adding a second begin row, got {rendered:?}"
+    );
+}
+
+#[tokio::test]
+async fn replayed_in_progress_spawn_item_allows_completed_notification_transition() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000000010").expect("valid thread id");
+    let spawned_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000000011").expect("valid thread id");
+
+    chat.replay_thread_item(
+        AppServerThreadItem::CollabAgentToolCall {
+            id: "spawn-1".to_string(),
+            tool: AppServerCollabAgentTool::SpawnAgent,
+            status: AppServerCollabAgentToolCallStatus::InProgress,
+            sender_thread_id: sender_thread_id.to_string(),
+            receiver_thread_ids: Vec::new(),
+            prompt: Some("Explore the repo".to_string()),
+            model: Some("gpt-5".to_string()),
+            reasoning_effort: Some(ReasoningEffortConfig::High),
+            effective_model: None,
+            effective_reasoning_effort: None,
+            context_inheritance_requested: Some(
+                codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
+            ),
+            context_inheritance_effective: None,
+            context_inheritance_telemetry: None,
+            agents_states: HashMap::new(),
+        },
+        "turn-1".to_string(),
+        ReplayKind::ThreadSnapshotTurns,
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "spawn-1".to_string(),
+                tool: AppServerCollabAgentTool::SpawnAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![spawned_thread_id.to_string()],
+                prompt: Some("Explore the repo".to_string()),
+                model: Some("gpt-5".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::High),
+                effective_model: Some("gpt-5-mini".to_string()),
+                effective_reasoning_effort: Some(ReasoningEffortConfig::Medium),
+                context_inheritance_requested: Some(
+                    codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
+                ),
+                context_inheritance_effective: Some(
+                    codex_protocol::protocol::SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
+                ),
+                context_inheritance_telemetry: None,
+                agents_states: HashMap::from([(
+                    spawned_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::PendingInit,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+        Some(ReplayKind::ThreadSnapshotEvents),
+    );
+
+    let combined = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    assert!(
+        combined.contains("Spawning agent"),
+        "expected replayed in-progress spawn row, got {combined:?}"
+    );
+    assert!(
+        combined.contains("Spawned"),
+        "expected replayed completed notification to render completion row, got {combined:?}"
     );
 }
 

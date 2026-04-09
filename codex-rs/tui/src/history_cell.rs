@@ -2001,6 +2001,42 @@ pub(crate) fn empty_mcp_output() -> PlainHistoryCell {
     PlainHistoryCell { lines }
 }
 
+fn sanitized_mcp_stdio_command_display(command: &str, args: &[String]) -> String {
+    std::iter::once(command)
+        .chain(args.iter().map(String::as_str))
+        .map(sanitize_mcp_stdio_command_token)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn sanitize_mcp_stdio_command_token(token: &str) -> String {
+    if Path::new(token).is_absolute() {
+        let tail = Path::new(token)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("path");
+        return format!("<abs>/{tail}");
+    }
+
+    if is_windows_absolute_path(token) {
+        let tail = token
+            .rsplit(['\\', '/'])
+            .find(|segment| !segment.is_empty())
+            .unwrap_or("path");
+        return format!("<abs>\\{tail}");
+    }
+
+    token.to_string()
+}
+
+fn is_windows_absolute_path(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    bytes.len() > 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
 #[cfg(test)]
 /// Render MCP tools grouped by connection using the fully-qualified tool names.
 pub(crate) fn new_mcp_tools_output(
@@ -2063,12 +2099,7 @@ pub(crate) fn new_mcp_tools_output(
                 env_vars,
                 cwd,
             } => {
-                let args_suffix = if args.is_empty() {
-                    String::new()
-                } else {
-                    format!(" {}", args.join(" "))
-                };
-                let cmd_display = format!("{command}{args_suffix}");
+                let cmd_display = sanitized_mcp_stdio_command_display(command, args);
                 lines.push(vec!["    • Command: ".into(), cmd_display.into()].into());
 
                 if let Some(cwd) = cwd.as_ref() {
@@ -2228,12 +2259,7 @@ pub(crate) fn new_mcp_tools_output_from_statuses(
                     env_vars,
                     cwd,
                 } => {
-                    let args_suffix = if args.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" {}", args.join(" "))
-                    };
-                    let cmd_display = format!("{command}{args_suffix}");
+                    let cmd_display = sanitized_mcp_stdio_command_display(command, args);
                     lines.push(vec!["    • Command: ".into(), cmd_display.into()].into());
 
                     if let Some(cwd) = cwd.as_ref() {
@@ -2984,7 +3010,10 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde_json::json;
     use std::collections::HashMap;
+    use std::fs;
+    use std::path::Path;
     use std::path::PathBuf;
+    use tempfile::TempDir;
 
     use codex_protocol::mcp::CallToolResult;
     use codex_protocol::mcp::Tool;
@@ -2999,6 +3028,121 @@ mod tests {
             .build()
             .await
             .expect("config")
+    }
+
+    fn write_file(path: &Path, contents: &str) {
+        fs::create_dir_all(path.parent().expect("file should have a parent")).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    fn curated_plugin_config_toml(plugin_names: &[&str]) -> String {
+        let plugin_sections = plugin_names
+            .iter()
+            .map(|plugin_name| {
+                format!(
+                    r#"[plugins."{plugin_name}@openai-curated"]
+enabled = true
+"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        format!(
+            r#"[features]
+plugins = true
+
+{plugin_sections}"#
+        )
+    }
+
+    fn write_curated_mcp_plugin(root: &Path, plugin_name: &str, mcp_config: &str) {
+        let marketplace_plugin_root = root.join(".tmp/plugins").join("plugins").join(plugin_name);
+        let installed_plugin_root = root
+            .join("plugins/cache/openai-curated")
+            .join(plugin_name)
+            .join("local");
+
+        for plugin_root in [&marketplace_plugin_root, &installed_plugin_root] {
+            write_file(
+                &plugin_root.join(".codex-plugin/plugin.json"),
+                &format!(r#"{{"name":"{plugin_name}"}}"#),
+            );
+            write_file(&plugin_root.join(".mcp.json"), mcp_config);
+        }
+    }
+
+    fn write_curated_marketplace(root: &Path, plugin_names: &[&str]) {
+        let plugins = plugin_names
+            .iter()
+            .map(|plugin_name| {
+                format!(
+                    r#"{{
+      "name": "{plugin_name}",
+      "source": {{
+        "source": "local",
+        "path": "./plugins/{plugin_name}"
+      }}
+    }}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",\n");
+        write_file(
+            &root.join(".tmp/plugins/.agents/plugins/marketplace.json"),
+            &format!(
+                r#"{{
+  "name": "openai-curated",
+  "plugins": [
+{plugins}
+  ]
+}}"#
+            ),
+        );
+        write_file(&root.join(".tmp/plugins.sha"), "test-curated-sha\n");
+    }
+
+    async fn mcp_snapshot_config() -> (TempDir, Config) {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        let cfm_camp_mcp = r#"{
+  "mcpServers": {
+    "cfm-camp": {
+      "command": "node",
+      "args": ["/workspace/purrnet/apps/cfm/backend/bin/mcp-camp.js"],
+      "env": {
+        "BACKEND_URL": "http://127.0.0.1:8080"
+      }
+    }
+  }
+}"#;
+        let cfm_operations_mcp = r#"{
+  "mcpServers": {
+    "cfm-operations": {
+      "command": "node",
+      "args": ["/workspace/purrnet/apps/cfm/backend/bin/cfm-operations.js"],
+      "env": {
+        "BACKEND_URL": "http://127.0.0.1:8080",
+        "CF_SCHEMA_REGISTRY_MODE": "remote",
+        "CF_SCHEMA_REGISTRY_URI": "https://schemas.example.test"
+      }
+    }
+  }
+}"#;
+        write_curated_marketplace(codex_home.path(), &["cfm-camp", "cfm-operations"]);
+        write_curated_mcp_plugin(codex_home.path(), "cfm-camp", cfm_camp_mcp);
+        write_curated_mcp_plugin(codex_home.path(), "cfm-operations", cfm_operations_mcp);
+        write_file(
+            &codex_home.path().join("config.toml"),
+            &curated_plugin_config_toml(&["cfm-camp", "cfm-operations"]),
+        );
+
+        let config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .build()
+            .await
+            .expect("config");
+
+        (codex_home, config)
     }
 
     fn test_cwd() -> PathBuf {
@@ -3403,11 +3547,11 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_tools_output_masks_sensitive_values() {
-        let mut config = test_config().await;
+        let (_codex_home, mut config) = mcp_snapshot_config().await;
         let mut env = HashMap::new();
         env.insert("TOKEN".to_string(), "secret".to_string());
         let stdio_config = stdio_server_config("docs-server", vec![], Some(env), vec!["APP_TOKEN"]);
-        let mut servers = config.mcp_servers.get().clone();
+        let mut servers = HashMap::new();
         servers.insert("docs".to_string(), stdio_config);
 
         let mut headers = HashMap::new();
@@ -3432,6 +3576,32 @@ mod tests {
             Tool {
                 description: None,
                 name: "list".to_string(),
+                title: None,
+                input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                output_schema: None,
+                annotations: None,
+                icons: None,
+                meta: None,
+            },
+        );
+        tools.insert(
+            "mcp__cfm_camp__campaign_get".to_string(),
+            Tool {
+                description: None,
+                name: "campaign_get".to_string(),
+                title: None,
+                input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                output_schema: None,
+                annotations: None,
+                icons: None,
+                meta: None,
+            },
+        );
+        tools.insert(
+            "mcp__cfm_operations__cf_strategy_view".to_string(),
+            Tool {
+                description: None,
+                name: "cf_strategy_view".to_string(),
                 title: None,
                 input_schema: serde_json::json!({"type": "object", "properties": {}}),
                 output_schema: None,
@@ -3469,8 +3639,8 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_tools_output_lists_tools_for_hyphenated_server_names() {
-        let mut config = test_config().await;
-        let mut servers = config.mcp_servers.get().clone();
+        let (_codex_home, mut config) = mcp_snapshot_config().await;
+        let mut servers = HashMap::new();
         servers.insert(
             "some-server".to_string(),
             stdio_server_config("docs-server", vec!["--stdio"], /*env*/ None, vec![]),
@@ -3492,7 +3662,37 @@ mod tests {
                 icons: None,
                 meta: None,
             },
-        )]);
+        )])
+        .into_iter()
+        .chain([
+            (
+                "mcp__cfm_camp__campaign_get".to_string(),
+                Tool {
+                    description: None,
+                    name: "campaign_get".to_string(),
+                    title: None,
+                    input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                    output_schema: None,
+                    annotations: None,
+                    icons: None,
+                    meta: None,
+                },
+            ),
+            (
+                "mcp__cfm_operations__cf_strategy_view".to_string(),
+                Tool {
+                    description: None,
+                    name: "cf_strategy_view".to_string(),
+                    title: None,
+                    input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                    output_schema: None,
+                    annotations: None,
+                    icons: None,
+                    meta: None,
+                },
+            ),
+        ])
+        .collect();
 
         let auth_statuses: HashMap<String, McpAuthStatus> = HashMap::new();
         let cell = new_mcp_tools_output(
@@ -3544,6 +3744,38 @@ mod tests {
         let rendered = render_lines(&cell.display_lines(/*width*/ 120)).join("\n");
 
         insta::assert_snapshot!(rendered);
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_output_from_statuses_masks_absolute_stdio_paths() {
+        let mut config = test_config().await;
+        let servers = HashMap::from([(
+            "plugin_docs".to_string(),
+            stdio_server_config(
+                "node",
+                vec!["/workspace/purrnet/apps/cfm/backend/bin/mcp-camp.js"],
+                /*env*/ None,
+                vec![],
+            ),
+        )]);
+        config
+            .mcp_servers
+            .set(servers)
+            .expect("test mcp servers should accept any configuration");
+
+        let statuses = vec![McpServerStatus {
+            name: "plugin_docs".to_string(),
+            tools: HashMap::new(),
+            resources: Vec::new(),
+            resource_templates: Vec::new(),
+            auth_status: codex_app_server_protocol::McpAuthStatus::Unsupported,
+        }];
+
+        let cell = new_mcp_tools_output_from_statuses(&config, &statuses);
+        let rendered = render_lines(&cell.display_lines(/*width*/ 120)).join("\n");
+
+        assert!(rendered.contains("Command: node <abs>/mcp-camp.js"));
+        assert!(!rendered.contains("/workspace/purrnet/apps/cfm/backend/bin/mcp-camp.js"));
     }
 
     #[test]

@@ -9,18 +9,18 @@ expression: rendered
   • cfm-camp
     • Status: enabled
     • Auth: Unsupported
-    • Command: node /workspace/purrnet/apps/cfm/backend/bin/mcp-camp.js
+    • Command: node <abs>/mcp-camp.js
     • Env: BACKEND_URL=*****
-    • Tools: (none)
+    • Tools: campaign_get
     • Resources: (none)
     • Resource templates: (none)
 
   • cfm-operations
     • Status: enabled
     • Auth: Unsupported
-    • Command: node /workspace/purrnet/apps/cfm/backend/bin/cfm-operations.js
+    • Command: node <abs>/cfm-operations.js
     • Env: BACKEND_URL=*****, CF_SCHEMA_REGISTRY_MODE=*****, CF_SCHEMA_REGISTRY_URI=*****
-    • Tools: (none)
+    • Tools: cf_strategy_view
     • Resources: (none)
     • Resource templates: (none)
 

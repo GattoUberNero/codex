@@ -643,29 +643,6 @@ fn spawn_agent_common_properties(agent_type_description: &str) -> BTreeMap<Strin
             },
         ),
         (
-            "fork_context".to_string(),
-            JsonSchema::Boolean {
-                description: Some(
-                    "When true, fork the current thread history into the new agent before sending the initial prompt. This must be used when you want the new agent to have exactly the same context as you."
-                        .to_string(),
-                ),
-            },
-        ),
-        (
-            "context_inheritance".to_string(),
-            JsonSchema::String {
-                enum_values: Some(vec![
-                    "off".to_string(),
-                    "exact".to_string(),
-                    "bounded".to_string(),
-                ]),
-                description: Some(
-                    "Optional explicit inheritance mode. Use `off` for no parent history, `exact` to preserve full fork semantics, or `bounded` to request replay-safe budgeted inheritance. If both context_inheritance and fork_context are provided, they must agree."
-                        .to_string(),
-                ),
-            },
-        ),
-        (
             "model".to_string(),
             JsonSchema::String {
                 enum_values: None,

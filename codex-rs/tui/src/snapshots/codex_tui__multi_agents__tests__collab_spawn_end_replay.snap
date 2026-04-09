@@ -1,0 +1,9 @@
+---
+source: tui/src/multi_agents.rs
+expression: cell_to_text(&cell)
+---
+• Spawned Robie [explorer] (gpt-5-mini medium)
+  └ Inspect the repo and report the likely failure mode.
+    Requested model/reasoning: (gpt-5 high)
+    Requested context inheritance: bounded
+    Context bounded -> bounded_trimmed

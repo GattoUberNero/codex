@@ -1032,20 +1032,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .await;
         }
         EventMsg::CollabAgentSpawnBegin(begin_event) => {
-            let item = ThreadItem::CollabAgentToolCall {
-                id: begin_event.call_id,
-                tool: CollabAgentTool::SpawnAgent,
-                status: V2CollabToolCallStatus::InProgress,
-                sender_thread_id: begin_event.sender_thread_id.to_string(),
-                receiver_thread_ids: Vec::new(),
-                prompt: Some(begin_event.prompt),
-                model: Some(begin_event.model),
-                reasoning_effort: Some(begin_event.reasoning_effort),
-                context_inheritance_requested: None,
-                context_inheritance_effective: None,
-                context_inheritance_telemetry: None,
-                agents_states: HashMap::new(),
-            };
+            let item = collab_spawn_begin_item(begin_event);
             let notification = ItemStartedNotification {
                 thread_id: conversation_id.to_string(),
                 turn_id: event_turn_id.clone(),
@@ -1082,8 +1069,12 @@ pub(crate) async fn apply_bespoke_event_handling(
                 sender_thread_id: begin_event.sender_thread_id.to_string(),
                 receiver_thread_ids,
                 prompt: Some(begin_event.prompt),
+                requested_model: None,
+                requested_reasoning_effort: None,
                 model: None,
                 reasoning_effort: None,
+                effective_model: None,
+                effective_reasoning_effort: None,
                 context_inheritance_requested: None,
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
@@ -1113,8 +1104,12 @@ pub(crate) async fn apply_bespoke_event_handling(
                 sender_thread_id: end_event.sender_thread_id.to_string(),
                 receiver_thread_ids: vec![receiver_id.clone()],
                 prompt: Some(end_event.prompt),
+                requested_model: None,
+                requested_reasoning_effort: None,
                 model: None,
                 reasoning_effort: None,
+                effective_model: None,
+                effective_reasoning_effort: None,
                 context_inheritance_requested: None,
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
@@ -1142,8 +1137,12 @@ pub(crate) async fn apply_bespoke_event_handling(
                 sender_thread_id: begin_event.sender_thread_id.to_string(),
                 receiver_thread_ids,
                 prompt: None,
+                requested_model: None,
+                requested_reasoning_effort: None,
                 model: None,
                 reasoning_effort: None,
+                effective_model: None,
+                effective_reasoning_effort: None,
                 context_inheritance_requested: None,
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
@@ -1183,8 +1182,12 @@ pub(crate) async fn apply_bespoke_event_handling(
                 sender_thread_id: end_event.sender_thread_id.to_string(),
                 receiver_thread_ids,
                 prompt: None,
+                requested_model: None,
+                requested_reasoning_effort: None,
                 model: None,
                 reasoning_effort: None,
+                effective_model: None,
+                effective_reasoning_effort: None,
                 context_inheritance_requested: None,
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
@@ -1207,8 +1210,12 @@ pub(crate) async fn apply_bespoke_event_handling(
                 sender_thread_id: begin_event.sender_thread_id.to_string(),
                 receiver_thread_ids: vec![begin_event.receiver_thread_id.to_string()],
                 prompt: None,
+                requested_model: None,
+                requested_reasoning_effort: None,
                 model: None,
                 reasoning_effort: None,
+                effective_model: None,
+                effective_reasoning_effort: None,
                 context_inheritance_requested: None,
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
@@ -1252,8 +1259,12 @@ pub(crate) async fn apply_bespoke_event_handling(
                 sender_thread_id: end_event.sender_thread_id.to_string(),
                 receiver_thread_ids: vec![receiver_id],
                 prompt: None,
+                requested_model: None,
+                requested_reasoning_effort: None,
                 model: None,
                 reasoning_effort: None,
+                effective_model: None,
+                effective_reasoning_effort: None,
                 context_inheritance_requested: None,
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
@@ -2768,9 +2779,36 @@ fn collab_resume_begin_item(
         sender_thread_id: begin_event.sender_thread_id.to_string(),
         receiver_thread_ids: vec![begin_event.receiver_thread_id.to_string()],
         prompt: None,
+        requested_model: None,
+        requested_reasoning_effort: None,
         model: None,
         reasoning_effort: None,
+        effective_model: None,
+        effective_reasoning_effort: None,
         context_inheritance_requested: None,
+        context_inheritance_effective: None,
+        context_inheritance_telemetry: None,
+        agents_states: HashMap::new(),
+    }
+}
+
+fn collab_spawn_begin_item(
+    begin_event: codex_protocol::protocol::CollabAgentSpawnBeginEvent,
+) -> ThreadItem {
+    ThreadItem::CollabAgentToolCall {
+        id: begin_event.call_id,
+        tool: CollabAgentTool::SpawnAgent,
+        status: V2CollabToolCallStatus::InProgress,
+        sender_thread_id: begin_event.sender_thread_id.to_string(),
+        receiver_thread_ids: Vec::new(),
+        prompt: Some(begin_event.prompt),
+        requested_model: Some(begin_event.model.clone()),
+        requested_reasoning_effort: Some(begin_event.reasoning_effort),
+        model: Some(begin_event.model),
+        reasoning_effort: Some(begin_event.reasoning_effort),
+        effective_model: None,
+        effective_reasoning_effort: None,
+        context_inheritance_requested: begin_event.context_inheritance_requested,
         context_inheritance_effective: None,
         context_inheritance_telemetry: None,
         agents_states: HashMap::new(),
@@ -2799,8 +2837,12 @@ fn collab_spawn_end_item(
         sender_thread_id: end_event.sender_thread_id.to_string(),
         receiver_thread_ids,
         prompt: Some(end_event.prompt),
-        model: Some(end_event.model),
+        requested_model: Some(end_event.requested_model),
+        requested_reasoning_effort: Some(end_event.requested_reasoning_effort),
+        model: Some(end_event.model.clone()),
         reasoning_effort: Some(end_event.reasoning_effort),
+        effective_model: Some(end_event.model),
+        effective_reasoning_effort: Some(end_event.reasoning_effort),
         context_inheritance_requested: end_event.context_inheritance_requested,
         context_inheritance_effective: end_event.context_inheritance_effective,
         context_inheritance_telemetry: end_event.context_inheritance_telemetry,
@@ -2828,8 +2870,12 @@ fn collab_resume_end_item(end_event: codex_protocol::protocol::CollabResumeEndEv
         sender_thread_id: end_event.sender_thread_id.to_string(),
         receiver_thread_ids: vec![receiver_id],
         prompt: None,
+        requested_model: None,
+        requested_reasoning_effort: None,
         model: None,
         reasoning_effort: None,
+        effective_model: None,
+        effective_reasoning_effort: None,
         context_inheritance_requested: None,
         context_inheritance_effective: None,
         context_inheritance_telemetry: None,
@@ -2927,6 +2973,7 @@ mod tests {
     use codex_protocol::models::NetworkPermissions as CoreNetworkPermissions;
     use codex_protocol::plan_tool::PlanItemArg;
     use codex_protocol::plan_tool::StepStatus;
+    use codex_protocol::protocol::CollabAgentSpawnBeginEvent;
     use codex_protocol::protocol::CollabAgentSpawnEndEvent;
     use codex_protocol::protocol::CollabResumeBeginEvent;
     use codex_protocol::protocol::CollabResumeEndEvent;
@@ -3262,8 +3309,12 @@ mod tests {
             sender_thread_id: event.sender_thread_id.to_string(),
             receiver_thread_ids: vec![event.receiver_thread_id.to_string()],
             prompt: None,
+            requested_model: None,
+            requested_reasoning_effort: None,
             model: None,
             reasoning_effort: None,
+            effective_model: None,
+            effective_reasoning_effort: None,
             context_inheritance_requested: None,
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
@@ -3292,8 +3343,12 @@ mod tests {
             sender_thread_id: event.sender_thread_id.to_string(),
             receiver_thread_ids: vec![receiver_id.clone()],
             prompt: None,
+            requested_model: None,
+            requested_reasoning_effort: None,
             model: None,
             reasoning_effort: None,
+            effective_model: None,
+            effective_reasoning_effort: None,
             context_inheritance_requested: None,
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
@@ -3308,6 +3363,41 @@ mod tests {
     }
 
     #[test]
+    fn collab_spawn_begin_maps_requested_context_inheritance() {
+        let event = CollabAgentSpawnBeginEvent {
+            call_id: "call-begin".to_string(),
+            sender_thread_id: ThreadId::new(),
+            prompt: "inspect repo".to_string(),
+            model: "gpt-5.4-mini".to_string(),
+            reasoning_effort: codex_protocol::openai_models::ReasoningEffort::Medium,
+            context_inheritance_requested: Some(SpawnContextInheritanceMode::Bounded),
+        };
+
+        let item = collab_spawn_begin_item(event.clone());
+        let expected = ThreadItem::CollabAgentToolCall {
+            id: event.call_id,
+            tool: CollabAgentTool::SpawnAgent,
+            status: V2CollabToolCallStatus::InProgress,
+            sender_thread_id: event.sender_thread_id.to_string(),
+            receiver_thread_ids: Vec::new(),
+            prompt: Some("inspect repo".to_string()),
+            requested_model: Some("gpt-5.4-mini".to_string()),
+            requested_reasoning_effort: Some(
+                codex_protocol::openai_models::ReasoningEffort::Medium,
+            ),
+            model: Some("gpt-5.4-mini".to_string()),
+            reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium),
+            effective_model: None,
+            effective_reasoning_effort: None,
+            context_inheritance_requested: Some(SpawnContextInheritanceMode::Bounded),
+            context_inheritance_effective: None,
+            context_inheritance_telemetry: None,
+            agents_states: HashMap::new(),
+        };
+        assert_eq!(item, expected);
+    }
+
+    #[test]
     fn collab_spawn_end_maps_context_inheritance_fields() {
         let event = CollabAgentSpawnEndEvent {
             call_id: "call-3".to_string(),
@@ -3316,6 +3406,8 @@ mod tests {
             new_agent_nickname: Some("Scout".to_string()),
             new_agent_role: Some("researcher".to_string()),
             prompt: "inspect repo".to_string(),
+            requested_model: "gpt-5.4".to_string(),
+            requested_reasoning_effort: codex_protocol::openai_models::ReasoningEffort::Low,
             model: "gpt-5.4-mini".to_string(),
             reasoning_effort: codex_protocol::openai_models::ReasoningEffort::Medium,
             context_inheritance_requested: Some(SpawnContextInheritanceMode::Bounded),
@@ -3344,8 +3436,14 @@ mod tests {
             sender_thread_id: event.sender_thread_id.to_string(),
             receiver_thread_ids: vec![receiver_id.clone()],
             prompt: Some("inspect repo".to_string()),
+            requested_model: Some("gpt-5.4".to_string()),
+            requested_reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Low),
             model: Some("gpt-5.4-mini".to_string()),
             reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium),
+            effective_model: Some("gpt-5.4-mini".to_string()),
+            effective_reasoning_effort: Some(
+                codex_protocol::openai_models::ReasoningEffort::Medium,
+            ),
             context_inheritance_requested: Some(SpawnContextInheritanceMode::Bounded),
             context_inheritance_effective: Some(
                 SpawnContextInheritanceEffectiveMode::BoundedTrimmed,

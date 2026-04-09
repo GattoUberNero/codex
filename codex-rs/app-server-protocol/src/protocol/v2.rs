@@ -4662,9 +4662,17 @@ pub enum ThreadItem {
         /// Prompt text sent as part of the collab tool call, when available.
         prompt: Option<String>,
         /// Model requested for the spawned agent, when applicable.
-        model: Option<String>,
+        requested_model: Option<String>,
         /// Reasoning effort requested for the spawned agent, when applicable.
+        requested_reasoning_effort: Option<ReasoningEffort>,
+        /// Effective model used by the spawned agent after role and runtime overrides.
+        model: Option<String>,
+        /// Effective reasoning effort used by the spawned agent after role and runtime overrides.
         reasoning_effort: Option<ReasoningEffort>,
+        /// Effective model used by the spawned agent after role and runtime overrides.
+        effective_model: Option<String>,
+        /// Effective reasoning effort used by the spawned agent after role and runtime overrides.
+        effective_reasoning_effort: Option<ReasoningEffort>,
         /// Requested parent-context inheritance mode for spawn calls, when available.
         context_inheritance_requested: Option<SpawnContextInheritanceMode>,
         /// Effective parent-context inheritance mode after runtime budgeting and validation.

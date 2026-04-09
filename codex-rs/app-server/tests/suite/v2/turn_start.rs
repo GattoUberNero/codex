@@ -1782,7 +1782,9 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
             prompt: Some(CHILD_PROMPT.to_string()),
             model: Some(REQUESTED_MODEL.to_string()),
             reasoning_effort: Some(REQUESTED_REASONING_EFFORT),
-            context_inheritance_requested: None,
+            effective_model: None,
+            effective_reasoning_effort: None,
+            context_inheritance_requested: Some(SpawnContextInheritanceMode::Off),
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
             agents_states: HashMap::new(),
@@ -1813,6 +1815,8 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
         prompt,
         model,
         reasoning_effort,
+        effective_model,
+        effective_reasoning_effort,
         context_inheritance_requested,
         context_inheritance_effective,
         context_inheritance_telemetry,
@@ -1833,6 +1837,8 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
     assert_eq!(prompt, Some(CHILD_PROMPT.to_string()));
     assert_eq!(model, Some(REQUESTED_MODEL.to_string()));
     assert_eq!(reasoning_effort, Some(REQUESTED_REASONING_EFFORT));
+    assert_eq!(effective_model, Some(REQUESTED_MODEL.to_string()));
+    assert_eq!(effective_reasoning_effort, Some(REQUESTED_REASONING_EFFORT));
     assert_eq!(
         context_inheritance_requested,
         Some(SpawnContextInheritanceMode::Off)
@@ -2009,6 +2015,8 @@ config_file = "./custom-role.toml"
         prompt,
         model,
         reasoning_effort,
+        effective_model,
+        effective_reasoning_effort,
         context_inheritance_requested,
         context_inheritance_effective,
         context_inheritance_telemetry,
@@ -2027,8 +2035,10 @@ config_file = "./custom-role.toml"
     assert_eq!(sender_thread_id, thread.id);
     assert_eq!(receiver_thread_ids, vec![receiver_thread_id.clone()]);
     assert_eq!(prompt, Some(CHILD_PROMPT.to_string()));
-    assert_eq!(model, Some(ROLE_MODEL.to_string()));
-    assert_eq!(reasoning_effort, Some(ROLE_REASONING_EFFORT));
+    assert_eq!(model, Some(REQUESTED_MODEL.to_string()));
+    assert_eq!(reasoning_effort, Some(REQUESTED_REASONING_EFFORT));
+    assert_eq!(effective_model, Some(ROLE_MODEL.to_string()));
+    assert_eq!(effective_reasoning_effort, Some(ROLE_REASONING_EFFORT));
     assert_eq!(
         context_inheritance_requested,
         Some(SpawnContextInheritanceMode::Off)

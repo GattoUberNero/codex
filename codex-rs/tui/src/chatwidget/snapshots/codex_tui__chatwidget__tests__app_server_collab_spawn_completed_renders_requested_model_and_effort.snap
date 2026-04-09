@@ -2,7 +2,13 @@
 source: tui/src/chatwidget/tests.rs
 expression: combined
 ---
-• Spawned 019cff70-2599-75e2-af72-b91781b41a8e (gpt-5 high)
+• Spawning agent (gpt-5 high)
   └ Explore the repo
+    Requested context inheritance: bounded
+
+
+• Spawned 019cff70-2599-75e2-af72-b91781b41a8e (gpt-5-mini medium)
+  └ Explore the repo
+    Requested model/reasoning: (gpt-5 high)
     Context bounded -> bounded_trimmed
     Budget turns 6 -> 2 | tokens ~18500/24000

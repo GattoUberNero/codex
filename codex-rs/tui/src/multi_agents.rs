@@ -60,6 +60,24 @@ struct AgentLabel<'a> {
 pub(crate) struct SpawnRequestSummary {
     pub(crate) model: String,
     pub(crate) reasoning_effort: ReasoningEffortConfig,
+    pub(crate) context_inheritance_requested: Option<SpawnContextInheritanceMode>,
+}
+
+pub(crate) fn spawn_begin(prompt: &str, spawn_request: &SpawnRequestSummary) -> PlainHistoryCell {
+    let mut spans = vec![Span::from("Spawning agent").bold()];
+    spans.extend(spawn_request_spans(Some(spawn_request)));
+
+    let mut details = Vec::new();
+    if let Some(line) = prompt_line(prompt) {
+        details.push(line);
+    }
+    if let Some(line) =
+        requested_context_inheritance_line(spawn_request.context_inheritance_requested)
+    {
+        details.push(line);
+    }
+
+    collab_event(title_spans_line(spans), details)
 }
 
 pub(crate) fn agent_picker_status_dot_spans(is_closed: bool) -> Vec<Span<'static>> {
@@ -177,7 +195,7 @@ fn next_agent_word_motion_fallback(
 
 pub(crate) fn spawn_end(
     ev: CollabAgentSpawnEndEvent,
-    spawn_request: Option<&SpawnRequestSummary>,
+    requested_spawn_request: Option<&SpawnRequestSummary>,
 ) -> PlainHistoryCell {
     let CollabAgentSpawnEndEvent {
         call_id: _,
@@ -186,12 +204,29 @@ pub(crate) fn spawn_end(
         new_agent_nickname,
         new_agent_role,
         prompt,
+        requested_model,
+        requested_reasoning_effort,
+        model,
+        reasoning_effort,
         context_inheritance_requested,
         context_inheritance_effective,
         context_inheritance_telemetry,
         status: _,
         ..
     } = ev;
+    let replayed_without_begin_row = requested_spawn_request.is_none();
+    let requested_spawn_request_fallback = SpawnRequestSummary {
+        model: requested_model,
+        reasoning_effort: requested_reasoning_effort,
+        context_inheritance_requested,
+    };
+    let requested_spawn_request =
+        requested_spawn_request.or(Some(&requested_spawn_request_fallback));
+    let effective_spawn_request = SpawnRequestSummary {
+        model,
+        reasoning_effort,
+        context_inheritance_requested: None,
+    };
 
     let title = match new_thread_id {
         Some(thread_id) => title_with_agent(
@@ -201,13 +236,23 @@ pub(crate) fn spawn_end(
                 nickname: new_agent_nickname.as_deref(),
                 role: new_agent_role.as_deref(),
             },
-            spawn_request,
+            Some(&effective_spawn_request),
         ),
         None => title_text("Agent spawn failed"),
     };
 
     let mut details = Vec::new();
     if let Some(line) = prompt_line(&prompt) {
+        details.push(line);
+    }
+    if let Some(line) =
+        requested_spawn_request_line(requested_spawn_request, &effective_spawn_request)
+    {
+        details.push(line);
+    }
+    if replayed_without_begin_row
+        && let Some(line) = requested_context_inheritance_line(context_inheritance_requested)
+    {
         details.push(line);
     }
     if let Some(line) =
@@ -433,18 +478,56 @@ fn spawn_request_spans(spawn_request: Option<&SpawnRequestSummary>) -> Vec<Span<
         return Vec::new();
     };
 
-    let model = spawn_request.model.trim();
-    if model.is_empty() && spawn_request.reasoning_effort == ReasoningEffortConfig::default() {
+    let Some(details) = spawn_request_details_text(spawn_request) else {
         return Vec::new();
-    }
-
-    let details = if model.is_empty() {
-        format!("({})", spawn_request.reasoning_effort)
-    } else {
-        format!("({model} {})", spawn_request.reasoning_effort)
     };
 
     vec![Span::from(" ").dim(), Span::from(details).magenta()]
+}
+
+fn spawn_request_details_text(spawn_request: &SpawnRequestSummary) -> Option<String> {
+    let model = spawn_request.model.trim();
+    if model.is_empty() && spawn_request.reasoning_effort == ReasoningEffortConfig::default() {
+        return None;
+    }
+
+    Some(if model.is_empty() {
+        format!("({})", spawn_request.reasoning_effort)
+    } else {
+        format!("({model} {})", spawn_request.reasoning_effort)
+    })
+}
+
+fn requested_spawn_request_line(
+    requested: Option<&SpawnRequestSummary>,
+    effective: &SpawnRequestSummary,
+) -> Option<Line<'static>> {
+    let requested = requested?;
+    if requested.model == effective.model
+        && requested.reasoning_effort == effective.reasoning_effort
+    {
+        return None;
+    }
+
+    let requested = spawn_request_details_text(requested)?;
+    Some(Line::from(vec![
+        "Requested model/reasoning: ".dim(),
+        requested.magenta(),
+    ]))
+}
+
+fn requested_context_inheritance_line(
+    requested: Option<SpawnContextInheritanceMode>,
+) -> Option<Line<'static>> {
+    let requested = requested?;
+    if requested == SpawnContextInheritanceMode::Off {
+        return None;
+    }
+
+    Some(Line::from(vec![
+        "Requested context inheritance: ".dim(),
+        context_inheritance_mode_text(requested).into(),
+    ]))
 }
 
 fn prompt_line(prompt: &str) -> Option<Line<'static>> {
@@ -465,25 +548,38 @@ fn context_inheritance_line(
 ) -> Option<Line<'static>> {
     let requested = requested?;
     let effective = effective?;
-    let requested = match requested {
+    if requested == SpawnContextInheritanceMode::Off
+        && effective == SpawnContextInheritanceEffectiveMode::Off
+    {
+        return None;
+    }
+
+    Some(Line::from(vec![
+        "Context ".dim(),
+        context_inheritance_mode_text(requested).into(),
+        " -> ".dim(),
+        context_inheritance_effective_mode_text(effective).into(),
+    ]))
+}
+
+fn context_inheritance_mode_text(mode: SpawnContextInheritanceMode) -> &'static str {
+    match mode {
         SpawnContextInheritanceMode::Off => "off",
         SpawnContextInheritanceMode::Exact => "exact",
         SpawnContextInheritanceMode::Bounded => "bounded",
-    };
-    let effective = match effective {
+    }
+}
+
+fn context_inheritance_effective_mode_text(
+    mode: SpawnContextInheritanceEffectiveMode,
+) -> &'static str {
+    match mode {
         SpawnContextInheritanceEffectiveMode::Off => "off",
         SpawnContextInheritanceEffectiveMode::Exact => "exact",
         SpawnContextInheritanceEffectiveMode::BoundedFull => "bounded_full",
         SpawnContextInheritanceEffectiveMode::BoundedTrimmed => "bounded_trimmed",
         SpawnContextInheritanceEffectiveMode::BoundedSuppressed => "bounded_suppressed",
-    };
-
-    Some(Line::from(vec![
-        "Context ".dim(),
-        requested.into(),
-        " -> ".dim(),
-        effective.into(),
-    ]))
+    }
 }
 
 fn context_inheritance_telemetry_lines(
@@ -682,6 +778,20 @@ mod tests {
     use ratatui::style::Modifier;
 
     #[test]
+    fn collab_spawn_begin_snapshot() {
+        let cell = spawn_begin(
+            "Inspect the repo and report the likely failure mode.",
+            &SpawnRequestSummary {
+                model: "gpt-5".to_string(),
+                reasoning_effort: ReasoningEffortConfig::High,
+                context_inheritance_requested: Some(SpawnContextInheritanceMode::Bounded),
+            },
+        );
+
+        assert_snapshot!("collab_spawn_begin", cell_to_text(&cell));
+    }
+
+    #[test]
     fn collab_events_snapshot() {
         let sender_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000001")
             .expect("valid sender thread id");
@@ -698,6 +808,8 @@ mod tests {
                 new_agent_nickname: Some("Robie".to_string()),
                 new_agent_role: Some("explorer".to_string()),
                 prompt: "Compute 11! and reply with just the integer result.".to_string(),
+                requested_model: "gpt-5".to_string(),
+                requested_reasoning_effort: ReasoningEffortConfig::High,
                 model: "gpt-5".to_string(),
                 reasoning_effort: ReasoningEffortConfig::High,
                 context_inheritance_requested: Some(SpawnContextInheritanceMode::Bounded),
@@ -713,10 +825,7 @@ mod tests {
                 }),
                 status: AgentStatus::PendingInit,
             },
-            Some(&SpawnRequestSummary {
-                model: "gpt-5".to_string(),
-                reasoning_effort: ReasoningEffortConfig::High,
-            }),
+            /*requested_spawn_request*/ None,
         );
 
         let send = interaction_end(CollabAgentInteractionEndEvent {
@@ -783,6 +892,85 @@ mod tests {
         assert_snapshot!("collab_agent_transcript", snapshot);
     }
 
+    #[test]
+    fn collab_spawn_end_replay_snapshot() {
+        let sender_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000011")
+            .expect("valid sender thread id");
+        let spawned_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000012")
+            .expect("valid spawned thread id");
+
+        let cell = spawn_end(
+            CollabAgentSpawnEndEvent {
+                call_id: "call-spawn-replay".to_string(),
+                sender_thread_id,
+                new_thread_id: Some(spawned_thread_id),
+                new_agent_nickname: Some("Robie".to_string()),
+                new_agent_role: Some("explorer".to_string()),
+                prompt: "Inspect the repo and report the likely failure mode.".to_string(),
+                requested_model: "gpt-5".to_string(),
+                requested_reasoning_effort: ReasoningEffortConfig::High,
+                model: "gpt-5-mini".to_string(),
+                reasoning_effort: ReasoningEffortConfig::Medium,
+                context_inheritance_requested: Some(SpawnContextInheritanceMode::Bounded),
+                context_inheritance_effective: Some(
+                    SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
+                ),
+                context_inheritance_telemetry: None,
+                status: AgentStatus::PendingInit,
+            },
+            /*requested_spawn_request*/ None,
+        );
+
+        assert_snapshot!("collab_spawn_end_replay", cell_to_text(&cell));
+    }
+
+    #[test]
+    fn collab_spawn_begin_hides_default_context_inheritance_off() {
+        let cell = spawn_begin(
+            "Inspect the repo and report the likely failure mode.",
+            &SpawnRequestSummary {
+                model: "gpt-5".to_string(),
+                reasoning_effort: ReasoningEffortConfig::High,
+                context_inheritance_requested: Some(SpawnContextInheritanceMode::Off),
+            },
+        );
+
+        let rendered = cell_to_text(&cell);
+        assert!(!rendered.contains("Requested context inheritance"));
+    }
+
+    #[test]
+    fn collab_spawn_end_hides_default_context_inheritance_mapping() {
+        let sender_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000021")
+            .expect("valid sender thread id");
+        let spawned_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000022")
+            .expect("valid spawned thread id");
+
+        let cell = spawn_end(
+            CollabAgentSpawnEndEvent {
+                call_id: "call-spawn-off".to_string(),
+                sender_thread_id,
+                new_thread_id: Some(spawned_thread_id),
+                new_agent_nickname: Some("Robie".to_string()),
+                new_agent_role: Some("explorer".to_string()),
+                prompt: "Inspect the repo and report the likely failure mode.".to_string(),
+                requested_model: "gpt-5".to_string(),
+                requested_reasoning_effort: ReasoningEffortConfig::High,
+                model: "gpt-5".to_string(),
+                reasoning_effort: ReasoningEffortConfig::High,
+                context_inheritance_requested: Some(SpawnContextInheritanceMode::Off),
+                context_inheritance_effective: Some(SpawnContextInheritanceEffectiveMode::Off),
+                context_inheritance_telemetry: None,
+                status: AgentStatus::PendingInit,
+            },
+            /*requested_spawn_request*/ None,
+        );
+
+        let rendered = cell_to_text(&cell);
+        assert!(!rendered.contains("Requested context inheritance"));
+        assert!(!rendered.contains("Context off -> off"));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn agent_shortcut_matches_option_arrow_word_motion_fallbacks_only_when_allowed() {
@@ -847,6 +1035,8 @@ mod tests {
                 new_agent_nickname: Some("Robie".to_string()),
                 new_agent_role: Some("explorer".to_string()),
                 prompt: String::new(),
+                requested_model: "gpt-5".to_string(),
+                requested_reasoning_effort: ReasoningEffortConfig::High,
                 model: "gpt-5".to_string(),
                 reasoning_effort: ReasoningEffortConfig::High,
                 context_inheritance_requested: Some(SpawnContextInheritanceMode::Exact),
@@ -860,10 +1050,7 @@ mod tests {
                 }),
                 status: AgentStatus::PendingInit,
             },
-            Some(&SpawnRequestSummary {
-                model: "gpt-5".to_string(),
-                reasoning_effort: ReasoningEffortConfig::High,
-            }),
+            /*requested_spawn_request*/ None,
         );
 
         let lines = cell.display_lines(/*width*/ 200);

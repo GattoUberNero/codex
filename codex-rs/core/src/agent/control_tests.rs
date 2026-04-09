@@ -1039,13 +1039,18 @@ async fn spawn_agent_bounded_fork_full_replays_parent_history_on_live_child() {
 async fn spawn_agent_bounded_fork_trimmed_replays_selected_history_on_live_child() {
     let harness = AgentControlHarness::new().await;
     let (parent_thread_id, parent_thread) = harness.start_thread().await;
-    parent_thread
-        .inject_user_message_without_turn("oldest parent seed context".to_string())
-        .await;
-    parent_thread
-        .inject_user_message_without_turn("latest parent seed context".to_string())
-        .await;
-    let turn_context = parent_thread.codex.session.new_default_turn().await;
+    let oldest_turn = parent_thread.codex.session.new_default_turn().await;
+    let latest_turn = parent_thread.codex.session.new_default_turn().await;
+    let oldest_turn_item = oldest_turn.to_turn_context_item();
+    let oldest_turn_id = oldest_turn_item
+        .turn_id
+        .clone()
+        .expect("oldest turn context item should carry turn id");
+    let latest_turn_item = latest_turn.to_turn_context_item();
+    let latest_turn_id = latest_turn_item
+        .turn_id
+        .clone()
+        .expect("latest turn context item should carry turn id");
     let parent_spawn_call_id = "spawn-call-bounded-trimmed".to_string();
     let parent_spawn_call = ResponseItem::FunctionCall {
         id: None,
@@ -1057,7 +1062,52 @@ async fn spawn_agent_bounded_fork_trimmed_replays_selected_history_on_live_child
     parent_thread
         .codex
         .session
-        .record_conversation_items(turn_context.as_ref(), &[parent_spawn_call])
+        .persist_rollout_items(&[
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: oldest_turn_id.clone(),
+                model_context_window: Some(128_000),
+                collaboration_mode_kind: ModeKind::Default,
+            })),
+            RolloutItem::TurnContext(oldest_turn_item),
+            RolloutItem::ResponseItem(ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "oldest parent seed context".to_string(),
+                }],
+                end_turn: None,
+                phase: None,
+            }),
+            RolloutItem::ResponseItem(ResponseItem::Message {
+                id: None,
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: "oldest parent assistant ack".to_string(),
+                }],
+                end_turn: None,
+                phase: None,
+            }),
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: oldest_turn_id,
+                last_agent_message: None,
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: latest_turn_id.clone(),
+                model_context_window: Some(128_000),
+                collaboration_mode_kind: ModeKind::Default,
+            })),
+            RolloutItem::TurnContext(latest_turn_item),
+            RolloutItem::ResponseItem(ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "latest parent seed context".to_string(),
+                }],
+                end_turn: None,
+                phase: None,
+            }),
+            RolloutItem::ResponseItem(parent_spawn_call),
+        ])
         .await;
     parent_thread
         .codex
@@ -1066,16 +1116,14 @@ async fn spawn_agent_bounded_fork_trimmed_replays_selected_history_on_live_child
         .await;
     parent_thread.codex.session.flush_rollout().await;
 
-    let mut forked_rollout_items = parent_thread
-        .codex
-        .session
-        .clone_history()
-        .await
-        .raw_items()
-        .iter()
-        .cloned()
-        .map(RolloutItem::ResponseItem)
-        .collect::<Vec<_>>();
+    let rollout_path = parent_thread
+        .rollout_path()
+        .expect("parent thread should have a rollout path for fork selection");
+    let mut forked_rollout_items =
+        crate::rollout::recorder::RolloutRecorder::get_rollout_history(&rollout_path)
+            .await
+            .expect("read persisted rollout history for bounded fork selection")
+            .get_rollout_items();
     let mut output =
         FunctionCallOutputPayload::from_text(FORKED_SPAWN_AGENT_OUTPUT_MESSAGE.to_string());
     output.success = Some(true);
@@ -1089,13 +1137,20 @@ async fn spawn_agent_bounded_fork_trimmed_replays_selected_history_on_live_child
         &serde_json::to_string(&forked_rollout_items).expect("serialize bounded candidate"),
     ))
     .expect("token estimate should fit in i64");
-    let expected_selection = select_bounded_fork_context(
-        forked_rollout_items,
-        &parent_spawn_call_id,
-        full_tokens - 1,
-        SpawnContextInheritanceMode::Bounded,
-    )
-    .expect("selector should build bounded trimmed candidate");
+    let (bounded_budget_tokens, expected_selection) = (1..full_tokens)
+        .find_map(|usable_budget_tokens| {
+            let selection = select_bounded_fork_context(
+                forked_rollout_items.clone(),
+                &parent_spawn_call_id,
+                usable_budget_tokens,
+                SpawnContextInheritanceMode::Bounded,
+            )
+            .expect("selector should build bounded fork candidate");
+            (selection.report.effective_mode
+                == SpawnContextInheritanceEffectiveMode::BoundedTrimmed)
+                .then_some((usable_budget_tokens, selection))
+        })
+        .expect("selector should expose at least one bounded trimmed budget");
     assert_eq!(
         expected_selection.report.effective_mode,
         SpawnContextInheritanceEffectiveMode::BoundedTrimmed
@@ -1116,7 +1171,7 @@ async fn spawn_agent_bounded_fork_trimmed_replays_selected_history_on_live_child
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 fork_context_requested_mode: SpawnContextInheritanceMode::Bounded,
-                bounded_fork_usable_context_budget_tokens: Some(full_tokens - 1),
+                bounded_fork_usable_context_budget_tokens: Some(bounded_budget_tokens),
             },
         )
         .await
