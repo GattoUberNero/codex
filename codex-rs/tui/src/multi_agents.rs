@@ -19,6 +19,7 @@ use codex_protocol::protocol::CollabResumeBeginEvent;
 use codex_protocol::protocol::CollabResumeEndEvent;
 use codex_protocol::protocol::CollabWaitingBeginEvent;
 use codex_protocol::protocol::CollabWaitingEndEvent;
+use codex_protocol::protocol::DelegationReport;
 use codex_protocol::protocol::SpawnContextInheritanceEffectiveMode;
 use codex_protocol::protocol::SpawnContextInheritanceMode;
 use codex_protocol::protocol::SpawnContextInheritanceSuppressionReason;
@@ -211,6 +212,7 @@ pub(crate) fn spawn_end(
         context_inheritance_requested,
         context_inheritance_effective,
         context_inheritance_telemetry,
+        delegation_report,
         status: _,
         ..
     } = ev;
@@ -245,6 +247,7 @@ pub(crate) fn spawn_end(
     if let Some(line) = prompt_line(&prompt) {
         details.push(line);
     }
+    details.extend(delegation_report_lines(delegation_report.as_ref()));
     if let Some(line) =
         requested_spawn_request_line(requested_spawn_request, &effective_spawn_request)
     {
@@ -542,6 +545,51 @@ fn prompt_line(prompt: &str) -> Option<Line<'static>> {
     }
 }
 
+fn delegation_report_lines(report: Option<&DelegationReport>) -> Vec<Line<'static>> {
+    let Some(report) = report else {
+        return Vec::new();
+    };
+
+    let mut lines = vec![Line::from(vec![
+        "Delegation: ".dim(),
+        format!(
+            "{} | difficulty {}/10 | brief {}/10 | self {}/10 | ~{} min",
+            report.general_task_type,
+            report.task_difficulty_1_10,
+            report.brief_completeness_1_10,
+            report.task_self_sufficiency_1_10,
+            report.expected_duration_minutes
+        )
+        .into(),
+    ])];
+
+    let output_shape = report.expected_output_shape.trim();
+    let files_or_scope = report.files_or_scope.trim();
+    if !output_shape.is_empty() || !files_or_scope.is_empty() {
+        let mut details = Vec::new();
+        if !output_shape.is_empty() {
+            details.push(format!("output: {output_shape}"));
+        }
+        if !files_or_scope.is_empty() {
+            details.push(format!("scope: {files_or_scope}"));
+        }
+        lines.push(Line::from(vec![
+            "Deliverable: ".dim(),
+            details.join(" | ").into(),
+        ]));
+    }
+
+    let risks_or_unknowns = report.risks_or_unknowns.trim();
+    if !risks_or_unknowns.is_empty() {
+        lines.push(Line::from(vec![
+            "Risks: ".dim(),
+            risks_or_unknowns.to_owned().into(),
+        ]));
+    }
+
+    lines
+}
+
 fn context_inheritance_line(
     requested: Option<SpawnContextInheritanceMode>,
     effective: Option<SpawnContextInheritanceEffectiveMode>,
@@ -823,6 +871,7 @@ mod tests {
                     usable_context_budget_tokens: Some(24_000),
                     suppression_reason: None,
                 }),
+                delegation_report: None,
                 status: AgentStatus::PendingInit,
             },
             /*requested_spawn_request*/ None,
@@ -916,6 +965,17 @@ mod tests {
                     SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
                 ),
                 context_inheritance_telemetry: None,
+                delegation_report: Some(codex_protocol::protocol::DelegationReport {
+                    general_task_type: "code review".to_string(),
+                    task_difficulty_1_10: 6,
+                    brief_completeness_1_10: 8,
+                    task_self_sufficiency_1_10: 7,
+                    expected_duration_minutes: 15,
+                    why_this_agent: "Knows this TUI surface".to_string(),
+                    expected_output_shape: "Patch + short note".to_string(),
+                    files_or_scope: "codex-rs/tui/src/multi_agents.rs".to_string(),
+                    risks_or_unknowns: "Snapshot text may change".to_string(),
+                }),
                 status: AgentStatus::PendingInit,
             },
             /*requested_spawn_request*/ None,
@@ -961,6 +1021,7 @@ mod tests {
                 context_inheritance_requested: Some(SpawnContextInheritanceMode::Off),
                 context_inheritance_effective: Some(SpawnContextInheritanceEffectiveMode::Off),
                 context_inheritance_telemetry: None,
+                delegation_report: None,
                 status: AgentStatus::PendingInit,
             },
             /*requested_spawn_request*/ None,
@@ -1048,6 +1109,7 @@ mod tests {
                     usable_context_budget_tokens: None,
                     suppression_reason: None,
                 }),
+                delegation_report: None,
                 status: AgentStatus::PendingInit,
             },
             /*requested_spawn_request*/ None,

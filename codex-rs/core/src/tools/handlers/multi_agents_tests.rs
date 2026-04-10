@@ -347,7 +347,18 @@ async fn spawn_agent_returns_agent_id_without_task_name() {
             Arc::new(turn),
             "spawn_agent",
             function_payload(json!({
-                "message": "inspect this repo"
+                "message": "inspect this repo",
+                "delegation_report": {
+                    "general_task_type": "inspection",
+                    "task_difficulty_1_10": 4,
+                    "brief_completeness_1_10": 8,
+                    "task_self_sufficiency_1_10": 7,
+                    "expected_duration_minutes": 15,
+                    "why_this_agent": "This task is self-contained and needs a lightweight scan.",
+                    "expected_output_shape": "A short summary with findings and next steps.",
+                    "files_or_scope": "Repository root",
+                    "risks_or_unknowns": "May need a second pass if the repo layout is unexpected."
+                }
             })),
         ))
         .await
@@ -359,6 +370,20 @@ async fn spawn_agent_returns_agent_id_without_task_name() {
     assert!(result["agent_id"].is_string());
     assert!(result.get("task_name").is_none());
     assert!(result.get("nickname").is_some());
+    assert_eq!(
+        result["delegation_report"],
+        json!({
+            "general_task_type": "inspection",
+            "task_difficulty_1_10": 4,
+            "brief_completeness_1_10": 8,
+            "task_self_sufficiency_1_10": 7,
+            "expected_duration_minutes": 15,
+            "why_this_agent": "This task is self-contained and needs a lightweight scan.",
+            "expected_output_shape": "A short summary with findings and next steps.",
+            "files_or_scope": "Repository root",
+            "risks_or_unknowns": "May need a second pass if the repo layout is unexpected."
+        })
+    );
     assert_eq!(result["context_inheritance_requested"], "off");
     assert_eq!(result["context_inheritance_effective"], "off");
     assert_eq!(success, Some(true));
@@ -1316,7 +1341,18 @@ async fn multi_agent_v2_spawn_includes_agent_id_key_when_named() {
             "spawn_agent",
             function_payload(json!({
                 "message": "inspect this repo",
-                "task_name": "test_process"
+                "task_name": "test_process",
+                "delegation_report": {
+                    "general_task_type": "inspection",
+                    "task_difficulty_1_10": 4,
+                    "brief_completeness_1_10": 8,
+                    "task_self_sufficiency_1_10": 7,
+                    "expected_duration_minutes": 15,
+                    "why_this_agent": "This task is self-contained and needs a lightweight scan.",
+                    "expected_output_shape": "A short summary with findings and next steps.",
+                    "files_or_scope": "Repository root",
+                    "risks_or_unknowns": "May need a second pass if the repo layout is unexpected."
+                }
             })),
         ))
         .await
@@ -1328,6 +1364,20 @@ async fn multi_agent_v2_spawn_includes_agent_id_key_when_named() {
     assert_eq!(result["agent_id"], serde_json::Value::Null);
     assert_eq!(result["task_name"], "/root/test_process");
     assert!(result.get("nickname").is_some());
+    assert_eq!(
+        result["delegation_report"],
+        json!({
+            "general_task_type": "inspection",
+            "task_difficulty_1_10": 4,
+            "brief_completeness_1_10": 8,
+            "task_self_sufficiency_1_10": 7,
+            "expected_duration_minutes": 15,
+            "why_this_agent": "This task is self-contained and needs a lightweight scan.",
+            "expected_output_shape": "A short summary with findings and next steps.",
+            "files_or_scope": "Repository root",
+            "risks_or_unknowns": "May need a second pass if the repo layout is unexpected."
+        })
+    );
     assert_eq!(success, Some(true));
 }
 

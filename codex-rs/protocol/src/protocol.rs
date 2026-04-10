@@ -3456,6 +3456,29 @@ pub struct SpawnContextInheritanceTelemetry {
     pub suppression_reason: Option<SpawnContextInheritanceSuppressionReason>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[ts(export_to = "v2/")]
+pub struct DelegationReport {
+    /// High-level type of the delegated task.
+    pub general_task_type: String,
+    /// Integer task difficulty on a 1 to 10 scale.
+    pub task_difficulty_1_10: u8,
+    /// Integer brief completeness on a 1 to 10 scale.
+    pub brief_completeness_1_10: u8,
+    /// Integer task self-sufficiency on a 1 to 10 scale.
+    pub task_self_sufficiency_1_10: u8,
+    /// Expected duration in whole minutes.
+    pub expected_duration_minutes: u32,
+    /// Why this agent should handle the task.
+    pub why_this_agent: String,
+    /// Expected shape of the delivered output.
+    pub expected_output_shape: String,
+    /// Files or scope the task should cover.
+    pub files_or_scope: String,
+    /// Known risks or open questions.
+    pub risks_or_unknowns: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
 pub struct CollabAgentSpawnBeginEvent {
     /// Identifier for the collab tool call.
@@ -3470,6 +3493,9 @@ pub struct CollabAgentSpawnBeginEvent {
     /// Requested parent-context inheritance mode for the spawn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_inheritance_requested: Option<SpawnContextInheritanceMode>,
+    /// Optional delegation report used by the TUI when rendering the spawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_report: Option<DelegationReport>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
@@ -3526,6 +3552,9 @@ pub struct CollabAgentSpawnEndEvent {
     /// Requested parent-context inheritance mode for the spawn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_inheritance_requested: Option<SpawnContextInheritanceMode>,
+    /// Optional delegation report used by the TUI when rendering the spawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_report: Option<DelegationReport>,
     /// Effective parent-context inheritance mode after runtime budgeting and validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_inheritance_effective: Option<SpawnContextInheritanceEffectiveMode>,
@@ -3555,6 +3584,8 @@ struct CollabAgentSpawnEndEventDe {
     #[serde(default)]
     context_inheritance_requested: Option<SpawnContextInheritanceMode>,
     #[serde(default)]
+    delegation_report: Option<DelegationReport>,
+    #[serde(default)]
     context_inheritance_effective: Option<SpawnContextInheritanceEffectiveMode>,
     #[serde(default)]
     context_inheritance_telemetry: Option<SpawnContextInheritanceTelemetry>,
@@ -3581,6 +3612,7 @@ impl<'de> Deserialize<'de> for CollabAgentSpawnEndEvent {
             model: wire.model,
             reasoning_effort: wire.reasoning_effort,
             context_inheritance_requested: wire.context_inheritance_requested,
+            delegation_report: wire.delegation_report,
             context_inheritance_effective: wire.context_inheritance_effective,
             context_inheritance_telemetry: wire.context_inheritance_telemetry,
             status: wire.status,

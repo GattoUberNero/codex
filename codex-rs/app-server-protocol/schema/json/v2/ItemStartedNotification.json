@@ -195,6 +195,66 @@
       ],
       "type": "string"
     },
+    "DelegationReport": {
+      "properties": {
+        "brief_completeness_1_10": {
+          "description": "Integer brief completeness on a 1 to 10 scale.",
+          "format": "uint8",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "expected_duration_minutes": {
+          "description": "Expected duration in whole minutes.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "expected_output_shape": {
+          "description": "Expected shape of the delivered output.",
+          "type": "string"
+        },
+        "files_or_scope": {
+          "description": "Files or scope the task should cover.",
+          "type": "string"
+        },
+        "general_task_type": {
+          "description": "High-level type of the delegated task.",
+          "type": "string"
+        },
+        "risks_or_unknowns": {
+          "description": "Known risks or open questions.",
+          "type": "string"
+        },
+        "task_difficulty_1_10": {
+          "description": "Integer task difficulty on a 1 to 10 scale.",
+          "format": "uint8",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "task_self_sufficiency_1_10": {
+          "description": "Integer task self-sufficiency on a 1 to 10 scale.",
+          "format": "uint8",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "why_this_agent": {
+          "description": "Why this agent should handle the task.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "brief_completeness_1_10",
+        "expected_duration_minutes",
+        "expected_output_shape",
+        "files_or_scope",
+        "general_task_type",
+        "risks_or_unknowns",
+        "task_difficulty_1_10",
+        "task_self_sufficiency_1_10",
+        "why_this_agent"
+      ],
+      "type": "object"
+    },
     "DynamicToolCallOutputContentItem": {
       "oneOf": [
         {
@@ -987,6 +1047,17 @@
               ],
               "description": "Runtime budgeting telemetry for the effective inheritance decision."
             },
+            "delegationReport": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/DelegationReport"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional delegation report shown in the TUI."
+            },
             "effectiveModel": {
               "description": "Effective model used by the spawned agent after role and runtime overrides.",
               "type": [
@@ -1010,7 +1081,7 @@
               "type": "string"
             },
             "model": {
-              "description": "Model requested for the spawned agent, when applicable.",
+              "description": "Effective model used by the spawned agent after role and runtime overrides.",
               "type": [
                 "string",
                 "null"
@@ -1032,7 +1103,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Reasoning effort requested for the spawned agent, when applicable."
+              "description": "Effective reasoning effort used by the spawned agent after role and runtime overrides."
             },
             "receiverThreadIds": {
               "description": "Thread ID of the receiving agent, when applicable. In case of spawn operation, this corresponds to the newly spawned agent.",
@@ -1040,6 +1111,24 @@
                 "type": "string"
               },
               "type": "array"
+            },
+            "requestedModel": {
+              "description": "Model requested for the spawned agent, when applicable.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "requestedReasoningEffort": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ReasoningEffort"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Reasoning effort requested for the spawned agent, when applicable."
             },
             "senderThreadId": {
               "description": "Thread ID of the agent issuing the collab request.",

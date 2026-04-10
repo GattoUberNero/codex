@@ -624,6 +624,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_requested: payload.context_inheritance_requested,
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
+            delegation_report: payload.delegation_report.clone(),
             agents_states: HashMap::new(),
         };
         self.upsert_item_in_current_turn(item);
@@ -666,6 +667,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_requested: payload.context_inheritance_requested,
             context_inheritance_effective: payload.context_inheritance_effective,
             context_inheritance_telemetry: payload.context_inheritance_telemetry.clone(),
+            delegation_report: payload.delegation_report.clone(),
             agents_states,
         });
     }
@@ -690,6 +692,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_requested: None,
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
+            delegation_report: None,
             agents_states: HashMap::new(),
         };
         self.upsert_item_in_current_turn(item);
@@ -721,6 +724,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_requested: None,
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
+            delegation_report: None,
             agents_states: [(receiver_id, received_status)].into_iter().collect(),
         });
     }
@@ -749,6 +753,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_requested: None,
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
+            delegation_report: None,
             agents_states: HashMap::new(),
         };
         self.upsert_item_in_current_turn(item);
@@ -791,6 +796,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_requested: None,
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
+            delegation_report: None,
             agents_states,
         });
     }
@@ -815,6 +821,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_requested: None,
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
+            delegation_report: None,
             agents_states: HashMap::new(),
         };
         self.upsert_item_in_current_turn(item);
@@ -848,6 +855,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_requested: None,
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
+            delegation_report: None,
             agents_states,
         });
     }
@@ -872,6 +880,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_requested: None,
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
+            delegation_report: None,
             agents_states: HashMap::new(),
         };
         self.upsert_item_in_current_turn(item);
@@ -908,6 +917,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_requested: None,
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
+            delegation_report: None,
             agents_states,
         });
     }
@@ -2585,6 +2595,7 @@ mod tests {
                 context_inheritance_requested: None,
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
+                delegation_report: None,
                 agents_states: [(
                     "00000000-0000-0000-0000-000000000002".into(),
                     CollabAgentState {
@@ -2618,6 +2629,7 @@ mod tests {
                 context_inheritance_requested: Some(
                     codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
                 ),
+                delegation_report: None,
             }),
         ];
 
@@ -2650,6 +2662,7 @@ mod tests {
                 ),
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
+                delegation_report: None,
                 agents_states: HashMap::new(),
             }
         );
@@ -2675,6 +2688,7 @@ mod tests {
                 model: "gpt-5.4-mini".into(),
                 reasoning_effort: codex_protocol::openai_models::ReasoningEffort::Low,
                 context_inheritance_requested: None,
+                delegation_report: None,
             }),
             EventMsg::CollabAgentSpawnEnd(codex_protocol::protocol::CollabAgentSpawnEndEvent {
                 call_id: "spawn-1".into(),
@@ -2702,6 +2716,7 @@ mod tests {
                         suppression_reason: None,
                     },
                 ),
+                delegation_report: None,
                 status: AgentStatus::Running,
             }),
         ];
@@ -2747,6 +2762,7 @@ mod tests {
                         suppression_reason: None,
                     },
                 ),
+                delegation_report: None,
                 agents_states: [(
                     "00000000-0000-0000-0000-000000000002".into(),
                     CollabAgentState {
@@ -2799,6 +2815,7 @@ mod tests {
                         suppression_reason: None,
                     },
                 ),
+                delegation_report: None,
                 status: AgentStatus::Running,
             }),
         ];
@@ -2844,6 +2861,7 @@ mod tests {
                         suppression_reason: None,
                     },
                 ),
+                delegation_report: None,
                 agents_states: [(
                     "00000000-0000-0000-0000-000000000002".into(),
                     CollabAgentState {
@@ -2919,6 +2937,7 @@ mod tests {
                 context_inheritance_requested: None,
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
+                delegation_report: None,
                 agents_states: [(
                     receiver.to_string(),
                     CollabAgentState {

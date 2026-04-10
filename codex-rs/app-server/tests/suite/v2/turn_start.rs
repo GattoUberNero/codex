@@ -54,7 +54,6 @@ use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::Settings;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::SpawnContextInheritanceEffectiveMode;
-use codex_protocol::protocol::SpawnContextInheritanceMode;
 use codex_protocol::user_input::MAX_USER_INPUT_TEXT_CHARS;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
@@ -1780,13 +1779,16 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
             sender_thread_id: thread.id.clone(),
             receiver_thread_ids: Vec::new(),
             prompt: Some(CHILD_PROMPT.to_string()),
+            requested_model: Some(REQUESTED_MODEL.to_string()),
+            requested_reasoning_effort: Some(REQUESTED_REASONING_EFFORT),
             model: Some(REQUESTED_MODEL.to_string()),
             reasoning_effort: Some(REQUESTED_REASONING_EFFORT),
             effective_model: None,
             effective_reasoning_effort: None,
-            context_inheritance_requested: Some(SpawnContextInheritanceMode::Off),
+            context_inheritance_requested: None,
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
+            delegation_report: None,
             agents_states: HashMap::new(),
         }
     );
@@ -1813,6 +1815,8 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
         sender_thread_id,
         receiver_thread_ids,
         prompt,
+        requested_model,
+        requested_reasoning_effort,
         model,
         reasoning_effort,
         effective_model,
@@ -1820,6 +1824,7 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
         context_inheritance_requested,
         context_inheritance_effective,
         context_inheritance_telemetry,
+        delegation_report,
         agents_states,
     } = spawn_completed
     else {
@@ -1835,19 +1840,19 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
     assert_eq!(sender_thread_id, thread.id);
     assert_eq!(receiver_thread_ids, vec![receiver_thread_id.clone()]);
     assert_eq!(prompt, Some(CHILD_PROMPT.to_string()));
+    assert_eq!(requested_model, Some(REQUESTED_MODEL.to_string()));
+    assert_eq!(requested_reasoning_effort, Some(REQUESTED_REASONING_EFFORT));
     assert_eq!(model, Some(REQUESTED_MODEL.to_string()));
     assert_eq!(reasoning_effort, Some(REQUESTED_REASONING_EFFORT));
     assert_eq!(effective_model, Some(REQUESTED_MODEL.to_string()));
     assert_eq!(effective_reasoning_effort, Some(REQUESTED_REASONING_EFFORT));
-    assert_eq!(
-        context_inheritance_requested,
-        Some(SpawnContextInheritanceMode::Off)
-    );
+    assert_eq!(context_inheritance_requested, None);
     assert_eq!(
         context_inheritance_effective,
         Some(SpawnContextInheritanceEffectiveMode::Off)
     );
     assert_eq!(context_inheritance_telemetry, None);
+    assert_eq!(delegation_report, None);
     let agent_state = agents_states
         .get(&receiver_thread_id)
         .expect("spawn completion should include child agent state");
@@ -2013,6 +2018,8 @@ config_file = "./custom-role.toml"
         sender_thread_id,
         receiver_thread_ids,
         prompt,
+        requested_model,
+        requested_reasoning_effort,
         model,
         reasoning_effort,
         effective_model,
@@ -2020,6 +2027,7 @@ config_file = "./custom-role.toml"
         context_inheritance_requested,
         context_inheritance_effective,
         context_inheritance_telemetry,
+        delegation_report,
         agents_states,
     } = spawn_completed
     else {
@@ -2035,19 +2043,19 @@ config_file = "./custom-role.toml"
     assert_eq!(sender_thread_id, thread.id);
     assert_eq!(receiver_thread_ids, vec![receiver_thread_id.clone()]);
     assert_eq!(prompt, Some(CHILD_PROMPT.to_string()));
-    assert_eq!(model, Some(REQUESTED_MODEL.to_string()));
-    assert_eq!(reasoning_effort, Some(REQUESTED_REASONING_EFFORT));
+    assert_eq!(requested_model, Some(REQUESTED_MODEL.to_string()));
+    assert_eq!(requested_reasoning_effort, Some(REQUESTED_REASONING_EFFORT));
+    assert_eq!(model, Some(ROLE_MODEL.to_string()));
+    assert_eq!(reasoning_effort, Some(ROLE_REASONING_EFFORT));
     assert_eq!(effective_model, Some(ROLE_MODEL.to_string()));
     assert_eq!(effective_reasoning_effort, Some(ROLE_REASONING_EFFORT));
-    assert_eq!(
-        context_inheritance_requested,
-        Some(SpawnContextInheritanceMode::Off)
-    );
+    assert_eq!(context_inheritance_requested, None);
     assert_eq!(
         context_inheritance_effective,
         Some(SpawnContextInheritanceEffectiveMode::Off)
     );
     assert_eq!(context_inheritance_telemetry, None);
+    assert_eq!(delegation_report, None);
     let agent_state = agents_states
         .get(&receiver_thread_id)
         .expect("spawn completion should include child agent state");

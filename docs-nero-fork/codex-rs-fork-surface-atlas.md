@@ -117,6 +117,9 @@ Companion doc:
 - Exact external outputs:
   - direct `EventMsg::Warning(WarningEvent { message })` for `visible_note`
   - `HookCompletedEvent` entries/meta shown in TUI for the after-agent reporting branch
+- Spawn-time `delegation_report` payloads can surface as a structured spawn diagnostic block in the
+  same collaboration transcript lane; they summarize task fit and readiness rather than adding a
+  new carrier.
 - Runtime state ownership:
   - Core owns composition and emission; TUI owns projection/render state
 - Native dependencies:

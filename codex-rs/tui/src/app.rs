@@ -3279,7 +3279,8 @@ impl App {
             tracing::debug!(
                 "ignoring stale nero-auto hotkey event for non-active thread {requested_thread_id}"
             );
-            self.chat_widget.finish_nero_auto_hotkey_action(false);
+            self.chat_widget
+                .finish_nero_auto_hotkey_action(/*auto_send_next*/ false);
             return;
         }
         let Some(thread_id) = self.nero_auto_hotkey_thread(requested_thread_id).await else {
@@ -3300,7 +3301,8 @@ impl App {
                 )
             };
             self.chat_widget.add_info_message(message, hint);
-            self.chat_widget.finish_nero_auto_hotkey_action(false);
+            self.chat_widget
+                .finish_nero_auto_hotkey_action(/*auto_send_next*/ false);
             return;
         };
 
@@ -3312,13 +3314,15 @@ impl App {
             Err(err) => {
                 if err.to_string().contains("stale hotkey event") {
                     tracing::debug!("{err}");
-                    self.chat_widget.finish_nero_auto_hotkey_action(false);
+                    self.chat_widget
+                        .finish_nero_auto_hotkey_action(/*auto_send_next*/ false);
                     return;
                 }
                 self.chat_widget.add_error_message(format!(
                     "Failed to read current-session nero-auto control state through session-auto authority: {err}\nIf this TUI is paired with an older app-server build, update them together."
                 ));
-                self.chat_widget.finish_nero_auto_hotkey_action(false);
+                self.chat_widget
+                    .finish_nero_auto_hotkey_action(/*auto_send_next*/ false);
                 return;
             }
         };
@@ -3348,7 +3352,8 @@ impl App {
                         .to_string(),
                 ),
             );
-            self.chat_widget.finish_nero_auto_hotkey_action(true);
+            self.chat_widget
+                .finish_nero_auto_hotkey_action(/*auto_send_next*/ true);
             return;
         }
 
@@ -3372,7 +3377,8 @@ impl App {
             Err(err) => {
                 if err.to_string().contains("stale hotkey event") {
                     tracing::debug!("{err}");
-                    self.chat_widget.finish_nero_auto_hotkey_action(false);
+                    self.chat_widget
+                        .finish_nero_auto_hotkey_action(/*auto_send_next*/ false);
                     return;
                 }
                 self.chat_widget.add_error_message(format!(
@@ -3387,7 +3393,8 @@ impl App {
                         session_source.clone(),
                     );
                 }
-                self.chat_widget.finish_nero_auto_hotkey_action(false);
+                self.chat_widget
+                    .finish_nero_auto_hotkey_action(/*auto_send_next*/ false);
                 return;
             }
         };
@@ -3396,7 +3403,8 @@ impl App {
             tracing::debug!(
                 "ignoring stale nero-auto update response for non-active thread {thread_id}"
             );
-            self.chat_widget.finish_nero_auto_hotkey_action(false);
+            self.chat_widget
+                .finish_nero_auto_hotkey_action(/*auto_send_next*/ false);
             return;
         }
 
@@ -3432,7 +3440,8 @@ impl App {
                     if !requested_next.enabled {
                         self.chat_widget.clear_auto_follow_up_countdown();
                     }
-                    self.chat_widget.finish_nero_auto_hotkey_action(true);
+                    self.chat_widget
+                        .finish_nero_auto_hotkey_action(/*auto_send_next*/ true);
                     return;
                 }
             } else if let Ok(refreshed) = self
@@ -3464,7 +3473,8 @@ impl App {
             };
             self.chat_widget
                 .add_error_message(format!("Failed to update session-local nero-auto control state through session-auto authority: {detail}{extra}"));
-            self.chat_widget.finish_nero_auto_hotkey_action(false);
+            self.chat_widget
+                .finish_nero_auto_hotkey_action(/*auto_send_next*/ false);
             return;
         }
 
@@ -3473,7 +3483,8 @@ impl App {
                 "Nero-auto update applied, but session-auto authority returned no confirmed state."
                     .to_string(),
             );
-            self.chat_widget.finish_nero_auto_hotkey_action(false);
+            self.chat_widget
+                .finish_nero_auto_hotkey_action(/*auto_send_next*/ false);
             return;
         };
         self.chat_widget.set_nero_auto_runtime_context(
@@ -3495,7 +3506,8 @@ impl App {
             None => context_hint,
         });
         self.chat_widget.add_info_message(message, merged_hint);
-        self.chat_widget.finish_nero_auto_hotkey_action(true);
+        self.chat_widget
+            .finish_nero_auto_hotkey_action(/*auto_send_next*/ true);
     }
 
     fn reset_for_thread_switch(&mut self, tui: &mut tui::Tui) -> Result<()> {
@@ -9603,7 +9615,9 @@ guardian_approval = true
             .await?;
         let thread_id = started.session.thread_id;
         configure_test_session(&mut app, thread_id);
-        app.chat_widget.arm_auto_follow_up_countdown(15, 1);
+        app.chat_widget.arm_auto_follow_up_countdown(
+            /*expected_wait_seconds*/ 15, /*queued_count*/ 1,
+        );
         assert!(
             app.chat_widget
                 .status_line_text()
@@ -9669,7 +9683,9 @@ guardian_approval = true
             .await?;
         let thread_id = started.session.thread_id;
         configure_test_session(&mut app, thread_id);
-        app.chat_widget.arm_auto_follow_up_countdown(15, 1);
+        app.chat_widget.arm_auto_follow_up_countdown(
+            /*expected_wait_seconds*/ 15, /*queued_count*/ 1,
+        );
         assert!(
             app.chat_widget
                 .status_line_text()
@@ -9724,7 +9740,9 @@ guardian_approval = true
             .await?;
         let thread_id = started.session.thread_id;
         configure_test_session(&mut app, thread_id);
-        app.chat_widget.arm_auto_follow_up_countdown(15, 1);
+        app.chat_widget.arm_auto_follow_up_countdown(
+            /*expected_wait_seconds*/ 15, /*queued_count*/ 1,
+        );
         assert!(
             app.chat_widget
                 .status_line_text()
@@ -9885,7 +9903,7 @@ guardian_approval = true
             thread_id,
             turn_id,
             expected_wait_seconds,
-            1,
+            /*generation_epoch*/ 1,
         )
     }
 
@@ -10990,7 +11008,9 @@ guardian_approval = true
                     test_turn("turn-2", TurnStatus::Completed, Vec::new()),
                 ],
                 events: vec![ThreadBufferedEvent::Notification(
-                    after_agent_runtime_queued_hook_completed_notification(thread_id, "turn-1", 15),
+                    after_agent_runtime_queued_hook_completed_notification(
+                        thread_id, "turn-1", /*expected_wait_seconds*/ 15,
+                    ),
                 )],
                 input_state: None,
                 latest_turn_id: None,
@@ -11020,7 +11040,9 @@ guardian_approval = true
                 )),
                 turns: vec![test_turn("turn-1", TurnStatus::Completed, Vec::new())],
                 events: vec![ThreadBufferedEvent::Notification(
-                    after_agent_runtime_queued_hook_completed_notification(thread_id, "turn-2", 15),
+                    after_agent_runtime_queued_hook_completed_notification(
+                        thread_id, "turn-2", /*expected_wait_seconds*/ 15,
+                    ),
                 )],
                 input_state: None,
                 latest_turn_id: Some("turn-2".to_string()),
@@ -11054,7 +11076,7 @@ guardian_approval = true
                     after_agent_runtime_queued_hook_completed_notification(
                         thread_id,
                         "turn-unknown",
-                        15,
+                        /*expected_wait_seconds*/ 15,
                     ),
                 )],
                 input_state: None,
@@ -11086,7 +11108,8 @@ guardian_approval = true
                 turns: vec![test_turn("turn-2", TurnStatus::Completed, Vec::new())],
                 events: vec![ThreadBufferedEvent::Notification(
                     after_agent_runtime_queued_hook_completed_notification_with_generation_epoch(
-                        thread_id, "turn-2", 15, 3,
+                        thread_id, "turn-2", /*expected_wait_seconds*/ 15,
+                        /*generation_epoch*/ 3,
                     ),
                 )],
                 input_state: None,
@@ -11153,6 +11176,8 @@ guardian_approval = true
                             sender_thread_id: ThreadId::new().to_string(),
                             receiver_thread_ids: vec![receiver_thread_id.to_string()],
                             prompt: None,
+                            requested_model: None,
+                            requested_reasoning_effort: None,
                             model: None,
                             reasoning_effort: None,
                             effective_model: None,
@@ -11160,6 +11185,7 @@ guardian_approval = true
                             context_inheritance_requested: None,
                             context_inheritance_effective: None,
                             context_inheritance_telemetry: None,
+                            delegation_report: None,
                             agents_states: HashMap::new(),
                         },
                     }),

@@ -47,6 +47,7 @@ use codex_protocol::protocol::AgentStatus as CoreAgentStatus;
 use codex_protocol::protocol::AskForApproval as CoreAskForApproval;
 use codex_protocol::protocol::CodexErrorInfo as CoreCodexErrorInfo;
 use codex_protocol::protocol::CreditsSnapshot as CoreCreditsSnapshot;
+use codex_protocol::protocol::DelegationReport;
 use codex_protocol::protocol::ExecCommandSource as CoreExecCommandSource;
 use codex_protocol::protocol::ExecCommandStatus as CoreExecCommandStatus;
 use codex_protocol::protocol::GranularApprovalConfig as CoreGranularApprovalConfig;
@@ -4679,6 +4680,8 @@ pub enum ThreadItem {
         context_inheritance_effective: Option<SpawnContextInheritanceEffectiveMode>,
         /// Runtime budgeting telemetry for the effective inheritance decision.
         context_inheritance_telemetry: Option<SpawnContextInheritanceTelemetry>,
+        /// Optional delegation report shown in the TUI.
+        delegation_report: Option<DelegationReport>,
         /// Last known status of the target agents, when available.
         agents_states: HashMap<String, CollabAgentState>,
     },

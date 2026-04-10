@@ -78,7 +78,7 @@ async fn thread_session_auto_read_and_update_via_rust_authority() -> Result<()> 
         "2026-04-01T12:00:00Z",
         "hello",
         Some("mock"),
-        None,
+        /*git_info*/ None,
         codex_protocol::protocol::SessionSource::Cli,
     )?;
 
@@ -176,7 +176,7 @@ async fn thread_session_auto_update_conflicts_on_session_source_mismatch() -> Re
         "2026-04-01T12:30:00Z",
         "hello",
         Some("mock"),
-        None,
+        /*git_info*/ None,
         codex_protocol::protocol::SessionSource::Cli,
     )?;
 
@@ -249,7 +249,7 @@ async fn thread_session_auto_update_reports_version_conflict_with_current_state(
         "2026-04-01T13:00:00Z",
         "hello again",
         Some("mock"),
-        None,
+        /*git_info*/ None,
         codex_protocol::protocol::SessionSource::Cli,
     )?;
 
@@ -339,7 +339,7 @@ async fn thread_session_auto_update_supports_null_clear_semantics() -> Result<()
         "2026-04-01T13:15:00Z",
         "hello clear",
         Some("mock"),
-        None,
+        /*git_info*/ None,
         codex_protocol::protocol::SessionSource::Cli,
     )?;
 
@@ -452,7 +452,7 @@ async fn thread_session_auto_update_rejects_enable_when_runtime_guardrail_is_uns
         "2026-04-01T13:20:00Z",
         "hello metadata",
         Some("mock"),
-        None,
+        /*git_info*/ None,
         codex_protocol::protocol::SessionSource::Cli,
     )?;
 
@@ -696,7 +696,7 @@ async fn thread_session_auto_input_activity_rejects_unloaded_threads() -> Result
         "2026-04-01T13:30:00Z",
         "hello unloaded",
         Some("mock"),
-        None,
+        /*git_info*/ None,
         codex_protocol::protocol::SessionSource::Cli,
     )?;
 
@@ -735,7 +735,7 @@ async fn thread_session_auto_read_rejects_corrupted_persisted_state() -> Result<
         "2026-04-01T13:45:00Z",
         "hello",
         Some("mock"),
-        None,
+        /*git_info*/ None,
         codex_protocol::protocol::SessionSource::Cli,
     )?;
 
@@ -775,7 +775,7 @@ async fn thread_session_auto_update_rejects_subagent_threads() -> Result<()> {
         "2026-04-01T14:00:00Z",
         "subagent",
         Some("mock"),
-        None,
+        /*git_info*/ None,
         codex_protocol::protocol::SessionSource::SubAgent(SubAgentSource::Review),
     )?;
 
@@ -822,7 +822,7 @@ async fn thread_session_auto_update_rejects_corrupted_persisted_state() -> Resul
         "2026-04-01T14:30:00Z",
         "hello",
         Some("mock"),
-        None,
+        /*git_info*/ None,
         codex_protocol::protocol::SessionSource::Cli,
     )?;
 

@@ -364,6 +364,7 @@ fn spawn_agent_output_schema_v1() -> Value {
                 "type": ["string", "null"],
                 "description": "User-facing nickname for the spawned agent when available."
             },
+            "delegation_report": delegation_report_output_schema(),
             "context_inheritance_requested": {
                 "type": "string",
                 "enum": ["off", "exact", "bounded"],
@@ -397,7 +398,7 @@ fn spawn_agent_output_schema_v1() -> Value {
                 "additionalProperties": false
             }
         },
-        "required": ["agent_id", "nickname", "context_inheritance_requested", "context_inheritance_effective", "context_inheritance_telemetry"],
+        "required": ["agent_id", "nickname", "delegation_report", "context_inheritance_requested", "context_inheritance_effective", "context_inheritance_telemetry"],
         "additionalProperties": false
     })
 }
@@ -418,6 +419,7 @@ fn spawn_agent_output_schema_v2() -> Value {
                 "type": ["string", "null"],
                 "description": "User-facing nickname for the spawned agent when available."
             },
+            "delegation_report": delegation_report_output_schema(),
             "context_inheritance_requested": {
                 "type": "string",
                 "enum": ["off", "exact", "bounded"],
@@ -451,7 +453,7 @@ fn spawn_agent_output_schema_v2() -> Value {
                 "additionalProperties": false
             }
         },
-        "required": ["agent_id", "task_name", "nickname", "context_inheritance_requested", "context_inheritance_effective", "context_inheritance_telemetry"],
+        "required": ["agent_id", "task_name", "nickname", "delegation_report", "context_inheritance_requested", "context_inheritance_effective", "context_inheritance_telemetry"],
         "additionalProperties": false
     })
 }
@@ -565,6 +567,152 @@ fn close_agent_output_schema() -> Value {
     })
 }
 
+fn delegation_report_properties() -> BTreeMap<String, JsonSchema> {
+    BTreeMap::from([
+        (
+            "general_task_type".to_string(),
+            JsonSchema::String {
+                enum_values: None,
+                description: Some("High-level type of the delegated work.".to_string()),
+            },
+        ),
+        (
+            "task_difficulty_1_10".to_string(),
+            JsonSchema::Number {
+                description: Some("Integer task difficulty on a 1 to 10 scale.".to_string()),
+            },
+        ),
+        (
+            "brief_completeness_1_10".to_string(),
+            JsonSchema::Number {
+                description: Some("Integer brief completeness on a 1 to 10 scale.".to_string()),
+            },
+        ),
+        (
+            "task_self_sufficiency_1_10".to_string(),
+            JsonSchema::Number {
+                description: Some("Integer task self-sufficiency on a 1 to 10 scale.".to_string()),
+            },
+        ),
+        (
+            "expected_duration_minutes".to_string(),
+            JsonSchema::Number {
+                description: Some("Expected duration in whole minutes, minimum 1.".to_string()),
+            },
+        ),
+        (
+            "why_this_agent".to_string(),
+            JsonSchema::String {
+                enum_values: None,
+                description: Some("Why this agent should handle the task.".to_string()),
+            },
+        ),
+        (
+            "expected_output_shape".to_string(),
+            JsonSchema::String {
+                enum_values: None,
+                description: Some("Expected shape of the delivered output.".to_string()),
+            },
+        ),
+        (
+            "files_or_scope".to_string(),
+            JsonSchema::String {
+                enum_values: None,
+                description: Some("Files or scope the task should cover.".to_string()),
+            },
+        ),
+        (
+            "risks_or_unknowns".to_string(),
+            JsonSchema::String {
+                enum_values: None,
+                description: Some("Known risks or open questions.".to_string()),
+            },
+        ),
+    ])
+}
+
+fn delegation_report_input_schema() -> JsonSchema {
+    JsonSchema::Object {
+        properties: delegation_report_properties(),
+        required: Some(vec![
+            "general_task_type".to_string(),
+            "task_difficulty_1_10".to_string(),
+            "brief_completeness_1_10".to_string(),
+            "task_self_sufficiency_1_10".to_string(),
+            "expected_duration_minutes".to_string(),
+            "why_this_agent".to_string(),
+            "expected_output_shape".to_string(),
+            "files_or_scope".to_string(),
+            "risks_or_unknowns".to_string(),
+        ]),
+        additional_properties: Some(false.into()),
+    }
+}
+
+fn delegation_report_output_schema() -> Value {
+    json!({
+        "type": ["object", "null"],
+        "description": "Optional delegation report echoed back from spawn_agent.",
+        "properties": {
+            "general_task_type": {
+                "type": "string",
+                "description": "High-level type of the delegated work."
+            },
+            "task_difficulty_1_10": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10,
+                "description": "Task difficulty on a 1 to 10 scale."
+            },
+            "brief_completeness_1_10": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10,
+                "description": "How complete the brief is on a 1 to 10 scale."
+            },
+            "task_self_sufficiency_1_10": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10,
+                "description": "How self-sufficient the task is on a 1 to 10 scale."
+            },
+            "expected_duration_minutes": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Expected duration in whole minutes."
+            },
+            "why_this_agent": {
+                "type": "string",
+                "description": "Why this agent should handle the task."
+            },
+            "expected_output_shape": {
+                "type": "string",
+                "description": "Expected shape of the delivered output."
+            },
+            "files_or_scope": {
+                "type": "string",
+                "description": "Files or scope the task should cover."
+            },
+            "risks_or_unknowns": {
+                "type": "string",
+                "description": "Known risks or open questions."
+            }
+        },
+        "required": [
+            "general_task_type",
+            "task_difficulty_1_10",
+            "brief_completeness_1_10",
+            "task_self_sufficiency_1_10",
+            "expected_duration_minutes",
+            "why_this_agent",
+            "expected_output_shape",
+            "files_or_scope",
+            "risks_or_unknowns"
+        ],
+        "additionalProperties": false
+    })
+}
+
 fn create_collab_input_items_schema() -> JsonSchema {
     let properties = BTreeMap::from([
         (
@@ -662,6 +810,10 @@ fn spawn_agent_common_properties(agent_type_description: &str) -> BTreeMap<Strin
                 ),
             },
         ),
+        (
+            "delegation_report".to_string(),
+            delegation_report_input_schema(),
+        ),
     ])
 }
 
@@ -684,7 +836,7 @@ fn spawn_agent_tool_description(
 - Keep work local when the subtask is too difficult to delegate well and when it is tightly coupled, urgent, or likely to block your immediate next step.
 
 ### Designing delegated subtasks
-- Subtasks must be concrete, well-defined, and self-contained.
+- Subtasks must be concrete, well-defined, complete, clear, and self-sufficient.
 - Delegated subtasks must materially advance the main task.
 - Do not duplicate work between the main rollout and delegated subtasks.
 - Avoid issuing multiple delegate calls on the same unresolved thread unless the new delegated task is genuinely different and necessary.

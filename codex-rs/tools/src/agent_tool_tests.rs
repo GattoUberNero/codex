@@ -45,6 +45,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     else {
         panic!("spawn_agent should be a function tool");
     };
+    let parameters_json = serde_json::to_value(&parameters).expect("spawn_agent parameters");
     let JsonSchema::Object {
         properties,
         required,
@@ -66,6 +67,28 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         })
     );
     assert_eq!(required, Some(vec!["task_name".to_string()]));
+    assert_eq!(
+        parameters_json["properties"]["delegation_report"]["type"],
+        json!("object")
+    );
+    assert_eq!(
+        parameters_json["properties"]["delegation_report"]["required"],
+        json!([
+            "general_task_type",
+            "task_difficulty_1_10",
+            "brief_completeness_1_10",
+            "task_self_sufficiency_1_10",
+            "expected_duration_minutes",
+            "why_this_agent",
+            "expected_output_shape",
+            "files_or_scope",
+            "risks_or_unknowns"
+        ])
+    );
+    assert_eq!(
+        parameters_json["properties"]["delegation_report"]["additionalProperties"],
+        json!(false)
+    );
     let output_schema = output_schema.expect("spawn_agent output schema");
     assert_eq!(
         output_schema["required"],
@@ -73,10 +96,34 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
             "agent_id",
             "task_name",
             "nickname",
+            "delegation_report",
             "context_inheritance_requested",
             "context_inheritance_effective",
             "context_inheritance_telemetry"
         ])
+    );
+    assert_eq!(
+        output_schema["properties"]["delegation_report"]["type"],
+        json!(["object", "null"])
+    );
+    assert_eq!(
+        output_schema["properties"]["delegation_report"]["required"],
+        json!([
+            "general_task_type",
+            "task_difficulty_1_10",
+            "brief_completeness_1_10",
+            "task_self_sufficiency_1_10",
+            "expected_duration_minutes",
+            "why_this_agent",
+            "expected_output_shape",
+            "files_or_scope",
+            "risks_or_unknowns"
+        ])
+    );
+    assert_eq!(
+        output_schema["properties"]["delegation_report"]["properties"]["expected_duration_minutes"]
+            ["minimum"],
+        json!(1)
     );
     assert_eq!(
         output_schema["properties"]["context_inheritance_effective"]["enum"],
@@ -107,9 +154,15 @@ fn spawn_agent_tool_v1_omits_context_inheritance_inputs() {
         agent_type_description: "role help".to_string(),
     });
 
-    let ToolSpec::Function(ResponsesApiTool { parameters, .. }) = tool else {
+    let ToolSpec::Function(ResponsesApiTool {
+        parameters,
+        output_schema,
+        ..
+    }) = tool
+    else {
         panic!("spawn_agent should be a function tool");
     };
+    let parameters_json = serde_json::to_value(&parameters).expect("spawn_agent parameters");
     let JsonSchema::Object { properties, .. } = parameters else {
         panic!("spawn_agent should use object params");
     };
@@ -117,6 +170,40 @@ fn spawn_agent_tool_v1_omits_context_inheritance_inputs() {
     assert!(!properties.contains_key("task_name"));
     assert!(!properties.contains_key("fork_context"));
     assert!(!properties.contains_key("context_inheritance"));
+    assert_eq!(
+        parameters_json["properties"]["delegation_report"]["type"],
+        json!("object")
+    );
+    assert_eq!(
+        parameters_json["properties"]["delegation_report"]["required"],
+        json!([
+            "general_task_type",
+            "task_difficulty_1_10",
+            "brief_completeness_1_10",
+            "task_self_sufficiency_1_10",
+            "expected_duration_minutes",
+            "why_this_agent",
+            "expected_output_shape",
+            "files_or_scope",
+            "risks_or_unknowns"
+        ])
+    );
+    let output_schema = output_schema.expect("spawn_agent output schema");
+    assert_eq!(
+        output_schema["required"],
+        json!([
+            "agent_id",
+            "nickname",
+            "delegation_report",
+            "context_inheritance_requested",
+            "context_inheritance_effective",
+            "context_inheritance_telemetry"
+        ])
+    );
+    assert_eq!(
+        output_schema["properties"]["delegation_report"]["type"],
+        json!(["object", "null"])
+    );
 }
 
 #[test]

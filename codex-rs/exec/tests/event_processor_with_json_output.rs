@@ -106,7 +106,7 @@ fn map_todo_items_preserves_text_and_completion_state() {
 
 #[test]
 fn web_search_end_emits_item_completed() {
-    let mut ep = EventProcessorWithJsonOutput::new(None);
+    let mut ep = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
     let query = "rust async await".to_string();
     let action = WebSearchAction::Search {
         query: Some(query.clone()),
@@ -723,8 +723,16 @@ fn collab_spawn_begin_and_end_emit_item_events() {
                 sender_thread_id: "thread-parent".to_string(),
                 receiver_thread_ids: Vec::new(),
                 prompt: Some("draft a plan".to_string()),
+                requested_model: Some("gpt-5".to_string()),
+                requested_reasoning_effort: None,
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: None,
+                effective_model: Some("gpt-5".to_string()),
+                effective_reasoning_effort: None,
+                context_inheritance_requested: None,
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
+                delegation_report: None,
                 agents_states: std::collections::HashMap::new(),
             },
             thread_id: "thread-parent".to_string(),
@@ -739,8 +747,16 @@ fn collab_spawn_begin_and_end_emit_item_events() {
                 sender_thread_id: "thread-parent".to_string(),
                 receiver_thread_ids: vec!["thread-child".to_string()],
                 prompt: Some("draft a plan".to_string()),
+                requested_model: Some("gpt-5".to_string()),
+                requested_reasoning_effort: None,
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: None,
+                effective_model: Some("gpt-5".to_string()),
+                effective_reasoning_effort: None,
+                context_inheritance_requested: None,
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
+                delegation_report: None,
                 agents_states: std::collections::HashMap::from([(
                     "thread-child".to_string(),
                     ApiCollabAgentState {

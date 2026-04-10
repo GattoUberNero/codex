@@ -2264,7 +2264,7 @@ fn next_interrupt_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) {
 
 #[tokio::test]
 async fn handle_thread_session_resets_nero_auto_runtime_and_session_source() {
-    let (mut widget, _app_rx, _op_rx) = make_chatwidget_manual(None).await;
+    let (mut widget, _app_rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let previous_runtime = NeroAutoRuntimeConfig {
         enabled: true,
         autonomy_level: 9,
@@ -2409,6 +2409,7 @@ async fn collab_spawn_end_uses_effective_model_and_preserves_requested_details()
             context_inheritance_requested: Some(
                 codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
             ),
+            delegation_report: None,
         }),
     });
     chat.handle_codex_event(Event {
@@ -2439,6 +2440,17 @@ async fn collab_spawn_end_uses_effective_model_and_preserves_requested_details()
                     suppression_reason: None,
                 },
             ),
+            delegation_report: Some(codex_protocol::protocol::DelegationReport {
+                general_task_type: "code review".to_string(),
+                task_difficulty_1_10: 6,
+                brief_completeness_1_10: 8,
+                task_self_sufficiency_1_10: 7,
+                expected_duration_minutes: 15,
+                why_this_agent: "Strong fit for reviewing this code path.".to_string(),
+                expected_output_shape: "Findings list ordered by severity.".to_string(),
+                files_or_scope: "codex-rs/tui/src/chatwidget.rs".to_string(),
+                risks_or_unknowns: "Might require snapshot refresh.".to_string(),
+            }),
             status: AgentStatus::PendingInit,
         }),
     });
@@ -2481,6 +2493,7 @@ async fn replayed_collab_spawn_end_preserves_requested_details_from_begin_event(
             context_inheritance_requested: Some(
                 codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
             ),
+            delegation_report: None,
         }),
     });
     chat.handle_codex_event_replay(Event {
@@ -2503,6 +2516,17 @@ async fn replayed_collab_spawn_end_preserves_requested_details_from_begin_event(
                 codex_protocol::protocol::SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
             ),
             context_inheritance_telemetry: None,
+            delegation_report: Some(codex_protocol::protocol::DelegationReport {
+                general_task_type: "analysis".to_string(),
+                task_difficulty_1_10: 3,
+                brief_completeness_1_10: 9,
+                task_self_sufficiency_1_10: 9,
+                expected_duration_minutes: 10,
+                why_this_agent: "Task is bounded and read-heavy.".to_string(),
+                expected_output_shape: "Short findings note.".to_string(),
+                files_or_scope: "repo root".to_string(),
+                risks_or_unknowns: "none known".to_string(),
+            }),
             status: AgentStatus::PendingInit,
         }),
     });
@@ -5051,6 +5075,8 @@ async fn live_app_server_collab_wait_items_render_history() {
                     other_receiver_thread_id.to_string(),
                 ],
                 prompt: None,
+                requested_model: None,
+                requested_reasoning_effort: None,
                 model: None,
                 reasoning_effort: None,
                 effective_model: None,
@@ -5058,6 +5084,7 @@ async fn live_app_server_collab_wait_items_render_history() {
                 context_inheritance_requested: None,
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
+                delegation_report: None,
                 agents_states: HashMap::new(),
             },
         }),
@@ -5078,6 +5105,8 @@ async fn live_app_server_collab_wait_items_render_history() {
                     other_receiver_thread_id.to_string(),
                 ],
                 prompt: None,
+                requested_model: None,
+                requested_reasoning_effort: None,
                 model: None,
                 reasoning_effort: None,
                 effective_model: None,
@@ -5085,6 +5114,7 @@ async fn live_app_server_collab_wait_items_render_history() {
                 context_inheritance_requested: None,
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
+                delegation_report: None,
                 agents_states: HashMap::from([
                     (
                         receiver_thread_id.to_string(),
@@ -5133,6 +5163,8 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: Vec::new(),
                 prompt: Some("Explore the repo".to_string()),
+                requested_model: Some("gpt-5".to_string()),
+                requested_reasoning_effort: Some(ReasoningEffortConfig::High),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
                 effective_model: None,
@@ -5142,6 +5174,7 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                 ),
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
+                delegation_report: None,
                 agents_states: HashMap::new(),
             },
         }),
@@ -5159,6 +5192,8 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![spawned_thread_id.to_string()],
                 prompt: Some("Explore the repo".to_string()),
+                requested_model: Some("gpt-5".to_string()),
+                requested_reasoning_effort: Some(ReasoningEffortConfig::High),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
                 effective_model: Some("gpt-5-mini".to_string()),
@@ -5178,6 +5213,17 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                         suppression_reason: None,
                     },
                 ),
+                delegation_report: Some(codex_protocol::protocol::DelegationReport {
+                    general_task_type: "analysis".to_string(),
+                    task_difficulty_1_10: 5,
+                    brief_completeness_1_10: 9,
+                    task_self_sufficiency_1_10: 9,
+                    expected_duration_minutes: 20,
+                    why_this_agent: "Strong fit for bounded analysis.".to_string(),
+                    expected_output_shape: "Findings summary.".to_string(),
+                    files_or_scope: "repo root".to_string(),
+                    risks_or_unknowns: "none known".to_string(),
+                }),
                 agents_states: HashMap::from([(
                     spawned_thread_id.to_string(),
                     AppServerCollabAgentState {
@@ -5199,6 +5245,19 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
         "app_server_collab_spawn_completed_renders_requested_model_and_effort",
         combined
     );
+    assert!(
+        combined
+            .contains("Delegation: analysis | difficulty 5/10 | brief 9/10 | self 9/10 | ~20 min"),
+        "expected completed row to render the delegation type, got {combined:?}"
+    );
+    assert!(
+        combined.contains("Deliverable: output: Findings summary. | scope: repo root"),
+        "expected completed row to render delegation assessment, got {combined:?}"
+    );
+    assert!(
+        combined.contains("Risks: none known"),
+        "expected completed row to render expected duration, got {combined:?}"
+    );
 }
 
 #[tokio::test]
@@ -5215,6 +5274,8 @@ async fn replayed_in_progress_spawn_item_renders_begin_row() {
             sender_thread_id: sender_thread_id.to_string(),
             receiver_thread_ids: Vec::new(),
             prompt: Some("Explore the repo".to_string()),
+            requested_model: Some("gpt-5".to_string()),
+            requested_reasoning_effort: Some(ReasoningEffortConfig::High),
             model: Some("gpt-5".to_string()),
             reasoning_effort: Some(ReasoningEffortConfig::High),
             effective_model: None,
@@ -5224,6 +5285,7 @@ async fn replayed_in_progress_spawn_item_renders_begin_row() {
             ),
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
+            delegation_report: None,
             agents_states: HashMap::new(),
         },
         "turn-1".to_string(),
@@ -5263,6 +5325,8 @@ async fn replayed_spawn_begin_event_does_not_render_after_completed_spawn_item()
             sender_thread_id: sender_thread_id.to_string(),
             receiver_thread_ids: vec![spawned_thread_id.to_string()],
             prompt: Some("Explore the repo".to_string()),
+            requested_model: Some("gpt-5".to_string()),
+            requested_reasoning_effort: Some(ReasoningEffortConfig::High),
             model: Some("gpt-5".to_string()),
             reasoning_effort: Some(ReasoningEffortConfig::High),
             effective_model: Some("gpt-5-mini".to_string()),
@@ -5274,6 +5338,17 @@ async fn replayed_spawn_begin_event_does_not_render_after_completed_spawn_item()
                 codex_protocol::protocol::SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
             ),
             context_inheritance_telemetry: None,
+            delegation_report: Some(codex_protocol::protocol::DelegationReport {
+                general_task_type: "analysis".to_string(),
+                task_difficulty_1_10: 3,
+                brief_completeness_1_10: 9,
+                task_self_sufficiency_1_10: 9,
+                expected_duration_minutes: 10,
+                why_this_agent: "Task is bounded and read-heavy.".to_string(),
+                expected_output_shape: "Short findings note.".to_string(),
+                files_or_scope: "repo root".to_string(),
+                risks_or_unknowns: "none known".to_string(),
+            }),
             agents_states: HashMap::from([(
                 spawned_thread_id.to_string(),
                 AppServerCollabAgentState {
@@ -5297,6 +5372,7 @@ async fn replayed_spawn_begin_event_does_not_render_after_completed_spawn_item()
             context_inheritance_requested: Some(
                 codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
             ),
+            delegation_report: None,
         }),
     });
 
@@ -5324,6 +5400,19 @@ async fn replayed_spawn_begin_event_does_not_render_after_completed_spawn_item()
         "expected replayed completed spawn row to keep effective context inheritance, got {rendered:?}"
     );
     assert!(
+        rendered
+            .contains("Delegation: analysis | difficulty 3/10 | brief 9/10 | self 9/10 | ~10 min"),
+        "expected replayed completed spawn row to render the delegation type, got {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Deliverable: output: Short findings note. | scope: repo root"),
+        "expected replayed completed spawn row to render the delegation assessment, got {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Risks: none known"),
+        "expected replayed completed spawn row to render expected duration, got {rendered:?}"
+    );
+    assert!(
         !rendered.contains("Spawning agent"),
         "expected replayed spawn begin row to be suppressed, got {rendered:?}"
     );
@@ -5345,6 +5434,8 @@ async fn replayed_spawn_notifications_do_not_duplicate_completed_spawn_item() {
             sender_thread_id: sender_thread_id.to_string(),
             receiver_thread_ids: vec![spawned_thread_id.to_string()],
             prompt: Some("Explore the repo".to_string()),
+            requested_model: Some("gpt-5".to_string()),
+            requested_reasoning_effort: Some(ReasoningEffortConfig::High),
             model: Some("gpt-5".to_string()),
             reasoning_effort: Some(ReasoningEffortConfig::High),
             effective_model: Some("gpt-5-mini".to_string()),
@@ -5356,6 +5447,7 @@ async fn replayed_spawn_notifications_do_not_duplicate_completed_spawn_item() {
                 codex_protocol::protocol::SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
             ),
             context_inheritance_telemetry: None,
+            delegation_report: None,
             agents_states: HashMap::from([(
                 spawned_thread_id.to_string(),
                 AppServerCollabAgentState {
@@ -5379,6 +5471,8 @@ async fn replayed_spawn_notifications_do_not_duplicate_completed_spawn_item() {
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: Vec::new(),
                 prompt: Some("Explore the repo".to_string()),
+                requested_model: Some("gpt-5".to_string()),
+                requested_reasoning_effort: Some(ReasoningEffortConfig::High),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
                 effective_model: None,
@@ -5388,6 +5482,7 @@ async fn replayed_spawn_notifications_do_not_duplicate_completed_spawn_item() {
                 ),
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
+                delegation_report: None,
                 agents_states: HashMap::new(),
             },
         }),
@@ -5405,6 +5500,8 @@ async fn replayed_spawn_notifications_do_not_duplicate_completed_spawn_item() {
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![spawned_thread_id.to_string()],
                 prompt: Some("Explore the repo".to_string()),
+                requested_model: Some("gpt-5".to_string()),
+                requested_reasoning_effort: Some(ReasoningEffortConfig::High),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
                 effective_model: Some("gpt-5-mini".to_string()),
@@ -5416,6 +5513,7 @@ async fn replayed_spawn_notifications_do_not_duplicate_completed_spawn_item() {
                     codex_protocol::protocol::SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
                 ),
                 context_inheritance_telemetry: None,
+                delegation_report: None,
                 agents_states: HashMap::from([(
                     spawned_thread_id.to_string(),
                     AppServerCollabAgentState {
@@ -5461,6 +5559,8 @@ async fn replayed_thread_snapshot_event_notifications_do_not_duplicate_completed
             sender_thread_id: sender_thread_id.to_string(),
             receiver_thread_ids: vec![spawned_thread_id.to_string()],
             prompt: Some("Explore the repo".to_string()),
+            requested_model: Some("gpt-5".to_string()),
+            requested_reasoning_effort: Some(ReasoningEffortConfig::High),
             model: Some("gpt-5".to_string()),
             reasoning_effort: Some(ReasoningEffortConfig::High),
             effective_model: Some("gpt-5-mini".to_string()),
@@ -5472,6 +5572,7 @@ async fn replayed_thread_snapshot_event_notifications_do_not_duplicate_completed
                 codex_protocol::protocol::SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
             ),
             context_inheritance_telemetry: None,
+            delegation_report: None,
             agents_states: HashMap::from([(
                 spawned_thread_id.to_string(),
                 AppServerCollabAgentState {
@@ -5495,6 +5596,8 @@ async fn replayed_thread_snapshot_event_notifications_do_not_duplicate_completed
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: Vec::new(),
                 prompt: Some("Explore the repo".to_string()),
+                requested_model: Some("gpt-5".to_string()),
+                requested_reasoning_effort: Some(ReasoningEffortConfig::High),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
                 effective_model: None,
@@ -5504,6 +5607,7 @@ async fn replayed_thread_snapshot_event_notifications_do_not_duplicate_completed
                 ),
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
+                delegation_report: None,
                 agents_states: HashMap::new(),
             },
         }),
@@ -5521,6 +5625,8 @@ async fn replayed_thread_snapshot_event_notifications_do_not_duplicate_completed
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![spawned_thread_id.to_string()],
                 prompt: Some("Explore the repo".to_string()),
+                requested_model: Some("gpt-5".to_string()),
+                requested_reasoning_effort: Some(ReasoningEffortConfig::High),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
                 effective_model: Some("gpt-5-mini".to_string()),
@@ -5532,6 +5638,7 @@ async fn replayed_thread_snapshot_event_notifications_do_not_duplicate_completed
                     codex_protocol::protocol::SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
                 ),
                 context_inheritance_telemetry: None,
+                delegation_report: None,
                 agents_states: HashMap::from([(
                     spawned_thread_id.to_string(),
                     AppServerCollabAgentState {
@@ -5577,6 +5684,8 @@ async fn replayed_in_progress_spawn_item_allows_completed_notification_transitio
             sender_thread_id: sender_thread_id.to_string(),
             receiver_thread_ids: Vec::new(),
             prompt: Some("Explore the repo".to_string()),
+            requested_model: Some("gpt-5".to_string()),
+            requested_reasoning_effort: Some(ReasoningEffortConfig::High),
             model: Some("gpt-5".to_string()),
             reasoning_effort: Some(ReasoningEffortConfig::High),
             effective_model: None,
@@ -5586,6 +5695,7 @@ async fn replayed_in_progress_spawn_item_allows_completed_notification_transitio
             ),
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
+            delegation_report: None,
             agents_states: HashMap::new(),
         },
         "turn-1".to_string(),
@@ -5603,6 +5713,8 @@ async fn replayed_in_progress_spawn_item_allows_completed_notification_transitio
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![spawned_thread_id.to_string()],
                 prompt: Some("Explore the repo".to_string()),
+                requested_model: Some("gpt-5".to_string()),
+                requested_reasoning_effort: Some(ReasoningEffortConfig::High),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
                 effective_model: Some("gpt-5-mini".to_string()),
@@ -5614,6 +5726,7 @@ async fn replayed_in_progress_spawn_item_allows_completed_notification_transitio
                     codex_protocol::protocol::SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
                 ),
                 context_inheritance_telemetry: None,
+                delegation_report: None,
                 agents_states: HashMap::from([(
                     spawned_thread_id.to_string(),
                     AppServerCollabAgentState {
@@ -13929,7 +14042,7 @@ async fn status_line_auto_follow_up_countdown_footer_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.show_welcome_banner = false;
     chat.config.tui_status_line = Some(vec![]);
-    chat.arm_auto_follow_up_countdown(15, 1);
+    chat.arm_auto_follow_up_countdown(/*expected_wait_seconds*/ 15, /*queued_count*/ 1);
 
     assert_eq!(
         status_line_text(&chat),
@@ -14792,7 +14905,7 @@ async fn after_agent_replay_hook_completed_without_generation_epoch_does_not_arm
 #[tokio::test]
 async fn after_agent_non_queued_runtime_event_does_not_clear_existing_countdown() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.arm_auto_follow_up_countdown(15, 1);
+    chat.arm_auto_follow_up_countdown(/*expected_wait_seconds*/ 15, /*queued_count*/ 1);
     assert!(
         status_line_text(&chat)
             .map(|line| line.contains("Nero auto countdown:"))

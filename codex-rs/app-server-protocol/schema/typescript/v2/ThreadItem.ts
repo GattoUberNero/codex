@@ -13,6 +13,7 @@ import type { CollabAgentToolCallStatus } from "./CollabAgentToolCallStatus";
 import type { CommandAction } from "./CommandAction";
 import type { CommandExecutionSource } from "./CommandExecutionSource";
 import type { CommandExecutionStatus } from "./CommandExecutionStatus";
+import type { DelegationReport } from "./DelegationReport";
 import type { DynamicToolCallOutputContentItem } from "./DynamicToolCallOutputContentItem";
 import type { DynamicToolCallStatus } from "./DynamicToolCallStatus";
 import type { FileUpdateChange } from "./FileUpdateChange";
@@ -92,19 +93,27 @@ prompt: string | null,
 /**
  * Model requested for the spawned agent, when applicable.
  */
-model: string | null, 
+requestedModel: string | null, 
 /**
  * Reasoning effort requested for the spawned agent, when applicable.
+ */
+requestedReasoningEffort: ReasoningEffort | null, 
+/**
+ * Effective model used by the spawned agent after role and runtime overrides.
+ */
+model: string | null, 
+/**
+ * Effective reasoning effort used by the spawned agent after role and runtime overrides.
  */
 reasoningEffort: ReasoningEffort | null, 
 /**
  * Effective model used by the spawned agent after role and runtime overrides.
  */
-  effectiveModel: string | null,
+effectiveModel: string | null, 
 /**
  * Effective reasoning effort used by the spawned agent after role and runtime overrides.
  */
-  effectiveReasoningEffort: ReasoningEffort | null,
+effectiveReasoningEffort: ReasoningEffort | null, 
 /**
  * Requested parent-context inheritance mode for spawn calls, when available.
  */
@@ -117,6 +126,10 @@ contextInheritanceEffective: SpawnContextInheritanceEffectiveMode | null,
  * Runtime budgeting telemetry for the effective inheritance decision.
  */
 contextInheritanceTelemetry: SpawnContextInheritanceTelemetry | null, 
+/**
+ * Optional delegation report shown in the TUI.
+ */
+delegationReport: DelegationReport | null, 
 /**
  * Last known status of the target agents, when available.
  */

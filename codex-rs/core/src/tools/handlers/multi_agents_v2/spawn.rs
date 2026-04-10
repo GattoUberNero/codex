@@ -7,6 +7,7 @@ use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::apply_role_to_config;
 use codex_protocol::AgentPath;
+use codex_protocol::protocol::DelegationReport;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SpawnContextInheritanceEffectiveMode;
@@ -37,6 +38,10 @@ impl ToolHandler for Handler {
         } = invocation;
         let arguments = function_arguments(payload)?;
         let args: SpawnAgentArgs = parse_arguments(&arguments)?;
+        let delegation_report = args.delegation_report;
+        if let Some(report) = delegation_report.as_ref() {
+            validate_delegation_report(report)?;
+        }
         let context_inheritance_resolution = resolve_spawn_context_inheritance_mode(
             args.fork_context,
             args.context_inheritance,
@@ -71,8 +76,8 @@ impl ToolHandler for Handler {
                     prompt: prompt.clone(),
                     model: requested_model.clone(),
                     reasoning_effort: requested_reasoning_effort,
-                    context_inheritance_requested: context_inheritance_resolution
-                        .requested_mode,
+                    context_inheritance_requested: context_inheritance_resolution.requested_mode,
+                    delegation_report: delegation_report.clone(),
                 }
                 .into(),
             )
@@ -205,6 +210,7 @@ impl ToolHandler for Handler {
                     model: effective_model,
                     reasoning_effort: effective_reasoning_effort,
                     context_inheritance_requested: context_inheritance_resolution.requested_mode,
+                    delegation_report: delegation_report.clone(),
                     context_inheritance_effective: Some(fork_context_report.effective_mode),
                     context_inheritance_telemetry: fork_context_report.telemetry.clone(),
                     status,
@@ -229,11 +235,50 @@ impl ToolHandler for Handler {
             agent_id: None,
             task_name,
             nickname,
+            delegation_report,
             context_inheritance_requested: fork_context_report.requested_mode,
             context_inheritance_effective: fork_context_report.effective_mode,
             context_inheritance_telemetry: fork_context_report.telemetry,
         })
     }
+}
+
+fn validate_delegation_report(report: &DelegationReport) -> Result<(), FunctionCallError> {
+    for (field_name, value) in [
+        ("general_task_type", report.general_task_type.trim()),
+        ("why_this_agent", report.why_this_agent.trim()),
+        ("expected_output_shape", report.expected_output_shape.trim()),
+        ("files_or_scope", report.files_or_scope.trim()),
+        ("risks_or_unknowns", report.risks_or_unknowns.trim()),
+    ] {
+        if value.is_empty() {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "delegation_report.{field_name} must be a non-empty string"
+            )));
+        }
+    }
+
+    for (field_name, value) in [
+        ("task_difficulty_1_10", report.task_difficulty_1_10),
+        ("brief_completeness_1_10", report.brief_completeness_1_10),
+        (
+            "task_self_sufficiency_1_10",
+            report.task_self_sufficiency_1_10,
+        ),
+    ] {
+        if !(1..=10).contains(&value) {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "delegation_report.{field_name} must be between 1 and 10"
+            )));
+        }
+    }
+    if report.expected_duration_minutes == 0 {
+        return Err(FunctionCallError::RespondToModel(
+            "delegation_report.expected_duration_minutes must be greater than 0".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -244,6 +289,7 @@ struct SpawnAgentArgs {
     agent_type: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
+    delegation_report: Option<DelegationReport>,
     #[serde(default)]
     fork_context: Option<bool>,
     context_inheritance: Option<SpawnContextInheritanceMode>,
@@ -254,6 +300,7 @@ pub(crate) struct SpawnAgentResult {
     agent_id: Option<String>,
     task_name: String,
     nickname: Option<String>,
+    delegation_report: Option<DelegationReport>,
     context_inheritance_requested: SpawnContextInheritanceMode,
     context_inheritance_effective: SpawnContextInheritanceEffectiveMode,
     context_inheritance_telemetry: Option<SpawnContextInheritanceTelemetry>,

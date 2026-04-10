@@ -9,6 +9,9 @@ expression: combined
 
 • Spawned 019cff70-2599-75e2-af72-b91781b41a8e (gpt-5-mini medium)
   └ Explore the repo
+    Delegation: analysis | difficulty 5/10 | brief 9/10 | self 9/10 | ~20 min
+    Deliverable: output: Findings summary. | scope: repo root
+    Risks: none known
     Requested model/reasoning: (gpt-5 high)
     Context bounded -> bounded_trimmed
     Budget turns 6 -> 2 | tokens ~18500/24000

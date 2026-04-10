@@ -1300,8 +1300,8 @@ mod tests {
                 path,
                 archived: false,
             }),
-            3,
-            false,
+            /*keep_tail_lines*/ 3,
+            /*loaded*/ false,
         )?;
 
         assert!(analysis.eligible);
@@ -1330,8 +1330,8 @@ mod tests {
                 path: path.clone(),
                 archived: false,
             }),
-            3,
-            false,
+            /*keep_tail_lines*/ 3,
+            /*loaded*/ false,
         )?;
         let fingerprint = analysis
             .analysis_fingerprint
@@ -1344,9 +1344,9 @@ mod tests {
                 path: path.clone(),
                 archived: false,
             },
-            3,
+            /*keep_tail_lines*/ 3,
             &fingerprint,
-            false,
+            /*loaded*/ false,
         )?;
         let trimmed_text = fs::read_to_string(&path)?;
         assert!(trimmed_text.len() < original.len());
@@ -1377,7 +1377,7 @@ mod tests {
                 path: path.clone(),
                 archived: false,
             }),
-            false,
+            /*loaded*/ false,
         )?;
         let restored_text = fs::read_to_string(&path)?;
         assert_eq!(restored_text, original);
@@ -1404,8 +1404,8 @@ mod tests {
                 path: path.clone(),
                 archived: false,
             }),
-            3,
-            false,
+            /*keep_tail_lines*/ 3,
+            /*loaded*/ false,
         )?;
         let fingerprint = analysis
             .analysis_fingerprint
@@ -1424,9 +1424,9 @@ mod tests {
                 path,
                 archived: false,
             },
-            3,
+            /*keep_tail_lines*/ 3,
             &fingerprint,
-            false,
+            /*loaded*/ false,
         )
         .expect_err("trim should reject rollout identity changes");
 
@@ -1447,8 +1447,8 @@ mod tests {
                 path: path.clone(),
                 archived: false,
             }),
-            3,
-            false,
+            /*keep_tail_lines*/ 3,
+            /*loaded*/ false,
         )?;
         let fingerprint = analysis
             .analysis_fingerprint
@@ -1467,9 +1467,9 @@ mod tests {
                 path,
                 archived: false,
             },
-            3,
+            /*keep_tail_lines*/ 3,
             &fingerprint,
-            false,
+            /*loaded*/ false,
         )
         .expect_err("trim should reject same-size content changes");
 
@@ -1491,8 +1491,8 @@ mod tests {
                 path: path.clone(),
                 archived: false,
             }),
-            3,
-            false,
+            /*keep_tail_lines*/ 3,
+            /*loaded*/ false,
         )?;
         let fingerprint = analysis
             .analysis_fingerprint
@@ -1505,9 +1505,9 @@ mod tests {
                 path: path.clone(),
                 archived: false,
             },
-            3,
+            /*keep_tail_lines*/ 3,
             &fingerprint,
-            false,
+            /*loaded*/ false,
         )?;
         fs::remove_file(&path)?;
 
@@ -1515,8 +1515,8 @@ mod tests {
             home.path(),
             &thread_id,
             Some("Test".to_string()),
-            None,
-            false,
+            /*expected_location*/ None,
+            /*loaded*/ false,
         )?;
 
         assert_eq!(fs::read_to_string(&path)?, original);
@@ -1537,8 +1537,8 @@ mod tests {
                 path: path.clone(),
                 archived: false,
             }),
-            3,
-            false,
+            /*keep_tail_lines*/ 3,
+            /*loaded*/ false,
         )?;
         let fingerprint = analysis
             .analysis_fingerprint
@@ -1551,9 +1551,9 @@ mod tests {
                 path: path.clone(),
                 archived: false,
             },
-            3,
+            /*keep_tail_lines*/ 3,
             &fingerprint,
-            false,
+            /*loaded*/ false,
         )?;
 
         let manifest_path = backup_manifest_path(home.path(), &thread_id);
@@ -1573,7 +1573,7 @@ mod tests {
                 path,
                 archived: false,
             }),
-            false,
+            /*loaded*/ false,
         )
         .expect_err("restore should reject tampered backup target path");
 
@@ -1598,8 +1598,8 @@ mod tests {
                 path: path.clone(),
                 archived: false,
             }),
-            3,
-            false,
+            /*keep_tail_lines*/ 3,
+            /*loaded*/ false,
         )?;
         let fingerprint = analysis
             .analysis_fingerprint
@@ -1612,9 +1612,9 @@ mod tests {
                 path,
                 archived: false,
             },
-            3,
+            /*keep_tail_lines*/ 3,
             &fingerprint,
-            false,
+            /*loaded*/ false,
         )?;
 
         let other_path = home
@@ -1640,7 +1640,7 @@ mod tests {
                 path: test_rollout_path(home.path(), &thread_id),
                 archived: false,
             }),
-            false,
+            /*loaded*/ false,
         )
         .expect_err("restore should reject wrong-thread rollout target path");
 
@@ -1693,8 +1693,8 @@ mod tests {
                 path: path.clone(),
                 archived: false,
             }),
-            3,
-            false,
+            /*keep_tail_lines*/ 3,
+            /*loaded*/ false,
         )?;
         let fingerprint = analysis
             .analysis_fingerprint
@@ -1707,9 +1707,9 @@ mod tests {
                 path: path.clone(),
                 archived: false,
             },
-            3,
+            /*keep_tail_lines*/ 3,
             &fingerprint,
-            false,
+            /*loaded*/ false,
         )?;
         let backup = read_existing_backup(home.path(), &thread_id)?
             .context("backup should exist after trim")?;
@@ -1720,8 +1720,8 @@ mod tests {
             &thread_id,
             Some("Test".to_string()),
             path,
-            false,
-            false,
+            /*archived*/ false,
+            /*loaded*/ false,
             &backup,
             &anyhow::anyhow!("simulated analyze failure"),
         );
@@ -1762,8 +1762,8 @@ mod tests {
                 path: path.clone(),
                 archived: false,
             }),
-            3,
-            false,
+            /*keep_tail_lines*/ 3,
+            /*loaded*/ false,
         )?;
         let fingerprint = analysis
             .analysis_fingerprint
@@ -1776,9 +1776,9 @@ mod tests {
                 path: path.clone(),
                 archived: false,
             },
-            3,
+            /*keep_tail_lines*/ 3,
             &fingerprint,
-            false,
+            /*loaded*/ false,
         )?;
         let backup = read_existing_backup(home.path(), &thread_id)?
             .context("backup should exist after trim")?;
@@ -1788,8 +1788,8 @@ mod tests {
             &thread_id,
             Some("Test".to_string()),
             path,
-            false,
-            false,
+            /*archived*/ false,
+            /*loaded*/ false,
             &backup,
             &anyhow::anyhow!("simulated analyze failure"),
         );
@@ -1828,8 +1828,8 @@ mod tests {
                 path: path.clone(),
                 archived: false,
             }),
-            3,
-            false,
+            /*keep_tail_lines*/ 3,
+            /*loaded*/ false,
         )?;
         let fingerprint = analysis
             .analysis_fingerprint
@@ -1842,9 +1842,9 @@ mod tests {
                 path: path.clone(),
                 archived: false,
             },
-            3,
+            /*keep_tail_lines*/ 3,
             &fingerprint,
-            false,
+            /*loaded*/ false,
         )?;
         let backup = read_existing_backup(home.path(), &thread_id)?
             .context("backup should exist after trim")?;
@@ -1856,8 +1856,8 @@ mod tests {
             &thread_id,
             Some("Test".to_string()),
             path,
-            false,
-            false,
+            /*archived*/ false,
+            /*loaded*/ false,
             &backup,
             &anyhow::anyhow!("simulated analyze failure"),
         );
@@ -1892,8 +1892,8 @@ mod tests {
                 path,
                 archived: false,
             }),
-            3,
-            false,
+            /*keep_tail_lines*/ 3,
+            /*loaded*/ false,
         )?;
         assert!(!analysis.eligible);
         assert!(

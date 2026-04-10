@@ -1078,6 +1078,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 context_inheritance_requested: None,
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
+                delegation_report: None,
                 agents_states: HashMap::new(),
             };
             let notification = ItemStartedNotification {
@@ -1113,6 +1114,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 context_inheritance_requested: None,
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
+                delegation_report: None,
                 agents_states: [(receiver_id, received_status)].into_iter().collect(),
             };
             let notification = ItemCompletedNotification {
@@ -1146,6 +1148,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 context_inheritance_requested: None,
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
+                delegation_report: None,
                 agents_states: HashMap::new(),
             };
             let notification = ItemStartedNotification {
@@ -1191,6 +1194,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 context_inheritance_requested: None,
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
+                delegation_report: None,
                 agents_states,
             };
             let notification = ItemCompletedNotification {
@@ -1219,6 +1223,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 context_inheritance_requested: None,
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
+                delegation_report: None,
                 agents_states: HashMap::new(),
             };
             let notification = ItemStartedNotification {
@@ -1268,6 +1273,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 context_inheritance_requested: None,
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
+                delegation_report: None,
                 agents_states,
             };
             let notification = ItemCompletedNotification {
@@ -2788,6 +2794,7 @@ fn collab_resume_begin_item(
         context_inheritance_requested: None,
         context_inheritance_effective: None,
         context_inheritance_telemetry: None,
+        delegation_report: None,
         agents_states: HashMap::new(),
     }
 }
@@ -2811,6 +2818,7 @@ fn collab_spawn_begin_item(
         context_inheritance_requested: begin_event.context_inheritance_requested,
         context_inheritance_effective: None,
         context_inheritance_telemetry: None,
+        delegation_report: begin_event.delegation_report,
         agents_states: HashMap::new(),
     }
 }
@@ -2846,6 +2854,7 @@ fn collab_spawn_end_item(
         context_inheritance_requested: end_event.context_inheritance_requested,
         context_inheritance_effective: end_event.context_inheritance_effective,
         context_inheritance_telemetry: end_event.context_inheritance_telemetry,
+        delegation_report: end_event.delegation_report,
         agents_states,
     }
 }
@@ -2879,6 +2888,7 @@ fn collab_resume_end_item(end_event: codex_protocol::protocol::CollabResumeEndEv
         context_inheritance_requested: None,
         context_inheritance_effective: None,
         context_inheritance_telemetry: None,
+        delegation_report: None,
         agents_states,
     }
 }
@@ -3318,6 +3328,7 @@ mod tests {
             context_inheritance_requested: None,
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
+            delegation_report: None,
             agents_states: HashMap::new(),
         };
         assert_eq!(item, expected);
@@ -3352,6 +3363,7 @@ mod tests {
             context_inheritance_requested: None,
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
+            delegation_report: None,
             agents_states: [(
                 receiver_id,
                 V2CollabAgentStatus::from(codex_protocol::protocol::AgentStatus::NotFound),
@@ -3371,6 +3383,7 @@ mod tests {
             model: "gpt-5.4-mini".to_string(),
             reasoning_effort: codex_protocol::openai_models::ReasoningEffort::Medium,
             context_inheritance_requested: Some(SpawnContextInheritanceMode::Bounded),
+            delegation_report: None,
         };
 
         let item = collab_spawn_begin_item(event.clone());
@@ -3392,6 +3405,7 @@ mod tests {
             context_inheritance_requested: Some(SpawnContextInheritanceMode::Bounded),
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
+            delegation_report: None,
             agents_states: HashMap::new(),
         };
         assert_eq!(item, expected);
@@ -3421,6 +3435,7 @@ mod tests {
                 usable_context_budget_tokens: Some(9_876),
                 suppression_reason: Some(SpawnContextInheritanceSuppressionReason::BudgetExceeded),
             }),
+            delegation_report: None,
             status: codex_protocol::protocol::AgentStatus::PendingInit,
         };
 
@@ -3455,6 +3470,7 @@ mod tests {
                 usable_context_budget_tokens: Some(9_876),
                 suppression_reason: Some(SpawnContextInheritanceSuppressionReason::BudgetExceeded),
             }),
+            delegation_report: None,
             agents_states: [(
                 receiver_id,
                 V2CollabAgentStatus::from(codex_protocol::protocol::AgentStatus::PendingInit),

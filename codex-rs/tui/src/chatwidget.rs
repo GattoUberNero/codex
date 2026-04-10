@@ -4136,6 +4136,8 @@ impl ChatWidget {
             sender_thread_id,
             receiver_thread_ids,
             prompt,
+            requested_model,
+            requested_reasoning_effort,
             model,
             reasoning_effort,
             effective_model,
@@ -4143,6 +4145,7 @@ impl ChatWidget {
             context_inheritance_requested,
             context_inheritance_effective,
             context_inheritance_telemetry,
+            delegation_report,
             agents_states,
         } = item
         else {
@@ -4163,8 +4166,12 @@ impl ChatWidget {
                     self.replayed_collab_spawn_call_ids.insert(id.clone());
                 }
                 let spawn_request = multi_agents::SpawnRequestSummary {
-                    model: model.clone().unwrap_or_default(),
-                    reasoning_effort: reasoning_effort.unwrap_or_default(),
+                    model: requested_model
+                        .or_else(|| model.clone())
+                        .unwrap_or_default(),
+                    reasoning_effort: requested_reasoning_effort
+                        .or(reasoning_effort)
+                        .unwrap_or_default(),
                     context_inheritance_requested,
                 };
 
@@ -4205,6 +4212,7 @@ impl ChatWidget {
                             context_inheritance_requested,
                             context_inheritance_effective,
                             context_inheritance_telemetry,
+                            delegation_report,
                             status: first_receiver
                                 .as_ref()
                                 .and_then(|thread_id| agents_states.get(&thread_id.to_string()))
@@ -6821,6 +6829,8 @@ impl ChatWidget {
                 sender_thread_id,
                 receiver_thread_ids,
                 prompt,
+                requested_model,
+                requested_reasoning_effort,
                 model,
                 reasoning_effort,
                 effective_model,
@@ -6828,6 +6838,7 @@ impl ChatWidget {
                 context_inheritance_requested,
                 context_inheritance_effective,
                 context_inheritance_telemetry,
+                delegation_report,
                 agents_states,
             } => self.on_collab_agent_tool_call(
                 ThreadItem::CollabAgentToolCall {
@@ -6837,6 +6848,8 @@ impl ChatWidget {
                     sender_thread_id,
                     receiver_thread_ids,
                     prompt,
+                    requested_model,
+                    requested_reasoning_effort,
                     model,
                     reasoning_effort,
                     effective_model,
@@ -6844,6 +6857,7 @@ impl ChatWidget {
                     context_inheritance_requested,
                     context_inheritance_effective,
                     context_inheritance_telemetry,
+                    delegation_report,
                     agents_states,
                 },
                 from_replay,
@@ -7296,6 +7310,8 @@ impl ChatWidget {
                 sender_thread_id,
                 receiver_thread_ids,
                 prompt,
+                requested_model,
+                requested_reasoning_effort,
                 model,
                 reasoning_effort,
                 effective_model,
@@ -7303,6 +7319,7 @@ impl ChatWidget {
                 context_inheritance_requested,
                 context_inheritance_effective,
                 context_inheritance_telemetry,
+                delegation_report,
                 agents_states,
             } => {
                 if replay_kind.is_some()
@@ -7320,6 +7337,8 @@ impl ChatWidget {
                         sender_thread_id,
                         receiver_thread_ids,
                         prompt,
+                        requested_model,
+                        requested_reasoning_effort,
                         model,
                         reasoning_effort,
                         effective_model,
@@ -7327,6 +7346,7 @@ impl ChatWidget {
                         context_inheritance_requested,
                         context_inheritance_effective,
                         context_inheritance_telemetry,
+                        delegation_report,
                         agents_states,
                     },
                     from_replay,
@@ -11731,7 +11751,7 @@ pub(crate) fn nero_auto_status_message(runtime: NeroAutoRuntimeConfig) -> (Strin
             max_rounds,
             runtime.max_auto_rounds
         ),
-        Some(nero_auto_shortcuts_hint(true)),
+        Some(nero_auto_shortcuts_hint(/*confirmed*/ true)),
     )
 }
 
@@ -11763,7 +11783,7 @@ pub(crate) fn nero_auto_action_message(
             max_rounds,
             confirmed.max_auto_rounds
         ),
-        Some(nero_auto_shortcuts_hint(true)),
+        Some(nero_auto_shortcuts_hint(/*confirmed*/ true)),
     )
 }
 
@@ -11778,19 +11798,31 @@ pub(crate) fn next_nero_auto_runtime_config(
             ..current
         },
         NeroAutoHotkeyAction::IncreaseDifficulty => NeroAutoRuntimeConfig {
-            autonomy_level: bump_wrapping(current.autonomy_level, 1, 10),
+            autonomy_level: bump_wrapping(current.autonomy_level, /*min*/ 1, /*max*/ 10),
             ..current
         },
         NeroAutoHotkeyAction::DecreaseDifficulty => NeroAutoRuntimeConfig {
-            autonomy_level: bump_wrapping_down(current.autonomy_level, 1, 10),
+            autonomy_level: bump_wrapping_down(
+                current.autonomy_level,
+                /*min*/ 1,
+                /*max*/ 10,
+            ),
             ..current
         },
         NeroAutoHotkeyAction::CycleMaxRounds => NeroAutoRuntimeConfig {
-            max_auto_rounds: bump_wrapping(current.max_auto_rounds, 0, 10),
+            max_auto_rounds: bump_wrapping(
+                current.max_auto_rounds,
+                /*min*/ 0,
+                /*max*/ 10,
+            ),
             ..current
         },
         NeroAutoHotkeyAction::DecreaseMaxRounds => NeroAutoRuntimeConfig {
-            max_auto_rounds: bump_wrapping_down(current.max_auto_rounds, 0, 10),
+            max_auto_rounds: bump_wrapping_down(
+                current.max_auto_rounds,
+                /*min*/ 0,
+                /*max*/ 10,
+            ),
             ..current
         },
     }
