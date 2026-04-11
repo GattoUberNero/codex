@@ -3467,7 +3467,7 @@ pub struct DelegationReport {
     pub brief_completeness_1_10: u8,
     /// Integer task self-sufficiency on a 1 to 10 scale.
     pub task_self_sufficiency_1_10: u8,
-    /// Expected duration in whole minutes.
+    /// Expected duration in whole minutes (minimum 1).
     pub expected_duration_minutes: u32,
     /// Why this agent should handle the task.
     pub why_this_agent: String,
@@ -3485,15 +3485,16 @@ pub struct CollabAgentSpawnBeginEvent {
     pub call_id: String,
     /// Thread ID of the sender.
     pub sender_thread_id: ThreadId,
-    /// Initial prompt sent to the agent. Can be empty to prevent CoT leaking at the
-    /// beginning.
+    /// User-authored prompt preview shown in spawn telemetry/events.
+    /// When `delegation_report` is present, the child payload can include an additional
+    /// structured delegation block beyond this preview text.
     pub prompt: String,
     pub model: String,
     pub reasoning_effort: ReasoningEffortConfig,
     /// Requested parent-context inheritance mode for the spawn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_inheritance_requested: Option<SpawnContextInheritanceMode>,
-    /// Optional delegation report used by the TUI when rendering the spawn.
+    /// Optional delegation report used by TUI rendering and spawn payload enrichment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation_report: Option<DelegationReport>,
 }
@@ -3538,8 +3539,9 @@ pub struct CollabAgentSpawnEndEvent {
     /// Optional role assigned to the new agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_agent_role: Option<String>,
-    /// Initial prompt sent to the agent. Can be empty to prevent CoT leaking at the
-    /// beginning.
+    /// User-authored prompt preview shown in spawn telemetry/events.
+    /// When `delegation_report` is present, the child payload can include an additional
+    /// structured delegation block beyond this preview text.
     pub prompt: String,
     /// Model requested when the spawn was initiated.
     pub requested_model: String,
@@ -3552,7 +3554,7 @@ pub struct CollabAgentSpawnEndEvent {
     /// Requested parent-context inheritance mode for the spawn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_inheritance_requested: Option<SpawnContextInheritanceMode>,
-    /// Optional delegation report used by the TUI when rendering the spawn.
+    /// Optional delegation report used by TUI rendering and spawn payload enrichment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation_report: Option<DelegationReport>,
     /// Effective parent-context inheritance mode after runtime budgeting and validation.

@@ -617,8 +617,8 @@ impl ThreadHistoryBuilder {
             prompt: Some(payload.prompt.clone()),
             requested_model: Some(payload.model.clone()),
             requested_reasoning_effort: Some(payload.reasoning_effort),
-            model: Some(payload.model.clone()),
-            reasoning_effort: Some(payload.reasoning_effort),
+            model: None,
+            reasoning_effort: None,
             effective_model: None,
             effective_reasoning_effort: None,
             context_inheritance_requested: payload.context_inheritance_requested,
@@ -2653,8 +2653,8 @@ mod tests {
                 requested_reasoning_effort: Some(
                     codex_protocol::openai_models::ReasoningEffort::Medium
                 ),
-                model: Some("gpt-5.4-mini".into()),
-                reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium),
+                model: None,
+                reasoning_effort: None,
                 effective_model: None,
                 effective_reasoning_effort: None,
                 context_inheritance_requested: Some(

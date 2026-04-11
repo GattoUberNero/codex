@@ -2147,6 +2147,7 @@ async fn make_chatwidget_manual(
         running_commands: HashMap::new(),
         collab_agent_metadata: HashMap::new(),
         pending_collab_spawn_requests: HashMap::new(),
+        pending_collab_spawn_delegation_reports: HashMap::new(),
         replayed_collab_spawn_call_ids: HashSet::new(),
         suppressed_exec_calls: HashSet::new(),
         skills_all: Vec::new(),
@@ -2409,7 +2410,17 @@ async fn collab_spawn_end_uses_effective_model_and_preserves_requested_details()
             context_inheritance_requested: Some(
                 codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
             ),
-            delegation_report: None,
+            delegation_report: Some(codex_protocol::protocol::DelegationReport {
+                general_task_type: "code review".to_string(),
+                task_difficulty_1_10: 6,
+                brief_completeness_1_10: 8,
+                task_self_sufficiency_1_10: 7,
+                expected_duration_minutes: 15,
+                why_this_agent: "Strong fit for reviewing this code path.".to_string(),
+                expected_output_shape: "Findings list ordered by severity.".to_string(),
+                files_or_scope: "codex-rs/tui/src/chatwidget.rs".to_string(),
+                risks_or_unknowns: "Might require snapshot refresh.".to_string(),
+            }),
         }),
     });
     chat.handle_codex_event(Event {
@@ -2493,7 +2504,17 @@ async fn replayed_collab_spawn_end_preserves_requested_details_from_begin_event(
             context_inheritance_requested: Some(
                 codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
             ),
-            delegation_report: None,
+            delegation_report: Some(codex_protocol::protocol::DelegationReport {
+                general_task_type: "analysis".to_string(),
+                task_difficulty_1_10: 3,
+                brief_completeness_1_10: 9,
+                task_self_sufficiency_1_10: 9,
+                expected_duration_minutes: 10,
+                why_this_agent: "Task is bounded and read-heavy.".to_string(),
+                expected_output_shape: "Short findings note.".to_string(),
+                files_or_scope: "repo root".to_string(),
+                risks_or_unknowns: "none known".to_string(),
+            }),
         }),
     });
     chat.handle_codex_event_replay(Event {
@@ -2516,17 +2537,7 @@ async fn replayed_collab_spawn_end_preserves_requested_details_from_begin_event(
                 codex_protocol::protocol::SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
             ),
             context_inheritance_telemetry: None,
-            delegation_report: Some(codex_protocol::protocol::DelegationReport {
-                general_task_type: "analysis".to_string(),
-                task_difficulty_1_10: 3,
-                brief_completeness_1_10: 9,
-                task_self_sufficiency_1_10: 9,
-                expected_duration_minutes: 10,
-                why_this_agent: "Task is bounded and read-heavy.".to_string(),
-                expected_output_shape: "Short findings note.".to_string(),
-                files_or_scope: "repo root".to_string(),
-                risks_or_unknowns: "none known".to_string(),
-            }),
+            delegation_report: None,
             status: AgentStatus::PendingInit,
         }),
     });
@@ -2545,6 +2556,23 @@ async fn replayed_collab_spawn_end_preserves_requested_details_from_begin_event(
     assert!(
         rendered.contains("Requested model/reasoning: (gpt-5 high)"),
         "expected replayed completed row to preserve requested model and reasoning details, got {rendered:?}"
+    );
+    assert!(
+        rendered
+            .contains("Delegation: analysis | difficulty 3/10 | brief 9/10 | self 9/10 | ~10 min"),
+        "expected replayed completed row to carry the delegation report from the begin event, got {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Why this agent: Task is bounded and read-heavy."),
+        "expected replayed completed row to carry the delegation rationale from the begin event, got {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Deliverable: output: Short findings note. | scope: repo root"),
+        "expected replayed completed row to render the delegation assessment, got {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Risks: none known"),
+        "expected replayed completed row to render delegation risks, got {rendered:?}"
     );
     assert!(
         !rendered.contains("Spawning agent"),
@@ -5285,7 +5313,17 @@ async fn replayed_in_progress_spawn_item_renders_begin_row() {
             ),
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
-            delegation_report: None,
+            delegation_report: Some(codex_protocol::protocol::DelegationReport {
+                general_task_type: "analysis".to_string(),
+                task_difficulty_1_10: 5,
+                brief_completeness_1_10: 9,
+                task_self_sufficiency_1_10: 8,
+                expected_duration_minutes: 12,
+                why_this_agent: "Useful for pre-flight visibility.".to_string(),
+                expected_output_shape: "Short assessment.".to_string(),
+                files_or_scope: "repo root".to_string(),
+                risks_or_unknowns: "none known".to_string(),
+            }),
             agents_states: HashMap::new(),
         },
         "turn-1".to_string(),
@@ -5307,6 +5345,23 @@ async fn replayed_in_progress_spawn_item_renders_begin_row() {
         rendered.contains("Requested context inheritance: bounded"),
         "expected requested context inheritance on replayed in-progress spawn row, got {rendered:?}"
     );
+    assert!(
+        rendered
+            .contains("Delegation: analysis | difficulty 5/10 | brief 9/10 | self 8/10 | ~12 min"),
+        "expected replayed in-progress spawn row to render delegation visibility, got {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Why this agent: Useful for pre-flight visibility."),
+        "expected replayed in-progress spawn row to render delegation rationale, got {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Deliverable: output: Short assessment. | scope: repo root"),
+        "expected replayed in-progress spawn row to render delegation assessment, got {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Risks: none known"),
+        "expected replayed in-progress spawn row to render delegation risks, got {rendered:?}"
+    );
 }
 
 #[tokio::test]
@@ -5327,10 +5382,10 @@ async fn replayed_spawn_begin_event_does_not_render_after_completed_spawn_item()
             prompt: Some("Explore the repo".to_string()),
             requested_model: Some("gpt-5".to_string()),
             requested_reasoning_effort: Some(ReasoningEffortConfig::High),
-            model: Some("gpt-5".to_string()),
-            reasoning_effort: Some(ReasoningEffortConfig::High),
-            effective_model: Some("gpt-5-mini".to_string()),
-            effective_reasoning_effort: Some(ReasoningEffortConfig::Medium),
+            model: Some("gpt-5-mini".to_string()),
+            reasoning_effort: Some(ReasoningEffortConfig::Medium),
+            effective_model: Some("gpt-5-pro".to_string()),
+            effective_reasoning_effort: Some(ReasoningEffortConfig::XHigh),
             context_inheritance_requested: Some(
                 codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
             ),
@@ -5396,7 +5451,7 @@ async fn replayed_spawn_begin_event_does_not_render_after_completed_spawn_item()
         "expected replayed completed spawn row to keep requested context inheritance, got {rendered:?}"
     );
     assert!(
-        rendered.contains("Context bounded -> bounded_trimmed"),
+        rendered.contains("Context inheritance: bounded -> bounded_trimmed"),
         "expected replayed completed spawn row to keep effective context inheritance, got {rendered:?}"
     );
     assert!(
@@ -5415,6 +5470,57 @@ async fn replayed_spawn_begin_event_does_not_render_after_completed_spawn_item()
     assert!(
         !rendered.contains("Spawning agent"),
         "expected replayed spawn begin row to be suppressed, got {rendered:?}"
+    );
+}
+
+#[tokio::test]
+async fn completed_spawn_item_falls_back_to_legacy_model_fields_when_effective_missing() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000000011").expect("valid thread id");
+    let spawned_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b9b39ca9ef11").expect("valid thread id");
+
+    chat.replay_thread_item(
+        AppServerThreadItem::CollabAgentToolCall {
+            id: "spawn-legacy-effective".to_string(),
+            tool: AppServerCollabAgentTool::SpawnAgent,
+            status: AppServerCollabAgentToolCallStatus::Completed,
+            sender_thread_id: sender_thread_id.to_string(),
+            receiver_thread_ids: vec![spawned_thread_id.to_string()],
+            prompt: Some("Explore the repo".to_string()),
+            requested_model: Some("gpt-5".to_string()),
+            requested_reasoning_effort: Some(ReasoningEffortConfig::High),
+            model: Some("gpt-5-mini".to_string()),
+            reasoning_effort: Some(ReasoningEffortConfig::Medium),
+            effective_model: None,
+            effective_reasoning_effort: None,
+            context_inheritance_requested: None,
+            context_inheritance_effective: None,
+            context_inheritance_telemetry: None,
+            delegation_report: None,
+            agents_states: HashMap::from([(
+                spawned_thread_id.to_string(),
+                AppServerCollabAgentState {
+                    status: AppServerCollabAgentStatus::PendingInit,
+                    message: None,
+                },
+            )]),
+        },
+        "turn-legacy".to_string(),
+        ReplayKind::ThreadSnapshotTurns,
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(cells.len(), 1, "expected one completed spawn row");
+    let rendered = lines_to_single_string(cells.first().expect("spawn cell"));
+    assert!(
+        rendered.contains("(gpt-5-mini medium)"),
+        "expected completed spawn row to fall back to legacy model/reasoning fields when effective values are missing, got {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Requested model/reasoning: (gpt-5 high)"),
+        "expected completed spawn row to keep requested values, got {rendered:?}"
     );
 }
 

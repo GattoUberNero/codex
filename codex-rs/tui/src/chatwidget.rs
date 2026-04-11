@@ -57,6 +57,7 @@ use crate::mention_codec::LinkedMention;
 use crate::mention_codec::encode_history_mentions;
 use crate::model_catalog::ModelCatalog;
 use crate::multi_agents;
+use crate::render::line_utils::prefix_lines;
 use crate::status::RateLimitWindowDisplay;
 use crate::status::StatusAccountDisplay;
 use crate::status::format_directory_display;
@@ -155,6 +156,7 @@ use codex_protocol::protocol::CollabAgentRef;
 use codex_protocol::protocol::CollabAgentSpawnBeginEvent;
 use codex_protocol::protocol::CollabAgentStatusEntry;
 use codex_protocol::protocol::CreditsSnapshot;
+use codex_protocol::protocol::DelegationReport;
 use codex_protocol::protocol::DeprecationNoticeEvent;
 #[cfg(test)]
 use codex_protocol::protocol::ErrorEvent;
@@ -856,6 +858,7 @@ pub(crate) struct ChatWidget {
     running_commands: HashMap<String, RunningCommand>,
     collab_agent_metadata: HashMap<ThreadId, CollabAgentMetadata>,
     pending_collab_spawn_requests: HashMap<String, multi_agents::SpawnRequestSummary>,
+    pending_collab_spawn_delegation_reports: HashMap<String, DelegationReport>,
     replayed_collab_spawn_call_ids: HashSet<String>,
     suppressed_exec_calls: HashSet<String>,
     skills_all: Vec<ProtocolSkillMetadata>,
@@ -4128,6 +4131,83 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    fn collab_spawn_begin_cell(
+        prompt: &str,
+        spawn_request: &multi_agents::SpawnRequestSummary,
+        delegation_report: Option<&DelegationReport>,
+    ) -> PlainHistoryCell {
+        let cell = multi_agents::spawn_begin(prompt, spawn_request);
+        let mut lines = cell.display_lines(u16::MAX);
+        let Some(delegation_report) = delegation_report else {
+            let initial_prefix = if lines.len() > 1 {
+                "    ".into()
+            } else {
+                "  └ ".dim()
+            };
+            lines.extend(prefix_lines(
+                vec![Line::from(vec!["Delegation: ".dim(), "not provided".dim()])],
+                initial_prefix,
+                "    ".into(),
+            ));
+            return PlainHistoryCell::new(lines);
+        };
+        let mut delegation_report_lines = vec![Line::from(vec![
+            "Delegation: ".dim(),
+            format!(
+                "{general_task_type} | difficulty {task_difficulty_1_10}/10 | brief {brief_completeness_1_10}/10 | self {task_self_sufficiency_1_10}/10 | ~{expected_duration_minutes} min",
+                general_task_type = delegation_report.general_task_type.as_str(),
+                task_difficulty_1_10 = delegation_report.task_difficulty_1_10,
+                brief_completeness_1_10 = delegation_report.brief_completeness_1_10,
+                task_self_sufficiency_1_10 = delegation_report.task_self_sufficiency_1_10,
+                expected_duration_minutes = delegation_report.expected_duration_minutes,
+            )
+            .into(),
+        ])];
+
+        let output_shape = delegation_report.expected_output_shape.trim();
+        let files_or_scope = delegation_report.files_or_scope.trim();
+        let why_this_agent = delegation_report.why_this_agent.trim();
+        if !why_this_agent.is_empty() {
+            delegation_report_lines.push(Line::from(vec![
+                "Why this agent: ".dim(),
+                why_this_agent.to_owned().into(),
+            ]));
+        }
+        if !output_shape.is_empty() || !files_or_scope.is_empty() {
+            let mut details = Vec::new();
+            if !output_shape.is_empty() {
+                details.push(format!("output: {output_shape}"));
+            }
+            if !files_or_scope.is_empty() {
+                details.push(format!("scope: {files_or_scope}"));
+            }
+            delegation_report_lines.push(Line::from(vec![
+                "Deliverable: ".dim(),
+                details.join(" | ").into(),
+            ]));
+        }
+
+        let risks_or_unknowns = delegation_report.risks_or_unknowns.trim();
+        if !risks_or_unknowns.is_empty() {
+            delegation_report_lines.push(Line::from(vec![
+                "Risks: ".dim(),
+                risks_or_unknowns.to_owned().into(),
+            ]));
+        }
+
+        let initial_prefix = if lines.len() > 1 {
+            "    ".into()
+        } else {
+            "  └ ".dim()
+        };
+        lines.extend(prefix_lines(
+            delegation_report_lines,
+            initial_prefix,
+            "    ".into(),
+        ));
+        PlainHistoryCell::new(lines)
+    }
+
     fn on_collab_agent_tool_call(&mut self, item: ThreadItem, from_replay: bool) {
         let ThreadItem::CollabAgentToolCall {
             id,
@@ -4167,6 +4247,7 @@ impl ChatWidget {
                 }
                 let spawn_request = multi_agents::SpawnRequestSummary {
                     model: requested_model
+                        .clone()
                         .or_else(|| model.clone())
                         .unwrap_or_default(),
                     reasoning_effort: requested_reasoning_effort
@@ -4174,24 +4255,44 @@ impl ChatWidget {
                         .unwrap_or_default(),
                     context_inheritance_requested,
                 };
-
                 if matches!(status, CollabAgentToolCallStatus::InProgress) {
+                    if let Some(delegation_report) = delegation_report.as_ref() {
+                        self.pending_collab_spawn_delegation_reports
+                            .insert(id.clone(), delegation_report.clone());
+                    }
                     let is_new_request = self
                         .pending_collab_spawn_requests
                         .insert(id.clone(), spawn_request.clone())
                         .is_none();
                     if is_new_request {
-                        self.on_collab_event(multi_agents::spawn_begin(
+                        self.on_collab_event(Self::collab_spawn_begin_cell(
                             prompt.as_deref().unwrap_or_default(),
                             &spawn_request,
+                            delegation_report.as_ref(),
                         ));
                     }
                 }
 
                 if !matches!(status, CollabAgentToolCallStatus::InProgress) {
                     let requested_spawn_request = self.pending_collab_spawn_requests.remove(&id);
-                    let requested_model = model.unwrap_or_default();
-                    let requested_reasoning_effort = reasoning_effort.unwrap_or_default();
+                    let pending_delegation_report =
+                        self.pending_collab_spawn_delegation_reports.remove(&id);
+                    let begin_row_rendered_delegation = pending_delegation_report.is_some();
+                    let requested_model = requested_spawn_request
+                        .as_ref()
+                        .map(|spawn_request| spawn_request.model.clone())
+                        .or(requested_model)
+                        .unwrap_or_default();
+                    let requested_reasoning_effort = requested_spawn_request
+                        .as_ref()
+                        .map(|spawn_request| spawn_request.reasoning_effort)
+                        .or(requested_reasoning_effort)
+                        .unwrap_or_default();
+                    let delegation_report = if !from_replay && begin_row_rendered_delegation {
+                        None
+                    } else {
+                        delegation_report.or(pending_delegation_report)
+                    };
                     self.on_collab_event(multi_agents::spawn_end(
                         codex_protocol::protocol::CollabAgentSpawnEndEvent {
                             call_id: id,
@@ -4206,8 +4307,9 @@ impl ChatWidget {
                             prompt: prompt.unwrap_or_default(),
                             requested_model: requested_model.clone(),
                             requested_reasoning_effort,
-                            model: effective_model.unwrap_or(requested_model),
+                            model: effective_model.or(model).unwrap_or(requested_model),
                             reasoning_effort: effective_reasoning_effort
+                                .or(reasoning_effort)
                                 .unwrap_or(requested_reasoning_effort),
                             context_inheritance_requested,
                             context_inheritance_effective,
@@ -5224,6 +5326,7 @@ impl ChatWidget {
             running_commands: HashMap::new(),
             collab_agent_metadata: HashMap::new(),
             pending_collab_spawn_requests: HashMap::new(),
+            pending_collab_spawn_delegation_reports: HashMap::new(),
             replayed_collab_spawn_call_ids: HashSet::new(),
             suppressed_exec_calls: HashSet::new(),
             last_unified_wait: None,
@@ -7650,6 +7753,7 @@ impl ChatWidget {
                 model,
                 reasoning_effort,
                 context_inheritance_requested,
+                delegation_report,
                 ..
             }) => {
                 let spawn_request = multi_agents::SpawnRequestSummary {
@@ -7659,17 +7763,67 @@ impl ChatWidget {
                 };
                 let is_new_request = self
                     .pending_collab_spawn_requests
-                    .insert(call_id, spawn_request.clone())
+                    .insert(call_id.clone(), spawn_request.clone())
                     .is_none();
+                if let Some(delegation_report) = delegation_report.as_ref() {
+                    self.pending_collab_spawn_delegation_reports
+                        .insert(call_id, delegation_report.clone());
+                }
                 if !from_replay && is_new_request {
-                    self.on_collab_event(multi_agents::spawn_begin(&prompt, &spawn_request));
+                    self.on_collab_event(Self::collab_spawn_begin_cell(
+                        &prompt,
+                        &spawn_request,
+                        delegation_report.as_ref(),
+                    ));
                 }
             }
             EventMsg::CollabAgentSpawnEnd(ev) => {
                 let requested_spawn_request =
                     self.pending_collab_spawn_requests.remove(&ev.call_id);
+                let pending_delegation_report = self
+                    .pending_collab_spawn_delegation_reports
+                    .remove(&ev.call_id);
+                let begin_row_rendered_delegation = pending_delegation_report.is_some();
+                let codex_protocol::protocol::CollabAgentSpawnEndEvent {
+                    call_id,
+                    sender_thread_id,
+                    new_thread_id,
+                    new_agent_nickname,
+                    new_agent_role,
+                    prompt,
+                    requested_model,
+                    requested_reasoning_effort,
+                    model,
+                    reasoning_effort,
+                    context_inheritance_requested,
+                    delegation_report,
+                    context_inheritance_effective,
+                    context_inheritance_telemetry,
+                    status,
+                } = ev;
+                let delegation_report = if !from_replay && begin_row_rendered_delegation {
+                    None
+                } else {
+                    delegation_report.or(pending_delegation_report)
+                };
                 self.on_collab_event(multi_agents::spawn_end(
-                    ev,
+                    codex_protocol::protocol::CollabAgentSpawnEndEvent {
+                        call_id,
+                        sender_thread_id,
+                        new_thread_id,
+                        new_agent_nickname,
+                        new_agent_role,
+                        prompt,
+                        requested_model,
+                        requested_reasoning_effort,
+                        model,
+                        reasoning_effort,
+                        context_inheritance_requested,
+                        delegation_report,
+                        context_inheritance_effective,
+                        context_inheritance_telemetry,
+                        status,
+                    },
                     requested_spawn_request.as_ref(),
                 ));
             }

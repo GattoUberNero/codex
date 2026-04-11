@@ -5,8 +5,9 @@ expression: cell_to_text(&cell)
 • Spawned Robie [explorer] (gpt-5-mini medium)
   └ Inspect the repo and report the likely failure mode.
     Delegation: code review | difficulty 6/10 | brief 8/10 | self 7/10 | ~15 min
+    Why this agent: Knows this TUI surface
     Deliverable: output: Patch + short note | scope: codex-rs/tui/src/multi_agents.rs
     Risks: Snapshot text may change
     Requested model/reasoning: (gpt-5 high)
     Requested context inheritance: bounded
-    Context bounded -> bounded_trimmed
+    Context inheritance: bounded -> bounded_trimmed

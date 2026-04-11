@@ -2,10 +2,19 @@
 
 Purpose: authoritative, current map of fork-owned `codex-rs` capability surfaces and the external contracts exposed from `codex-rs`.
 
+Version stamp:
+
+- upstream baseline: `0.118.0`
+- fork doc version: `0.118.0-nero.v3`
+- snapshot date: `2026-04-10`
+- repo commit (HEAD at write time): `0ec73acb8`
+
 Companion doc:
 
 - `docs-nero-fork/codex-rs-fork-guide.md`
   - higher-level guide for capability intent, user experience, helper services, and extension boundaries
+- `docs-nero-fork/codex-rs-fork-api-sdk-router-seam.md`
+  - strict API/SDK seam supplement: request/response contracts, compatibility rules, and test ownership map
 
 ## Ownership Legend
 
@@ -26,6 +35,7 @@ Companion doc:
 | Pre-turn auto booster | Read session-auto state, resolve auto contract, and inject a pre-turn hook prompt when runtime policy allows it | `NERO-INTERNAL` on shared-seam read + `NATIVE` prompt injection carrier | `read-session-auto`, auto contract resolver, `HookPrompt` injection | `core/src/codex.rs`, `core/src/config/mod.rs` |
 | Dynamic account switching / auth rotation | Recovery from quota/usage-limit through controlled rotate command path | `NERO-EXPOSED` + `NERO-INTERNAL` | `CODEXN_AUTH_ROTATE_CMD*`, `CODEXN_ROTATION_REASON` | `core/src/client.rs` |
 | Model fallback | Controlled model ladder switching on eligible model failures | `NERO-EXPOSED` config + `NERO-INTERNAL` runtime state | `[nero.model_fallback]`, fallback runtime state/methods | `core/src/config/mod.rs`, `core/src/codex.rs`, `core/src/state/session.rs` |
+| Multi-agent / collab delegation seam | Delegation, current MultiAgentV2 text-message relay, wait/close/list projection, and transcript projection across tool/router/protocol/TUI | `NERO-EXPOSED` + `NERO-INTERNAL` on native event carriers | `spawn_agent` (v2 requires `task_name`), `send_message`/`assign_task`, legacy `send_input` and `resume_agent`, `wait_agent`, `close_agent`, `list_agents`, `DelegationReport`, `CollabAgent*` events, `ThreadItem::CollabAgentToolCall` | `tools/src/agent_tool.rs`, `core/src/tools/handlers/multi_agents_v2/*`, `core/src/tools/handlers/multi_agents_common.rs`, `protocol/src/protocol.rs`, `app-server/src/bespoke_event_handling.rs`, `app-server-protocol/src/protocol/{v2,thread_history}.rs`, `tui/src/{multi_agents.rs,chatwidget.rs}` |
 | Native hook dependency surfaces | Native lifecycle checkpoints and completion summary used by Nero capabilities | `NATIVE` | `HookEventName::{Stop, AfterAgent, AfterCompaction}`, `HookCompletedEvent` | `protocol/src/protocol.rs`, runtime hook dispatch in `core/src/codex.rs` |
 | Runtime/config authority boundary | External control/config ingress and narrower shared-seam helper boundary | `NERO-EXPOSED` + `NERO-INTERNAL` | app-server RPC, protocol session fields, env/config overlays, bridge helper module | `app-server/src/thread_session_auto.rs`, `core/src/config/mod.rs`, `core/src/codex.rs`, `protocol/src/protocol.rs` |
 
@@ -119,7 +129,9 @@ Companion doc:
   - `HookCompletedEvent` entries/meta shown in TUI for the after-agent reporting branch
 - Spawn-time `delegation_report` payloads can surface as a structured spawn diagnostic block in the
   same collaboration transcript lane; they summarize task fit and readiness rather than adding a
-  new carrier.
+  new carrier. In live non-replay flows, spawn-end may still render `Delegation: not provided`
+  when delegation details were already rendered on spawn-begin (dedupe behavior), so this text is
+  not always equivalent to caller omission.
 - Runtime state ownership:
   - Core owns composition and emission; TUI owns projection/render state
 - Native dependencies:
@@ -292,11 +304,16 @@ Companion doc:
 - Active modules:
   - `codex-rs/core/src/config/mod.rs`
   - `codex-rs/core/src/codex.rs`
+  - `codex-rs/core/src/nero_auto_runtime_state.rs`
+  - `codex-rs/app-server/src/codex_message_processor.rs`
   - `codex-rs/app-server/src/thread_session_auto.rs`
+  - `codex-rs/app-server-protocol/src/protocol/common.rs`
+  - `codex-rs/app-server-protocol/src/protocol/v2.rs`
   - `codex-rs/protocol/src/protocol.rs`
 - Active Rust symbols:
   - Nero config resolver/read functions for fallback and auto runtime
-  - bridge resolution/settings helpers in app-server thread session auto lane
+  - app-server RPC entrypoints for `thread/sessionAuto/read`, `thread/sessionAuto/inputActivity`, and `thread/sessionAuto/update`
+  - `read_thread_session_auto`, `update_thread_session_auto`, and `thread_session_auto_input_activity`
 - External inputs:
   - RPC: `thread/sessionAuto/read`, `thread/sessionAuto/inputActivity`, `thread/sessionAuto/update`
   - protocol session field: `nero_auto_runtime`
@@ -317,7 +334,10 @@ Companion doc:
         - `maxAutoRounds` floors at `0`
         - `autonomyStepPerRound` clamps to `0..=10` and is rounded to 3 decimal places
         - `effective.enabled=false` when the resolved session is subagent or `main_session_confirmed=false`, regardless of `NERO_HOOK_AUTO_ENABLED`
+        - `thread/sessionAuto/read` syncs the `main_session_confirmed` marker when needed before returning state
+        - `thread/sessionAuto/update` and `thread/sessionAuto/inputActivity` reject subagent sessions and unconfirmed main sessions
         - `enabled=true` can still be rejected on update when runtime-msg delivery is required but the thread has no name
+        - coverage caveat: the missing-thread-name rejection is enforced in the handler today, but the focused `thread_session_auto.rs` tests do not directly cover that branch yet
     - bridge/runtime envs in thread-session-auto lane:
       - `NERO_RUNTIME_STATE_CONTROL_CWD`
       - `NERO_RUNTIME_STATE_CONTROL_MODULE`
@@ -340,6 +360,98 @@ Companion doc:
   - majority of capability-level surfaces are branded
 - Confirmed residues:
   - compatibility alias listed once in section 4
+
+### 9) Multi-agent / collab delegation seam
+
+- Purpose: expose a delegation seam that is readable for operators and deterministic across the tool surface, app-server projection, protocol snapshots, and TUI rendering.
+- Active modules:
+  - `codex-rs/tools/src/agent_tool.rs`
+  - `codex-rs/core/src/tools/handlers/multi_agents_v2/*`
+  - `codex-rs/core/src/tools/handlers/multi_agents_common.rs`
+  - `codex-rs/protocol/src/protocol.rs`
+  - `codex-rs/app-server/src/bespoke_event_handling.rs`
+  - `codex-rs/app-server-protocol/src/protocol/v2.rs`
+  - `codex-rs/app-server-protocol/src/protocol/thread_history.rs`
+  - `codex-rs/tui/src/multi_agents.rs`
+  - `codex-rs/tui/src/chatwidget.rs`
+- Active Rust symbols:
+  - tool/API family:
+    - MultiAgentV2: `spawn_agent` (requires `task_name`), `send_message`, `assign_task`, `wait_agent`, `close_agent`, `list_agents`
+    - legacy/non-v2: `send_input`, `resume_agent`
+  - payloads: `DelegationReport`, `CollabAgentSpawnBeginEvent`, `CollabAgentSpawnEndEvent`
+  - replay/live item: `ThreadItem::CollabAgentToolCall`
+  - policy gate: `resolve_spawn_context_inheritance_mode(...)`
+- Exact external inputs:
+  - `spawn_agent` supports:
+    - required `task_name`
+    - `message` or `items`
+    - optional `agent_type`, `model`, `reasoning_effort`
+    - optional `delegation_report` with required fields:
+      - `general_task_type`
+      - `task_difficulty_1_10`
+      - `brief_completeness_1_10`
+      - `task_self_sufficiency_1_10`
+      - `expected_duration_minutes`
+      - `why_this_agent`
+      - `expected_output_shape`
+      - `files_or_scope`
+      - `risks_or_unknowns`
+  - `send_message` and `assign_task` are the current MultiAgentV2 text-only message tools:
+    - `target`
+    - `items`
+    - optional `interrupt`
+    - `send_message` queues without starting a turn
+    - `assign_task` wakes the target immediately
+  - legacy `send_input` remains the v1 agent-id path:
+    - `target`
+    - `message` or `items`
+    - optional `interrupt`
+  - context inheritance input is hard-disabled:
+    - requests that include legacy `fork_context` or `context_inheritance` are rejected with a caller-facing error
+    - requests that omit these fields are accepted; tool output reports `off/off`
+    - event/item carriers currently emit `context_inheritance_requested: null` and `context_inheritance_effective: off`
+- Exact external outputs:
+  - `spawn_agent` output echoes:
+    - `task_name` as the current canonical return field
+    - `agent_id` only as legacy compatibility in the v2 schema
+    - `nickname`
+    - `delegation_report` (required output key; value is full report object or `null`)
+    - `context_inheritance_requested`
+    - `context_inheritance_effective`
+    - `context_inheritance_telemetry`
+  - protocol events carry requested/effective model+reasoning seam:
+    - begin: requested model/effort intent
+    - end: requested + effective model/effort finalization
+  - app-server v2 item shape includes both compatibility and explicit effective fields:
+    - `requestedModel`, `requestedReasoningEffort`
+    - `model`, `reasoningEffort` (compat lane)
+    - `effectiveModel`, `effectiveReasoningEffort` (explicit lane)
+    - context inheritance fields + telemetry + delegation report
+- Router seam (live vs replay):
+  - Live path:
+    - core emits `EventMsg::CollabAgent*`
+    - app-server maps to `ItemStarted`/`ItemCompleted` with `ThreadItem::CollabAgentToolCall`
+    - TUI consumes live notifications and renders spawn/wait/send/close/resume rows
+  - Replay path:
+    - rollout events are reconstructed in `thread_history.rs`
+    - begin/end are merged/upserted into a single `ThreadItem::CollabAgentToolCall` state
+    - TUI consumes replayed items with equivalent field semantics
+  - Replay caveat:
+    - interaction tools normalize to `ThreadItem::CollabAgentToolCall { tool: SendInput, ... }` at the `ThreadItem` layer (legacy `send_input` already uses that lane; `send_message`/`assign_task` collapse into it)
+    - this normalization happens in both live app-server notifications and snapshot/replay projection, so tool-name identity is not preserved
+- Runtime state ownership:
+  - core owns policy validation and spawn execution semantics
+  - app-server owns event-to-notification projection
+  - app-server-protocol owns replay reconstruction and wire shape
+  - TUI owns operator-facing rendering and formatting decisions
+- Branding status:
+  - carriers are native (`Collab*`, `ThreadItem`), but the stricter delegation semantics and context-inheritance hard-disable policy are fork-owned behavior
+- Confirmed residues:
+  - output schema still exposes context inheritance fields for compatibility, even while input control is disabled by policy
+  - v2 item keeps both `model` / `reasoningEffort` (compat lane) and `effectiveModel` / `effectiveReasoningEffort` (explicit lane) to avoid ambiguity for mixed-version readers
+- Display caveats:
+  - spawn prompt/meta now render full text in `tui/src/multi_agents.rs` (no prompt-preview ellipsis)
+  - final `Completed/Error` agent status summaries remain preview-truncated by design
 
 ## External Contract Index
 
@@ -399,6 +511,38 @@ These are diagnostic keys carried in hook summary meta, not typed public RPC sch
 
 - `[nero.model_fallback]` with ladder/cooldown/sticky controls
 - Nero config overlay env ingress keys for config resolution
+
+### Multi-agent delegation contracts
+
+- Tool ingress / egress:
+  - `spawn_agent` v1 returns `agent_id`; v2 requires `task_name` and returns `task_name`, with `agent_id: null` kept for compatibility
+  - related tools: `send_input`, `send_message`, `assign_task`, `resume_agent`, `wait_agent`, `close_agent`, `list_agents`
+  - `send_input` is the legacy agent-id path and accepts `message` or `items`
+  - `send_message` and `assign_task` share the same text-only input shape in MultiAgentV2; `assign_task` triggers a turn, `send_message` only queues
+  - `close_agent` and `send_message` / `assign_task` resolve agent ids or canonical `task_name` values in MultiAgentV2
+  - optional `delegation_report` input has a strict 9-field shape, with 1-10 bounds on the three score fields and `expected_duration_minutes > 0`
+  - spawn output still includes `delegation_report`, with `null` when not provided
+  - `fork_context` / `context_inheritance` are rejected at handler level
+  - request/response shape highlights:
+    - `send_input` / `send_message` / `assign_task`: return `submission_id`
+    - `close_agent`: `target` -> `previous_status`
+    - `resume_agent`: `id` -> `status`
+    - `wait_agent` v2: schema declares `targets` (+ optional `timeout_ms`) -> `message` + `timed_out`; current MultiAgentV2 handler behavior is mailbox-activity based and accepts timeout-only calls
+    - `list_agents`: optional `path_prefix` -> `agents[]` (`agent_name`, `agent_status`, `last_task_message`)
+- Event and item contracts:
+  - protocol events: `CollabAgentSpawnBeginEvent`, `CollabAgentSpawnEndEvent`, `CollabAgentInteractionBeginEvent`, `CollabAgentInteractionEndEvent`, `CollabWaitingBeginEvent`, `CollabWaitingEndEvent`, `CollabCloseBeginEvent`, `CollabCloseEndEvent`, `CollabResumeBeginEvent`, `CollabResumeEndEvent`
+  - app-server v2 item: `ThreadItem::CollabAgentToolCall` carrying:
+    - `id`
+    - `tool`, `status`, `senderThreadId`, `receiverThreadIds`, `prompt` (rendered preview text, not original input payload)
+    - `requestedModel` / `requestedReasoningEffort`
+    - `model` / `reasoningEffort` as compatibility mirror
+    - `effectiveModel` / `effectiveReasoningEffort`
+    - `contextInheritanceRequested`, `contextInheritanceEffective`, `contextInheritanceTelemetry`
+    - `delegationReport`
+    - `agentsStates`
+- Compatibility policy:
+  - keep the compat pair (`model`, `reasoningEffort`) for older item data; prefer `effectiveModel` / `effectiveReasoningEffort` for post-resolution semantics and fall back to the compat pair when reading mixed-version snapshots
+  - keep context inheritance output fields for historical/replay continuity, despite disabled ingress knobs
 
 ### Bridge command/module contracts
 
@@ -506,3 +650,45 @@ This atlas maps `codex-rs` only. The systems below are external and included onl
 - `nerobar-ui` (`EXTERNAL-CONSUMER`):
   - consumes app-server RPC and protocol surfaces exposed by `codex-rs`
   - does not redefine `codex-rs` internal capability ownership
+
+## Multi-agent Coverage Checklist
+
+Goal: verify the delegation seam remains deterministic across policy, wire contracts, replay, and UI projection.
+
+- Core handler policy and validation:
+  - `codex-rs/core/src/tools/handlers/multi_agents_tests.rs`
+  - key coverage present:
+    - context-inheritance ingress rejection (`fork_context`, `context_inheritance`)
+    - delegation report roundtrip
+    - task_name validation errors
+    - delegation-report negative validation assertions for:
+      - score bounds (`1..=10`)
+      - non-empty required strings
+      - `expected_duration_minutes > 0`
+- Protocol compatibility:
+  - `codex-rs/protocol/src/protocol.rs` deserialization tests for `CollabAgentSpawnEndEvent` only, covering legacy payloads that omit `requested_*` fields and precedence when both requested and legacy shapes are present
+- App-server live mapping:
+  - `codex-rs/app-server/src/bespoke_event_handling.rs` helper-level tests for `collab_spawn_begin_item` / `collab_spawn_end_item` mapping of requested/effective model fields and context-inheritance telemetry
+  - end-to-end app-server integration coverage in `codex-rs/app-server/tests/suite/v2/turn_start.rs` validates live `item/started` + `item/completed` spawn item fields
+- Replay reconstruction:
+  - `codex-rs/app-server-protocol/src/protocol/thread_history.rs` tests:
+    - `reconstructs_collab_spawn_begin_item_with_requested_context_inheritance`
+    - `reconstructs_collab_spawn_begin_and_end_as_single_completed_item`
+    - `reconstructs_collab_spawn_end_item_with_model_metadata`
+  - these cover begin-item reconstruction, begin+end merging, and requested/effective model-reasoning plus context-inheritance telemetry continuity
+- TUI rendering:
+  - `codex-rs/tui/src/multi_agents.rs` snapshot tests for collab transcript rows
+  - `codex-rs/tui/src/chatwidget/tests.rs` coverage for:
+    - live/replay spawn rendering
+    - requested vs effective model display
+    - duplicate begin-row suppression after completed spawn replay
+    - legacy fallback when `effective_*` fields are missing
+    - delegation report persistence and context-inheritance lines
+  - `completed_spawn_item_falls_back_to_legacy_model_fields_when_effective_missing` is the explicit fallback caveat for completed spawn rows
+
+Current practical gap to watch:
+
+- there is now an app-server E2E parity anchor (`turn_start_spawn_agent_thread_read_replay_matches_live_item_v2`)
+  proving live spawn item parity with replayed `thread/read` for the same turn when the thread is started with
+  `persist_extended_history: true`; with default limited persistence, collab replay parity is not guaranteed.
+- full-chain parity still remains split across app-server + app-server-protocol + TUI fixtures (not a single cross-crate fixture).

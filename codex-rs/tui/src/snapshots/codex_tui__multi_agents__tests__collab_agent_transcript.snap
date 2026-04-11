@@ -4,8 +4,9 @@ expression: snapshot
 ---
 • Spawned Robie [explorer] (gpt-5 high)
   └ Compute 11! and reply with just the integer result.
+    Delegation: not provided
     Requested context inheritance: bounded
-    Context bounded -> bounded_trimmed
+    Context inheritance: bounded -> bounded_trimmed
     Budget turns 6 -> 2 | tokens ~18500/24000
 
 • Sent input to Robie [explorer]

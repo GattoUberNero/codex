@@ -48,6 +48,8 @@ use tracing::warn;
 const AGENT_NAMES: &str = include_str!("agent_names.txt");
 const FORKED_SPAWN_AGENT_OUTPUT_MESSAGE: &str = "You are the newly spawned agent. The prior conversation history was forked from your parent agent. Treat the next user message as your new task, and use the forked history only as background context.";
 const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
+const SPAWN_DELEGATION_CONTEXT_BLOCK_START_TAG: &str = "<spawn_delegation_report_json>";
+const SPAWN_DELEGATION_CONTEXT_BLOCK_END_TAG: &str = "</spawn_delegation_report_json>";
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SpawnAgentOptions {
@@ -648,7 +650,9 @@ impl AgentControl {
         agent_id: ThreadId,
         initial_operation: Op,
     ) -> CodexResult<String> {
-        let last_task_message = render_input_preview(&initial_operation);
+        let last_task_message = sanitize_spawn_delegation_context_for_summary(
+            &render_input_preview(&initial_operation),
+        );
         let state = self.upgrade()?;
         let result = self
             .handle_thread_request_result(
@@ -685,7 +689,8 @@ impl AgentControl {
         agent_id: ThreadId,
         communication: InterAgentCommunication,
     ) -> CodexResult<String> {
-        let last_task_message = communication.content.clone();
+        let last_task_message =
+            sanitize_spawn_delegation_context_for_summary(&communication.content);
         let state = self.upgrade()?;
         let result = self
             .handle_thread_request_result(
@@ -1256,6 +1261,26 @@ pub(crate) fn render_input_preview(initial_operation: &Op) -> String {
         Op::InterAgentCommunication { communication } => communication.content.clone(),
         _ => String::new(),
     }
+}
+
+fn sanitize_spawn_delegation_context_for_summary(content: &str) -> String {
+    let mut remaining = content;
+    let mut output = String::new();
+
+    while let Some(start) = remaining.find(SPAWN_DELEGATION_CONTEXT_BLOCK_START_TAG) {
+        output.push_str(&remaining[..start]);
+        let block_start = start + SPAWN_DELEGATION_CONTEXT_BLOCK_START_TAG.len();
+        let Some(end_rel) = remaining[block_start..].find(SPAWN_DELEGATION_CONTEXT_BLOCK_END_TAG)
+        else {
+            output.push_str(&remaining[start..]);
+            return output.trim().to_string();
+        };
+        let block_end = block_start + end_rel + SPAWN_DELEGATION_CONTEXT_BLOCK_END_TAG.len();
+        remaining = &remaining[block_end..];
+    }
+
+    output.push_str(remaining);
+    output.trim().to_string()
 }
 
 fn thread_spawn_depth(session_source: &SessionSource) -> Option<i32> {

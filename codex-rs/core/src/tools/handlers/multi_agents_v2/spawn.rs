@@ -40,7 +40,7 @@ impl ToolHandler for Handler {
         let args: SpawnAgentArgs = parse_arguments(&arguments)?;
         let delegation_report = args.delegation_report;
         if let Some(report) = delegation_report.as_ref() {
-            validate_delegation_report(report)?;
+            validate_spawn_delegation_report(report)?;
         }
         let context_inheritance_resolution = resolve_spawn_context_inheritance_mode(
             args.fork_context,
@@ -58,6 +58,9 @@ impl ToolHandler for Handler {
 
         let initial_operation = parse_collab_input(args.message, args.items)?;
         let prompt = render_input_preview(&initial_operation);
+        let initial_operation =
+            inject_spawn_delegation_report_context(initial_operation, delegation_report.as_ref())?;
+        let spawn_content = render_input_preview(&initial_operation);
 
         let session_source = turn.session_source.clone();
         let child_depth = next_thread_spawn_depth(&session_source);
@@ -129,7 +132,7 @@ impl ToolHandler for Handler {
                                     .unwrap_or_else(AgentPath::root),
                                 recipient,
                                 Vec::new(),
-                                prompt.clone(),
+                                spawn_content.clone(),
                                 /*trigger_turn*/ true,
                             ),
                         }
@@ -241,44 +244,6 @@ impl ToolHandler for Handler {
             context_inheritance_telemetry: fork_context_report.telemetry,
         })
     }
-}
-
-fn validate_delegation_report(report: &DelegationReport) -> Result<(), FunctionCallError> {
-    for (field_name, value) in [
-        ("general_task_type", report.general_task_type.trim()),
-        ("why_this_agent", report.why_this_agent.trim()),
-        ("expected_output_shape", report.expected_output_shape.trim()),
-        ("files_or_scope", report.files_or_scope.trim()),
-        ("risks_or_unknowns", report.risks_or_unknowns.trim()),
-    ] {
-        if value.is_empty() {
-            return Err(FunctionCallError::RespondToModel(format!(
-                "delegation_report.{field_name} must be a non-empty string"
-            )));
-        }
-    }
-
-    for (field_name, value) in [
-        ("task_difficulty_1_10", report.task_difficulty_1_10),
-        ("brief_completeness_1_10", report.brief_completeness_1_10),
-        (
-            "task_self_sufficiency_1_10",
-            report.task_self_sufficiency_1_10,
-        ),
-    ] {
-        if !(1..=10).contains(&value) {
-            return Err(FunctionCallError::RespondToModel(format!(
-                "delegation_report.{field_name} must be between 1 and 10"
-            )));
-        }
-    }
-    if report.expected_duration_minutes == 0 {
-        return Err(FunctionCallError::RespondToModel(
-            "delegation_report.expected_duration_minutes must be greater than 0".to_string(),
-        ));
-    }
-
-    Ok(())
 }
 
 #[derive(Debug, Deserialize)]

@@ -27,6 +27,8 @@ Powiązane dokumenty:
   - szczegółowa specyfikacja lane `STOP` dla `hook auto` i runtime command injection
 - `docs-nero-fork/codex-rs-fork-surface-atlas.md`
   - techniczna mapa surface’ów, modułów i kontraktów
+- `docs-nero-fork/codex-rs-fork-api-sdk-router-seam.md`
+  - precyzyjny suplement API/SDK seam (`tool -> router -> protocol -> replay -> TUI`) z mapą odpowiedzialności testów
 - `docs-nero-fork/multiaccount-model-fallback-verified.md`
   - oddzielny, zweryfikowany opis `multiaccount` i `model fallback`
 

@@ -17,6 +17,7 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::protocol::CollabAgentRef;
 use codex_protocol::protocol::CollabAgentStatusEntry;
+use codex_protocol::protocol::DelegationReport;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SpawnContextInheritanceMode;
@@ -30,6 +31,10 @@ use std::collections::HashMap;
 pub(crate) const MIN_WAIT_TIMEOUT_MS: i64 = 10_000;
 pub(crate) const DEFAULT_WAIT_TIMEOUT_MS: i64 = 30_000;
 pub(crate) const MAX_WAIT_TIMEOUT_MS: i64 = 3600 * 1000;
+// Delimiter for structured spawn delegation context embedded into child payload text.
+// This is intentionally explicit so runtime can sanitize task summaries while preserving
+// the structured block in transport.
+const SPAWN_DELEGATION_CONTEXT_BLOCK_TAG: &str = "spawn_delegation_report_json";
 
 pub(crate) fn function_arguments(payload: ToolPayload) -> Result<String, FunctionCallError> {
     match payload {
@@ -191,6 +196,85 @@ pub(crate) fn parse_collab_input(
             }
             Ok(items.into())
         }
+    }
+}
+
+pub(crate) fn validate_spawn_delegation_report(
+    report: &DelegationReport,
+) -> Result<(), FunctionCallError> {
+    for (field_name, value) in [
+        ("general_task_type", report.general_task_type.trim()),
+        ("why_this_agent", report.why_this_agent.trim()),
+        ("expected_output_shape", report.expected_output_shape.trim()),
+        ("files_or_scope", report.files_or_scope.trim()),
+        ("risks_or_unknowns", report.risks_or_unknowns.trim()),
+    ] {
+        if value.is_empty() {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "delegation_report.{field_name} must be a non-empty string"
+            )));
+        }
+    }
+
+    for (field_name, value) in [
+        ("task_difficulty_1_10", report.task_difficulty_1_10),
+        ("brief_completeness_1_10", report.brief_completeness_1_10),
+        (
+            "task_self_sufficiency_1_10",
+            report.task_self_sufficiency_1_10,
+        ),
+    ] {
+        if !(1..=10).contains(&value) {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "delegation_report.{field_name} must be between 1 and 10"
+            )));
+        }
+    }
+    if report.expected_duration_minutes == 0 {
+        return Err(FunctionCallError::RespondToModel(
+            "delegation_report.expected_duration_minutes must be greater than 0".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn format_spawn_delegation_context_block(
+    report: &DelegationReport,
+) -> Result<String, FunctionCallError> {
+    let json_body = serde_json::to_string_pretty(report).map_err(|err| {
+        FunctionCallError::RespondToModel(format!(
+            "failed to serialize spawn delegation_report context: {err}"
+        ))
+    })?;
+    Ok(format!(
+        "<{SPAWN_DELEGATION_CONTEXT_BLOCK_TAG}>\n{json_body}\n</{SPAWN_DELEGATION_CONTEXT_BLOCK_TAG}>"
+    ))
+}
+
+pub(crate) fn inject_spawn_delegation_report_context(
+    input: Op,
+    delegation_report: Option<&DelegationReport>,
+) -> Result<Op, FunctionCallError> {
+    let Some(report) = delegation_report else {
+        return Ok(input);
+    };
+    let context_block = format_spawn_delegation_context_block(report)?;
+    match input {
+        Op::UserInput {
+            mut items,
+            final_output_json_schema,
+        } => {
+            items.push(UserInput::Text {
+                text: context_block,
+                text_elements: Vec::new(),
+            });
+            Ok(Op::UserInput {
+                items,
+                final_output_json_schema,
+            })
+        }
+        other => Ok(other),
     }
 }
 

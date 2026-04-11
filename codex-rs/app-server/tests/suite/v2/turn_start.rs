@@ -35,6 +35,8 @@ use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ServerRequestResolvedNotification;
 use codex_app_server_protocol::TextElement;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadReadParams;
+use codex_app_server_protocol::ThreadReadResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnCompletedNotification;
@@ -1781,8 +1783,8 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
             prompt: Some(CHILD_PROMPT.to_string()),
             requested_model: Some(REQUESTED_MODEL.to_string()),
             requested_reasoning_effort: Some(REQUESTED_REASONING_EFFORT),
-            model: Some(REQUESTED_MODEL.to_string()),
-            reasoning_effort: Some(REQUESTED_REASONING_EFFORT),
+            model: None,
+            reasoning_effort: None,
             effective_model: None,
             effective_reasoning_effort: None,
             context_inheritance_requested: None,
@@ -2084,6 +2086,239 @@ config_file = "./custom-role.toml"
     })
     .await??;
     assert_eq!(turn_completed.thread_id, thread.id);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn turn_start_spawn_agent_thread_read_replay_matches_live_item_v2() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    const CHILD_PROMPT: &str = "child: do work";
+    const PARENT_PROMPT: &str = "spawn a child and continue";
+    const SPAWN_CALL_ID: &str = "spawn-call-1";
+    const REQUESTED_MODEL: &str = "gpt-5.1";
+    const REQUESTED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Low;
+
+    let server = responses::start_mock_server().await;
+    let spawn_args = serde_json::to_string(&json!({
+        "message": CHILD_PROMPT,
+        "model": REQUESTED_MODEL,
+        "reasoning_effort": REQUESTED_REASONING_EFFORT,
+    }))?;
+    let _parent_turn = responses::mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, PARENT_PROMPT),
+        responses::sse(vec![
+            responses::ev_response_created("resp-turn1-1"),
+            responses::ev_function_call(SPAWN_CALL_ID, "spawn_agent", &spawn_args),
+            responses::ev_completed("resp-turn1-1"),
+        ]),
+    )
+    .await;
+    let _child_turn = responses::mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| {
+            body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
+        },
+        responses::sse(vec![
+            responses::ev_response_created("resp-child-1"),
+            responses::ev_assistant_message("msg-child-1", "child done"),
+            responses::ev_completed("resp-child-1"),
+        ]),
+    )
+    .await;
+    let _parent_follow_up = responses::mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, SPAWN_CALL_ID),
+        responses::sse(vec![
+            responses::ev_response_created("resp-turn1-2"),
+            responses::ev_assistant_message("msg-turn1-2", "parent done"),
+            responses::ev_completed("resp-turn1-2"),
+        ]),
+    )
+    .await;
+
+    let codex_home = TempDir::new()?;
+    create_config_toml(
+        codex_home.path(),
+        &server.uri(),
+        "never",
+        &BTreeMap::from([(Feature::Collab, true)]),
+    )?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let thread_req = mcp
+        .send_thread_start_request(ThreadStartParams {
+            model: Some("gpt-5.2-codex".to_string()),
+            persist_extended_history: true,
+            ..Default::default()
+        })
+        .await?;
+    let thread_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
+
+    let turn_req = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![V2UserInput::Text {
+                text: PARENT_PROMPT.to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let turn_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turn_req)),
+    )
+    .await??;
+    let turn_start: TurnStartResponse = to_response::<TurnStartResponse>(turn_resp)?;
+
+    let spawn_completed = timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let completed_notif = mcp
+                .read_stream_until_notification_message("item/completed")
+                .await?;
+            let completed: ItemCompletedNotification =
+                serde_json::from_value(completed_notif.params.expect("item/completed params"))?;
+            if let ThreadItem::CollabAgentToolCall { id, .. } = &completed.item
+                && id == SPAWN_CALL_ID
+            {
+                return Ok::<ThreadItem, anyhow::Error>(completed.item);
+            }
+        }
+    })
+    .await??;
+
+    let turn_completed = timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let turn_completed_notif = mcp
+                .read_stream_until_notification_message("turn/completed")
+                .await?;
+            let payload: TurnCompletedNotification = serde_json::from_value(
+                turn_completed_notif.params.expect("turn/completed params"),
+            )?;
+            if payload.thread_id == thread.id && payload.turn.id == turn_start.turn.id {
+                return Ok::<TurnCompletedNotification, anyhow::Error>(payload);
+            }
+        }
+    })
+    .await??;
+    assert_eq!(turn_completed.turn.id, turn_start.turn.id);
+
+    let read_id = mcp
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: thread.id.clone(),
+            include_turns: true,
+        })
+        .await?;
+    let read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    let ThreadReadResponse {
+        thread: read_thread,
+    } = to_response::<ThreadReadResponse>(read_resp)?;
+    let replay_turn = read_thread
+        .turns
+        .iter()
+        .find(|turn| turn.id == turn_start.turn.id)
+        .expect("thread/read should include completed parent turn");
+    let replay_spawn_item = replay_turn
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ThreadItem::CollabAgentToolCall { id, .. } if id == SPAWN_CALL_ID => Some(item),
+            _ => None,
+        })
+        .expect("thread/read replay should include spawn collab item");
+
+    let ThreadItem::CollabAgentToolCall {
+        id: live_id,
+        tool: live_tool,
+        status: live_status,
+        sender_thread_id: live_sender_thread_id,
+        receiver_thread_ids: live_receiver_thread_ids,
+        prompt: live_prompt,
+        requested_model: live_requested_model,
+        requested_reasoning_effort: live_requested_reasoning_effort,
+        model: live_model,
+        reasoning_effort: live_reasoning_effort,
+        effective_model: live_effective_model,
+        effective_reasoning_effort: live_effective_reasoning_effort,
+        context_inheritance_requested: live_context_inheritance_requested,
+        context_inheritance_effective: live_context_inheritance_effective,
+        context_inheritance_telemetry: live_context_inheritance_telemetry,
+        delegation_report: live_delegation_report,
+        agents_states: live_agents_states,
+    } = &spawn_completed
+    else {
+        panic!("loop guarantees collab spawn completion item")
+    };
+
+    let ThreadItem::CollabAgentToolCall {
+        id: replay_id,
+        tool: replay_tool,
+        status: replay_status,
+        sender_thread_id: replay_sender_thread_id,
+        receiver_thread_ids: replay_receiver_thread_ids,
+        prompt: replay_prompt,
+        requested_model: replay_requested_model,
+        requested_reasoning_effort: replay_requested_reasoning_effort,
+        model: replay_model,
+        reasoning_effort: replay_reasoning_effort,
+        effective_model: replay_effective_model,
+        effective_reasoning_effort: replay_effective_reasoning_effort,
+        context_inheritance_requested: replay_context_inheritance_requested,
+        context_inheritance_effective: replay_context_inheritance_effective,
+        context_inheritance_telemetry: replay_context_inheritance_telemetry,
+        delegation_report: replay_delegation_report,
+        agents_states: replay_agents_states,
+    } = replay_spawn_item
+    else {
+        panic!("find_map guarantees collab spawn replay item")
+    };
+
+    assert_eq!(replay_id, live_id);
+    assert_eq!(replay_tool, live_tool);
+    assert_eq!(replay_status, live_status);
+    assert_eq!(replay_sender_thread_id, live_sender_thread_id);
+    assert_eq!(replay_receiver_thread_ids, live_receiver_thread_ids);
+    assert_eq!(replay_prompt, live_prompt);
+    assert_eq!(replay_requested_model, live_requested_model);
+    assert_eq!(
+        replay_requested_reasoning_effort,
+        live_requested_reasoning_effort
+    );
+    assert_eq!(replay_model, live_model);
+    assert_eq!(replay_reasoning_effort, live_reasoning_effort);
+    assert_eq!(replay_effective_model, live_effective_model);
+    assert_eq!(
+        replay_effective_reasoning_effort,
+        live_effective_reasoning_effort
+    );
+    assert_eq!(
+        replay_context_inheritance_requested,
+        live_context_inheritance_requested
+    );
+    assert_eq!(
+        replay_context_inheritance_effective,
+        live_context_inheritance_effective
+    );
+    assert_eq!(
+        replay_context_inheritance_telemetry,
+        live_context_inheritance_telemetry
+    );
+    assert_eq!(replay_delegation_report, live_delegation_report);
+    assert_eq!(replay_agents_states, live_agents_states);
 
     Ok(())
 }

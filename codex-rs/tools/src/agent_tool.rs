@@ -573,25 +573,29 @@ fn delegation_report_properties() -> BTreeMap<String, JsonSchema> {
             "general_task_type".to_string(),
             JsonSchema::String {
                 enum_values: None,
-                description: Some("High-level type of the delegated work.".to_string()),
+                description: Some("High-level type of the delegated work (non-empty).".to_string()),
             },
         ),
         (
             "task_difficulty_1_10".to_string(),
             JsonSchema::Number {
-                description: Some("Integer task difficulty on a 1 to 10 scale.".to_string()),
+                description: Some("Integer task difficulty on a 1 to 10 scale (1-10).".to_string()),
             },
         ),
         (
             "brief_completeness_1_10".to_string(),
             JsonSchema::Number {
-                description: Some("Integer brief completeness on a 1 to 10 scale.".to_string()),
+                description: Some(
+                    "Integer brief completeness on a 1 to 10 scale (1-10).".to_string(),
+                ),
             },
         ),
         (
             "task_self_sufficiency_1_10".to_string(),
             JsonSchema::Number {
-                description: Some("Integer task self-sufficiency on a 1 to 10 scale.".to_string()),
+                description: Some(
+                    "Integer task self-sufficiency on a 1 to 10 scale (1-10).".to_string(),
+                ),
             },
         ),
         (
@@ -604,28 +608,30 @@ fn delegation_report_properties() -> BTreeMap<String, JsonSchema> {
             "why_this_agent".to_string(),
             JsonSchema::String {
                 enum_values: None,
-                description: Some("Why this agent should handle the task.".to_string()),
+                description: Some("Why this agent should handle the task (non-empty).".to_string()),
             },
         ),
         (
             "expected_output_shape".to_string(),
             JsonSchema::String {
                 enum_values: None,
-                description: Some("Expected shape of the delivered output.".to_string()),
+                description: Some(
+                    "Expected shape of the delivered output (non-empty).".to_string(),
+                ),
             },
         ),
         (
             "files_or_scope".to_string(),
             JsonSchema::String {
                 enum_values: None,
-                description: Some("Files or scope the task should cover.".to_string()),
+                description: Some("Files or scope the task should cover (non-empty).".to_string()),
             },
         ),
         (
             "risks_or_unknowns".to_string(),
             JsonSchema::String {
                 enum_values: None,
-                description: Some("Known risks or open questions.".to_string()),
+                description: Some("Known risks or open questions (non-empty).".to_string()),
             },
         ),
     ])

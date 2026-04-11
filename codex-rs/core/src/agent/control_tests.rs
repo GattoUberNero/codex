@@ -2721,3 +2721,17 @@ async fn resume_agent_from_rollout_skips_descendants_when_parent_resume_fails() 
         .await
         .expect("tree shutdown after partial subtree resume should succeed");
 }
+
+#[test]
+fn sanitize_spawn_delegation_context_for_summary_strips_wrapped_block() {
+    let raw = "inspect this repo\n<spawn_delegation_report_json>\n{\"task\":\"review\"}\n</spawn_delegation_report_json>";
+    let sanitized = sanitize_spawn_delegation_context_for_summary(raw);
+    assert_eq!(sanitized, "inspect this repo");
+}
+
+#[test]
+fn sanitize_spawn_delegation_context_for_summary_preserves_plain_content() {
+    let raw = "inspect this repo\nand report findings";
+    let sanitized = sanitize_spawn_delegation_context_for_summary(raw);
+    assert_eq!(sanitized, raw);
+}

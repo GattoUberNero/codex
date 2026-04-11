@@ -502,6 +502,7 @@ fn test_build_specs_multi_agent_v2_uses_task_names_and_hides_resume() {
             "agent_id",
             "task_name",
             "nickname",
+            "delegation_report",
             "context_inheritance_requested",
             "context_inheritance_effective",
             "context_inheritance_telemetry"

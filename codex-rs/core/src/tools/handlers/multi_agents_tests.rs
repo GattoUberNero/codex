@@ -390,6 +390,101 @@ async fn spawn_agent_returns_agent_id_without_task_name() {
 }
 
 #[tokio::test]
+async fn spawn_agent_injects_delegation_report_block_into_child_input_context() {
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+
+    let output = SpawnAgentHandler
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "delegation_report": {
+                    "general_task_type": "inspection",
+                    "task_difficulty_1_10": 4,
+                    "brief_completeness_1_10": 8,
+                    "task_self_sufficiency_1_10": 7,
+                    "expected_duration_minutes": 15,
+                    "why_this_agent": "This task is self-contained and needs a lightweight scan.",
+                    "expected_output_shape": "A short summary with findings and next steps.",
+                    "files_or_scope": "Repository root",
+                    "risks_or_unknowns": "May need a second pass if the repo layout is unexpected."
+                }
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed");
+    let (content, _) = expect_text_output(output);
+    let result: serde_json::Value =
+        serde_json::from_str(&content).expect("spawn result should parse");
+    let child_agent_id = parse_agent_id(
+        result["agent_id"]
+            .as_str()
+            .expect("spawn result should include agent_id"),
+    );
+
+    let captured_ops = manager.captured_ops();
+    let delegation_context = captured_ops
+        .iter()
+        .find_map(|(thread_id, op)| {
+            if *thread_id != child_agent_id {
+                return None;
+            }
+            let Op::UserInput { items, .. } = op else {
+                return None;
+            };
+            items.iter().find_map(|item| match item {
+                UserInput::Text { text, .. } if text.contains("<spawn_delegation_report_json>") => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+        })
+        .expect("spawned child input should include delegation context block");
+
+    assert!(delegation_context.contains("\"general_task_type\": \"inspection\""));
+    assert!(delegation_context.contains("\"expected_duration_minutes\": 15"));
+    assert!(delegation_context.contains("</spawn_delegation_report_json>"));
+}
+
+#[tokio::test]
+async fn spawn_agent_rejects_delegation_report_score_out_of_range() {
+    let (session, turn) = make_session_and_context().await;
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "inspect this repo",
+            "delegation_report": {
+                "general_task_type": "inspection",
+                "task_difficulty_1_10": 11,
+                "brief_completeness_1_10": 8,
+                "task_self_sufficiency_1_10": 7,
+                "expected_duration_minutes": 15,
+                "why_this_agent": "This task is self-contained and needs a lightweight scan.",
+                "expected_output_shape": "A short summary with findings and next steps.",
+                "files_or_scope": "Repository root",
+                "risks_or_unknowns": "May need a second pass if the repo layout is unexpected."
+            }
+        })),
+    );
+    let Err(err) = SpawnAgentHandler.handle(invocation).await else {
+        panic!("out-of-range delegation score should be rejected");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("delegation validation should surface as a model-facing error");
+    };
+    assert_eq!(
+        message,
+        "delegation_report.task_difficulty_1_10 must be between 1 and 10"
+    );
+}
+
+#[tokio::test]
 async fn spawn_agent_rejects_legacy_fork_context_argument() {
     let (session, turn) = make_session_and_context().await;
     let invocation = invocation(
@@ -1382,6 +1477,174 @@ async fn multi_agent_v2_spawn_includes_agent_id_key_when_named() {
 }
 
 #[tokio::test]
+async fn multi_agent_v2_spawn_injects_delegation_report_block_into_inter_agent_content() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    turn.config = Arc::new(config);
+
+    SpawnAgentHandlerV2
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": "test_process",
+                "delegation_report": {
+                    "general_task_type": "inspection",
+                    "task_difficulty_1_10": 4,
+                    "brief_completeness_1_10": 8,
+                    "task_self_sufficiency_1_10": 7,
+                    "expected_duration_minutes": 15,
+                    "why_this_agent": "This task is self-contained and needs a lightweight scan.",
+                    "expected_output_shape": "A short summary with findings and next steps.",
+                    "files_or_scope": "Repository root",
+                    "risks_or_unknowns": "May need a second pass if the repo layout is unexpected."
+                }
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed");
+
+    let captured_ops = manager.captured_ops();
+    let child_thread_id = captured_ops
+        .iter()
+        .find_map(|(thread_id, op)| match op {
+            Op::InterAgentCommunication { communication }
+                if communication.trigger_turn
+                    && communication.recipient.as_str() == "/root/test_process" =>
+            {
+                Some(*thread_id)
+            }
+            _ => None,
+        })
+        .expect("spawned child thread should receive initial inter-agent operation");
+
+    let delegation_context = captured_ops
+        .iter()
+        .find_map(|(thread_id, op)| {
+            if *thread_id != child_thread_id {
+                return None;
+            }
+            let Op::InterAgentCommunication { communication } = op else {
+                return None;
+            };
+            communication
+                .trigger_turn
+                .then_some(communication.content.clone())
+        })
+        .expect("spawned child should receive trigger-turn inter-agent content");
+
+    assert!(delegation_context.contains("inspect this repo"));
+    assert!(delegation_context.contains("<spawn_delegation_report_json>"));
+    assert!(delegation_context.contains("\"task_difficulty_1_10\": 4"));
+    assert!(delegation_context.contains("</spawn_delegation_report_json>"));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_with_mixed_items_keeps_non_text_items_and_injects_delegation_block() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    turn.config = Arc::new(config);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    let output = SpawnAgentHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "task_name": "test_process",
+                "items": [
+                    {"type": "mention", "name": "drive", "path": "app://google_drive"},
+                    {"type": "text", "text": "scan this quickly"}
+                ],
+                "delegation_report": {
+                    "general_task_type": "inspection",
+                    "task_difficulty_1_10": 4,
+                    "brief_completeness_1_10": 8,
+                    "task_self_sufficiency_1_10": 7,
+                    "expected_duration_minutes": 15,
+                    "why_this_agent": "This task is self-contained and needs a lightweight scan.",
+                    "expected_output_shape": "A short summary with findings and next steps.",
+                    "files_or_scope": "Repository root",
+                    "risks_or_unknowns": "May need a second pass if the repo layout is unexpected."
+                }
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed");
+    let (content, _) = expect_text_output(output);
+    let spawn_result: serde_json::Value =
+        serde_json::from_str(&content).expect("spawn result should parse");
+    let task_name = spawn_result["task_name"]
+        .as_str()
+        .expect("spawn result should include task_name");
+    let child_thread_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.conversation_id, &turn.session_source, task_name)
+        .await
+        .expect("spawned task name should resolve to child thread id");
+
+    let child_input = manager
+        .captured_ops()
+        .into_iter()
+        .find_map(|(thread_id, op)| {
+            if thread_id != child_thread_id {
+                return None;
+            }
+            match op {
+                Op::UserInput { items, .. } => Some(items),
+                _ => None,
+            }
+        })
+        .expect("mixed item spawn should submit user_input to the resolved child thread");
+
+    assert!(matches!(
+        child_input.first(),
+        Some(UserInput::Mention { name, path })
+            if name == "drive" && path == "app://google_drive"
+    ));
+    assert!(matches!(
+        child_input.get(1),
+        Some(UserInput::Text { text, .. }) if text == "scan this quickly"
+    ));
+    let delegation_context = child_input
+        .get(2)
+        .and_then(|item| match item {
+            UserInput::Text { text, .. } => Some(text),
+            _ => None,
+        })
+        .expect("delegation context block should be appended as the trailing text item");
+    assert!(delegation_context.contains("<spawn_delegation_report_json>"));
+    assert!(delegation_context.contains("\"files_or_scope\": \"Repository root\""));
+    assert!(delegation_context.contains("</spawn_delegation_report_json>"));
+}
+
+#[tokio::test]
 async fn multi_agent_v2_spawn_surfaces_task_name_validation_errors() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -1415,6 +1678,153 @@ async fn multi_agent_v2_spawn_surfaces_task_name_validation_errors() {
         FunctionCallError::RespondToModel(
             "agent_name must use only lowercase letters, digits, and underscores".to_string()
         )
+    );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_rejects_delegation_report_score_out_of_range() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    turn.config = Arc::new(config);
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "inspect this repo",
+            "task_name": "test_process",
+            "delegation_report": {
+                "general_task_type": "inspection",
+                "task_difficulty_1_10": 11,
+                "brief_completeness_1_10": 8,
+                "task_self_sufficiency_1_10": 7,
+                "expected_duration_minutes": 15,
+                "why_this_agent": "This task is self-contained and needs a lightweight scan.",
+                "expected_output_shape": "A short summary with findings and next steps.",
+                "files_or_scope": "Repository root",
+                "risks_or_unknowns": "May need a second pass if the repo layout is unexpected."
+            }
+        })),
+    );
+    let Err(err) = SpawnAgentHandlerV2.handle(invocation).await else {
+        panic!("out-of-range delegation score should be rejected");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("delegation validation should surface as a model-facing error");
+    };
+    assert_eq!(
+        message,
+        "delegation_report.task_difficulty_1_10 must be between 1 and 10"
+    );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_rejects_delegation_report_empty_required_string() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    turn.config = Arc::new(config);
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "inspect this repo",
+            "task_name": "test_process",
+            "delegation_report": {
+                "general_task_type": "   ",
+                "task_difficulty_1_10": 4,
+                "brief_completeness_1_10": 8,
+                "task_self_sufficiency_1_10": 7,
+                "expected_duration_minutes": 15,
+                "why_this_agent": "This task is self-contained and needs a lightweight scan.",
+                "expected_output_shape": "A short summary with findings and next steps.",
+                "files_or_scope": "Repository root",
+                "risks_or_unknowns": "May need a second pass if the repo layout is unexpected."
+            }
+        })),
+    );
+    let Err(err) = SpawnAgentHandlerV2.handle(invocation).await else {
+        panic!("empty delegation strings should be rejected");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("delegation validation should surface as a model-facing error");
+    };
+    assert_eq!(
+        message,
+        "delegation_report.general_task_type must be a non-empty string"
+    );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_rejects_delegation_report_zero_duration() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    turn.config = Arc::new(config);
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "inspect this repo",
+            "task_name": "test_process",
+            "delegation_report": {
+                "general_task_type": "inspection",
+                "task_difficulty_1_10": 4,
+                "brief_completeness_1_10": 8,
+                "task_self_sufficiency_1_10": 7,
+                "expected_duration_minutes": 0,
+                "why_this_agent": "This task is self-contained and needs a lightweight scan.",
+                "expected_output_shape": "A short summary with findings and next steps.",
+                "files_or_scope": "Repository root",
+                "risks_or_unknowns": "May need a second pass if the repo layout is unexpected."
+            }
+        })),
+    );
+    let Err(err) = SpawnAgentHandlerV2.handle(invocation).await else {
+        panic!("zero expected duration should be rejected");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("delegation validation should surface as a model-facing error");
+    };
+    assert_eq!(
+        message,
+        "delegation_report.expected_duration_minutes must be greater than 0"
     );
 }
 
