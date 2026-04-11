@@ -36,7 +36,6 @@ use ratatui::text::Span;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-const COLLAB_PROMPT_PREVIEW_GRAPHEMES: usize = 160;
 const COLLAB_AGENT_ERROR_PREVIEW_GRAPHEMES: usize = 160;
 const COLLAB_AGENT_RESPONSE_PREVIEW_GRAPHEMES: usize = 240;
 
@@ -247,7 +246,11 @@ pub(crate) fn spawn_end(
     if let Some(line) = prompt_line(&prompt) {
         details.push(line);
     }
-    details.extend(delegation_report_lines(delegation_report.as_ref()));
+    let show_missing_delegation = replayed_without_begin_row;
+    details.extend(delegation_report_lines(
+        delegation_report.as_ref(),
+        show_missing_delegation,
+    ));
     if let Some(line) =
         requested_spawn_request_line(requested_spawn_request, &effective_spawn_request)
     {
@@ -538,15 +541,18 @@ fn prompt_line(prompt: &str) -> Option<Line<'static>> {
     if trimmed.is_empty() {
         None
     } else {
-        Some(Line::from(Span::from(truncate_text(
-            trimmed,
-            COLLAB_PROMPT_PREVIEW_GRAPHEMES,
-        ))))
+        Some(Line::from(trimmed.to_owned()))
     }
 }
 
-fn delegation_report_lines(report: Option<&DelegationReport>) -> Vec<Line<'static>> {
+fn delegation_report_lines(
+    report: Option<&DelegationReport>,
+    show_not_provided_when_missing: bool,
+) -> Vec<Line<'static>> {
     let Some(report) = report else {
+        if show_not_provided_when_missing {
+            return vec![Line::from(vec!["Delegation: ".dim(), "not provided".dim()])];
+        }
         return Vec::new();
     };
 
@@ -565,6 +571,13 @@ fn delegation_report_lines(report: Option<&DelegationReport>) -> Vec<Line<'stati
 
     let output_shape = report.expected_output_shape.trim();
     let files_or_scope = report.files_or_scope.trim();
+    let why_this_agent = report.why_this_agent.trim();
+    if !why_this_agent.is_empty() {
+        lines.push(Line::from(vec![
+            "Why this agent: ".dim(),
+            why_this_agent.to_owned().into(),
+        ]));
+    }
     if !output_shape.is_empty() || !files_or_scope.is_empty() {
         let mut details = Vec::new();
         if !output_shape.is_empty() {
@@ -603,7 +616,7 @@ fn context_inheritance_line(
     }
 
     Some(Line::from(vec![
-        "Context ".dim(),
+        "Context inheritance: ".dim(),
         context_inheritance_mode_text(requested).into(),
         " -> ".dim(),
         context_inheritance_effective_mode_text(effective).into(),
@@ -982,6 +995,45 @@ mod tests {
         );
 
         assert_snapshot!("collab_spawn_end_replay", cell_to_text(&cell));
+    }
+
+    #[test]
+    fn collab_spawn_end_dedup_hides_not_provided_delegation_line() {
+        let sender_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000031")
+            .expect("valid sender thread id");
+        let spawned_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000032")
+            .expect("valid spawned thread id");
+        let requested_spawn_request = SpawnRequestSummary {
+            model: "gpt-5.4".to_string(),
+            reasoning_effort: ReasoningEffortConfig::High,
+            context_inheritance_requested: Some(SpawnContextInheritanceMode::Bounded),
+        };
+
+        let cell = spawn_end(
+            CollabAgentSpawnEndEvent {
+                call_id: "call-spawn-dedup".to_string(),
+                sender_thread_id,
+                new_thread_id: Some(spawned_thread_id),
+                new_agent_nickname: Some("Copernicus".to_string()),
+                new_agent_role: Some("reviewer-senior".to_string()),
+                prompt: "Review the patch and report critical regressions.".to_string(),
+                requested_model: "gpt-5.4".to_string(),
+                requested_reasoning_effort: ReasoningEffortConfig::High,
+                model: "gpt-5.4".to_string(),
+                reasoning_effort: ReasoningEffortConfig::High,
+                context_inheritance_requested: Some(SpawnContextInheritanceMode::Bounded),
+                context_inheritance_effective: Some(
+                    SpawnContextInheritanceEffectiveMode::BoundedFull,
+                ),
+                context_inheritance_telemetry: None,
+                delegation_report: None,
+                status: AgentStatus::PendingInit,
+            },
+            /*requested_spawn_request*/ Some(&requested_spawn_request),
+        );
+
+        let rendered = cell_to_text(&cell);
+        assert!(!rendered.contains("Delegation: not provided"));
     }
 
     #[test]
