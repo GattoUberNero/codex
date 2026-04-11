@@ -1547,6 +1547,7 @@ async fn multi_agent_v2_spawn_injects_delegation_report_block_into_inter_agent_c
         .expect("spawned child should receive trigger-turn inter-agent content");
 
     assert!(delegation_context.contains("inspect this repo"));
+    assert!(delegation_context.contains("\n\n<spawn_delegation_report_json>"));
     assert!(delegation_context.contains("<spawn_delegation_report_json>"));
     assert!(delegation_context.contains("\"task_difficulty_1_10\": 4"));
     assert!(delegation_context.contains("</spawn_delegation_report_json>"));

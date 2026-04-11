@@ -248,7 +248,7 @@ fn format_spawn_delegation_context_block(
         ))
     })?;
     Ok(format!(
-        "<{SPAWN_DELEGATION_CONTEXT_BLOCK_TAG}>\n{json_body}\n</{SPAWN_DELEGATION_CONTEXT_BLOCK_TAG}>"
+        "\n<{SPAWN_DELEGATION_CONTEXT_BLOCK_TAG}>\n{json_body}\n</{SPAWN_DELEGATION_CONTEXT_BLOCK_TAG}>"
     ))
 }
 
