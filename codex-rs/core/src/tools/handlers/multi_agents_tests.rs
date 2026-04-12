@@ -5,6 +5,7 @@ use crate::ThreadManager;
 use crate::built_in_model_providers;
 use crate::codex::make_session_and_context;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
+use crate::config::SpawnDelegationReportProfile;
 use crate::config::types::ShellEnvironmentPolicy;
 use crate::function_tool::FunctionCallError;
 use crate::protocol::AgentStatus;
@@ -80,6 +81,21 @@ fn function_payload(args: serde_json::Value) -> ToolPayload {
 
 fn parse_agent_id(id: &str) -> ThreadId {
     ThreadId::from_string(id).expect("agent id should be valid")
+}
+
+fn extract_spawn_delegation_context_json(content: &str) -> serde_json::Value {
+    let start_tag = "<spawn_delegation_report_json>";
+    let end_tag = "</spawn_delegation_report_json>";
+    let start = content
+        .find(start_tag)
+        .expect("delegation context should include opening tag");
+    let json_start = start + start_tag.len();
+    let end_rel = content[json_start..]
+        .find(end_tag)
+        .expect("delegation context should include closing tag");
+    let json_end = json_start + end_rel;
+    serde_json::from_str(content[json_start..json_end].trim())
+        .expect("delegation context block should contain valid json")
 }
 
 fn thread_manager() -> ThreadManager {
@@ -391,9 +407,12 @@ async fn spawn_agent_returns_agent_id_without_task_name() {
 
 #[tokio::test]
 async fn spawn_agent_injects_delegation_report_block_into_child_input_context() {
-    let (mut session, turn) = make_session_and_context().await;
+    let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
+    let mut config = (*turn.config).clone();
+    config.spawn_delegation_report_profile = SpawnDelegationReportProfile::AllOn;
+    turn.config = Arc::new(config);
 
     let output = SpawnAgentHandler
         .handle(invocation(
@@ -445,9 +464,103 @@ async fn spawn_agent_injects_delegation_report_block_into_child_input_context() 
         })
         .expect("spawned child input should include delegation context block");
 
-    assert!(delegation_context.contains("\"general_task_type\": \"inspection\""));
-    assert!(delegation_context.contains("\"expected_duration_minutes\": 15"));
+    let delegation_context_json = extract_spawn_delegation_context_json(&delegation_context);
+    let delegation_context_object = delegation_context_json
+        .as_object()
+        .expect("delegation context block should be a json object");
+    assert_eq!(delegation_context_object.len(), 8);
+    assert_eq!(
+        delegation_context_object.get("general_task_type"),
+        Some(&json!("inspection"))
+    );
+    assert_eq!(
+        delegation_context_object.get("expected_duration_minutes"),
+        Some(&json!(15))
+    );
+    assert_eq!(delegation_context_object.get("why_this_agent"), None);
     assert!(delegation_context.contains("</spawn_delegation_report_json>"));
+}
+
+#[tokio::test]
+async fn spawn_agent_does_not_forward_delegation_report_in_optional_only_ui_profile() {
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+
+    let output = SpawnAgentHandler
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "delegation_report": {
+                    "general_task_type": "inspection",
+                    "task_difficulty_1_10": 4,
+                    "brief_completeness_1_10": 8,
+                    "task_self_sufficiency_1_10": 7,
+                    "expected_duration_minutes": 15,
+                    "why_this_agent": "This task is self-contained and needs a lightweight scan.",
+                    "expected_output_shape": "A short summary with findings and next steps.",
+                    "files_or_scope": "Repository root",
+                    "risks_or_unknowns": "May need a second pass if the repo layout is unexpected."
+                }
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed");
+    let (content, _) = expect_text_output(output);
+    let result: serde_json::Value =
+        serde_json::from_str(&content).expect("spawn result should parse");
+    let child_agent_id = parse_agent_id(
+        result["agent_id"]
+            .as_str()
+            .expect("spawn result should include agent_id"),
+    );
+
+    let captured_ops = manager.captured_ops();
+    let forwarded_context = captured_ops.iter().find_map(|(thread_id, op)| {
+        if *thread_id != child_agent_id {
+            return None;
+        }
+        let Op::UserInput { items, .. } = op else {
+            return None;
+        };
+        items.iter().find_map(|item| match item {
+            UserInput::Text { text, .. } if text.contains("<spawn_delegation_report_json>") => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+    });
+    assert_eq!(forwarded_context, None);
+}
+
+#[tokio::test]
+async fn spawn_agent_all_on_profile_requires_delegation_report() {
+    let (session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config.spawn_delegation_report_profile = SpawnDelegationReportProfile::AllOn;
+    turn.config = Arc::new(config);
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "inspect this repo"
+        })),
+    );
+    let Err(err) = SpawnAgentHandler.handle(invocation).await else {
+        panic!("missing delegation_report should be rejected when profile is all_on");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("missing delegation report should surface as a model-facing error");
+    };
+    assert_eq!(
+        message,
+        "spawn_agent requires delegation_report when spawn_delegation_report_profile is `all_on`"
+    );
 }
 
 #[tokio::test]
@@ -785,6 +898,7 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
+    config.spawn_delegation_report_profile = SpawnDelegationReportProfile::AllOn;
     turn.config = Arc::new(config);
 
     let child_path = AgentPath::try_from("/root/worker").expect("agent path");
@@ -1427,6 +1541,7 @@ async fn multi_agent_v2_spawn_includes_agent_id_key_when_named() {
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
+    config.spawn_delegation_report_profile = SpawnDelegationReportProfile::AllOn;
     turn.config = Arc::new(config);
 
     let output = SpawnAgentHandlerV2
@@ -1491,6 +1606,7 @@ async fn multi_agent_v2_spawn_injects_delegation_report_block_into_inter_agent_c
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
+    config.spawn_delegation_report_profile = SpawnDelegationReportProfile::AllOn;
     turn.config = Arc::new(config);
 
     SpawnAgentHandlerV2
@@ -1549,7 +1665,16 @@ async fn multi_agent_v2_spawn_injects_delegation_report_block_into_inter_agent_c
     assert!(delegation_context.contains("inspect this repo"));
     assert!(delegation_context.contains("\n\n<spawn_delegation_report_json>"));
     assert!(delegation_context.contains("<spawn_delegation_report_json>"));
-    assert!(delegation_context.contains("\"task_difficulty_1_10\": 4"));
+    let delegation_context_json = extract_spawn_delegation_context_json(&delegation_context);
+    let delegation_context_object = delegation_context_json
+        .as_object()
+        .expect("delegation context block should be a json object");
+    assert_eq!(delegation_context_object.len(), 8);
+    assert_eq!(
+        delegation_context_object.get("task_difficulty_1_10"),
+        Some(&json!(4))
+    );
+    assert_eq!(delegation_context_object.get("why_this_agent"), None);
     assert!(delegation_context.contains("</spawn_delegation_report_json>"));
 }
 
@@ -1568,6 +1693,7 @@ async fn multi_agent_v2_spawn_with_mixed_items_keeps_non_text_items_and_injects_
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
+    config.spawn_delegation_report_profile = SpawnDelegationReportProfile::AllOn;
     turn.config = Arc::new(config);
     let session = Arc::new(session);
     let turn = Arc::new(turn);
@@ -1641,8 +1767,55 @@ async fn multi_agent_v2_spawn_with_mixed_items_keeps_non_text_items_and_injects_
         })
         .expect("delegation context block should be appended as the trailing text item");
     assert!(delegation_context.contains("<spawn_delegation_report_json>"));
-    assert!(delegation_context.contains("\"files_or_scope\": \"Repository root\""));
+    let delegation_context_json = extract_spawn_delegation_context_json(delegation_context);
+    let delegation_context_object = delegation_context_json
+        .as_object()
+        .expect("delegation context block should be a json object");
+    assert_eq!(
+        delegation_context_object.get("files_or_scope"),
+        Some(&json!("Repository root"))
+    );
+    assert_eq!(delegation_context_object.get("why_this_agent"), None);
     assert!(delegation_context.contains("</spawn_delegation_report_json>"));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_all_on_profile_requires_delegation_report() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config.spawn_delegation_report_profile = SpawnDelegationReportProfile::AllOn;
+    turn.config = Arc::new(config);
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "inspect this repo",
+            "task_name": "test_process"
+        })),
+    );
+    let Err(err) = SpawnAgentHandlerV2.handle(invocation).await else {
+        panic!("missing delegation_report should be rejected when profile is all_on");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("missing delegation report should surface as a model-facing error");
+    };
+    assert_eq!(
+        message,
+        "spawn_agent requires delegation_report when spawn_delegation_report_profile is `all_on`"
+    );
 }
 
 #[tokio::test]

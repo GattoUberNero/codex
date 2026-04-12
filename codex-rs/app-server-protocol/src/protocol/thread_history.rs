@@ -1231,15 +1231,60 @@ fn format_file_change_diff(change: &codex_protocol::protocol::FileChange) -> Str
     }
 }
 
-fn upsert_turn_item(items: &mut Vec<ThreadItem>, item: ThreadItem) {
+fn upsert_turn_item(items: &mut Vec<ThreadItem>, mut item: ThreadItem) {
     if let Some(existing_item) = items
         .iter_mut()
         .find(|existing_item| existing_item.id() == item.id())
     {
+        merge_collab_spawn_item(existing_item, &mut item);
         *existing_item = item;
         return;
     }
     items.push(item);
+}
+
+fn merge_collab_spawn_item(existing_item: &ThreadItem, item: &mut ThreadItem) {
+    let (
+        ThreadItem::CollabAgentToolCall {
+            tool: existing_tool,
+            requested_model: existing_requested_model,
+            requested_reasoning_effort: existing_requested_reasoning_effort,
+            context_inheritance_requested: existing_context_inheritance_requested,
+            delegation_report: existing_delegation_report,
+            ..
+        },
+        ThreadItem::CollabAgentToolCall {
+            tool,
+            requested_model,
+            requested_reasoning_effort,
+            context_inheritance_requested,
+            delegation_report,
+            ..
+        },
+    ) = (existing_item, item)
+    else {
+        return;
+    };
+
+    if *existing_tool != CollabAgentTool::SpawnAgent || *tool != CollabAgentTool::SpawnAgent {
+        return;
+    }
+
+    if delegation_report.is_none() {
+        *delegation_report = existing_delegation_report.clone();
+    }
+
+    if requested_model.is_none() {
+        *requested_model = existing_requested_model.clone();
+    }
+
+    if requested_reasoning_effort.is_none() {
+        *requested_reasoning_effort = *existing_requested_reasoning_effort;
+    }
+
+    if context_inheritance_requested.is_none() {
+        *context_inheritance_requested = *existing_context_inheritance_requested;
+    }
 }
 
 struct PendingTurn {
@@ -2774,6 +2819,89 @@ mod tests {
                 .collect(),
             }
         );
+    }
+
+    #[test]
+    fn reconstructs_collab_spawn_end_preserves_begin_delegation_when_end_omits_it() {
+        let sender_thread_id = ThreadId::try_from("00000000-0000-0000-0000-000000000101")
+            .expect("valid sender thread id");
+        let spawned_thread_id = ThreadId::try_from("00000000-0000-0000-0000-000000000102")
+            .expect("valid receiver thread id");
+        let begin_report = codex_protocol::protocol::DelegationReport {
+            general_task_type: "code review".into(),
+            task_difficulty_1_10: 6,
+            brief_completeness_1_10: 8,
+            task_self_sufficiency_1_10: 7,
+            expected_duration_minutes: 12,
+            why_this_agent: "Knows this surface".into(),
+            expected_output_shape: "Short findings list".into(),
+            files_or_scope: "codex-rs/tui/src/multi_agents.rs".into(),
+            risks_or_unknowns: "Snapshot text can drift".into(),
+        };
+        let events = vec![
+            EventMsg::UserMessage(UserMessageEvent {
+                message: "spawn agent".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            }),
+            EventMsg::CollabAgentSpawnBegin(codex_protocol::protocol::CollabAgentSpawnBeginEvent {
+                call_id: "spawn-merge".into(),
+                sender_thread_id,
+                prompt: "inspect the repo".into(),
+                model: "gpt-5.4-mini".into(),
+                reasoning_effort: codex_protocol::openai_models::ReasoningEffort::Low,
+                context_inheritance_requested: Some(
+                    codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
+                ),
+                delegation_report: Some(begin_report.clone()),
+            }),
+            EventMsg::CollabAgentSpawnEnd(codex_protocol::protocol::CollabAgentSpawnEndEvent {
+                call_id: "spawn-merge".into(),
+                sender_thread_id,
+                new_thread_id: Some(spawned_thread_id),
+                new_agent_nickname: Some("Scout".into()),
+                new_agent_role: Some("explorer".into()),
+                prompt: "inspect the repo".into(),
+                requested_model: "gpt-5.4".into(),
+                requested_reasoning_effort: codex_protocol::openai_models::ReasoningEffort::High,
+                model: "gpt-5.4".into(),
+                reasoning_effort: codex_protocol::openai_models::ReasoningEffort::Medium,
+                context_inheritance_requested: None,
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
+                delegation_report: None,
+                status: AgentStatus::Running,
+            }),
+        ];
+
+        let items = events
+            .into_iter()
+            .map(RolloutItem::EventMsg)
+            .collect::<Vec<_>>();
+        let turns = build_turns_from_rollout_items(&items);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].items.len(), 2);
+        let ThreadItem::CollabAgentToolCall {
+            requested_model,
+            requested_reasoning_effort,
+            context_inheritance_requested,
+            delegation_report,
+            ..
+        } = &turns[0].items[1]
+        else {
+            panic!("expected collab spawn tool call item")
+        };
+        assert_eq!(requested_model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(
+            *requested_reasoning_effort,
+            Some(codex_protocol::openai_models::ReasoningEffort::High)
+        );
+        assert_eq!(
+            *context_inheritance_requested,
+            Some(codex_protocol::protocol::SpawnContextInheritanceMode::Bounded)
+        );
+        assert_eq!(delegation_report.as_ref(), Some(&begin_report));
     }
 
     #[test]

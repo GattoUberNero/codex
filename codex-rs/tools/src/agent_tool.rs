@@ -578,30 +578,38 @@ fn delegation_report_properties() -> BTreeMap<String, JsonSchema> {
         ),
         (
             "task_difficulty_1_10".to_string(),
-            JsonSchema::Number {
+            JsonSchema::Integer {
                 description: Some("Integer task difficulty on a 1 to 10 scale (1-10).".to_string()),
+                minimum: Some(1.0),
+                maximum: Some(10.0),
             },
         ),
         (
             "brief_completeness_1_10".to_string(),
-            JsonSchema::Number {
+            JsonSchema::Integer {
                 description: Some(
                     "Integer brief completeness on a 1 to 10 scale (1-10).".to_string(),
                 ),
+                minimum: Some(1.0),
+                maximum: Some(10.0),
             },
         ),
         (
             "task_self_sufficiency_1_10".to_string(),
-            JsonSchema::Number {
+            JsonSchema::Integer {
                 description: Some(
                     "Integer task self-sufficiency on a 1 to 10 scale (1-10).".to_string(),
                 ),
+                minimum: Some(1.0),
+                maximum: Some(10.0),
             },
         ),
         (
             "expected_duration_minutes".to_string(),
-            JsonSchema::Number {
+            JsonSchema::Integer {
                 description: Some("Expected duration in whole minutes, minimum 1.".to_string()),
+                minimum: Some(1.0),
+                maximum: None,
             },
         ),
         (

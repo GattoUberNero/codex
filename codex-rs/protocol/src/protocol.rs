@@ -3462,12 +3462,16 @@ pub struct DelegationReport {
     /// High-level type of the delegated task.
     pub general_task_type: String,
     /// Integer task difficulty on a 1 to 10 scale.
+    #[schemars(range(min = 1, max = 10))]
     pub task_difficulty_1_10: u8,
     /// Integer brief completeness on a 1 to 10 scale.
+    #[schemars(range(min = 1, max = 10))]
     pub brief_completeness_1_10: u8,
     /// Integer task self-sufficiency on a 1 to 10 scale.
+    #[schemars(range(min = 1, max = 10))]
     pub task_self_sufficiency_1_10: u8,
     /// Expected duration in whole minutes (minimum 1).
+    #[schemars(range(min = 1))]
     pub expected_duration_minutes: u32,
     /// Why this agent should handle the task.
     pub why_this_agent: String,

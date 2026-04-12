@@ -204,7 +204,12 @@ fn strip_descriptions_schema(schema: &mut JsonSchema) {
             description,
             enum_values: _,
         }
-        | JsonSchema::Number { description } => {
+        | JsonSchema::Number { description }
+        | JsonSchema::Integer {
+            description,
+            minimum: _,
+            maximum: _,
+        } => {
             *description = None;
         }
         JsonSchema::Array { items, description } => {

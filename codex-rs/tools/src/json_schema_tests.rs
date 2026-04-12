@@ -43,6 +43,25 @@ fn parse_tool_input_schema_infers_object_shape_and_defaults_properties() {
 }
 
 #[test]
+fn parse_tool_input_schema_accepts_integer_bounds_with_integral_floats() {
+    let schema = parse_tool_input_schema(&serde_json::json!({
+        "type": "integer",
+        "minimum": 1.0,
+        "maximum": 10.0
+    }))
+    .expect("parse schema");
+
+    assert_eq!(
+        schema,
+        JsonSchema::Integer {
+            description: None,
+            minimum: Some(1.0),
+            maximum: Some(10.0)
+        }
+    );
+}
+
+#[test]
 fn parse_tool_input_schema_normalizes_integer_and_missing_array_items() {
     let schema = parse_tool_input_schema(&serde_json::json!({
         "type": "object",
@@ -57,7 +76,14 @@ fn parse_tool_input_schema_normalizes_integer_and_missing_array_items() {
         schema,
         JsonSchema::Object {
             properties: BTreeMap::from([
-                ("page".to_string(), JsonSchema::Number { description: None },),
+                (
+                    "page".to_string(),
+                    JsonSchema::Integer {
+                        description: None,
+                        minimum: None,
+                        maximum: None
+                    },
+                ),
                 (
                     "tags".to_string(),
                     JsonSchema::Array {

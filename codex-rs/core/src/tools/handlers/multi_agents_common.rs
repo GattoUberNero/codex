@@ -2,6 +2,7 @@ use crate::agent::AgentStatus;
 use crate::codex::Session;
 use crate::codex::TurnContext;
 use crate::config::Config;
+use crate::config::SpawnDelegationReportProfile;
 use crate::error::CodexErr;
 use crate::function_tool::FunctionCallError;
 use crate::models_manager::manager::RefreshStrategy;
@@ -239,23 +240,51 @@ pub(crate) fn validate_spawn_delegation_report(
     Ok(())
 }
 
+#[derive(Serialize)]
+struct SpawnDelegationContextReport<'a> {
+    general_task_type: &'a str,
+    task_difficulty_1_10: u8,
+    brief_completeness_1_10: u8,
+    task_self_sufficiency_1_10: u8,
+    expected_duration_minutes: u32,
+    expected_output_shape: &'a str,
+    files_or_scope: &'a str,
+    risks_or_unknowns: &'a str,
+}
+
 fn format_spawn_delegation_context_block(
     report: &DelegationReport,
 ) -> Result<String, FunctionCallError> {
-    let json_body = serde_json::to_string_pretty(report).map_err(|err| {
+    // `why_this_agent` is telemetry/operator-facing and intentionally excluded from child prompt
+    // enrichment to avoid injecting orchestrator rationale into task execution context.
+    let child_context = SpawnDelegationContextReport {
+        general_task_type: report.general_task_type.as_str(),
+        task_difficulty_1_10: report.task_difficulty_1_10,
+        brief_completeness_1_10: report.brief_completeness_1_10,
+        task_self_sufficiency_1_10: report.task_self_sufficiency_1_10,
+        expected_duration_minutes: report.expected_duration_minutes,
+        expected_output_shape: report.expected_output_shape.as_str(),
+        files_or_scope: report.files_or_scope.as_str(),
+        risks_or_unknowns: report.risks_or_unknowns.as_str(),
+    };
+    let json_body = serde_json::to_string_pretty(&child_context).map_err(|err| {
         FunctionCallError::RespondToModel(format!(
             "failed to serialize spawn delegation_report context: {err}"
         ))
     })?;
     Ok(format!(
-        "\n<{SPAWN_DELEGATION_CONTEXT_BLOCK_TAG}>\n{json_body}\n</{SPAWN_DELEGATION_CONTEXT_BLOCK_TAG}>"
+        "\n\n<{SPAWN_DELEGATION_CONTEXT_BLOCK_TAG}>\n{json_body}\n</{SPAWN_DELEGATION_CONTEXT_BLOCK_TAG}>"
     ))
 }
 
 pub(crate) fn inject_spawn_delegation_report_context(
     input: Op,
     delegation_report: Option<&DelegationReport>,
+    profile: SpawnDelegationReportProfile,
 ) -> Result<Op, FunctionCallError> {
+    if !profile.forward_in_spawn() {
+        return Ok(input);
+    }
     let Some(report) = delegation_report else {
         return Ok(input);
     };

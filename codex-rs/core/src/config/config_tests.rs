@@ -5197,6 +5197,7 @@ fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             agent_bounded_fork_startup_reserve_tokens:
                 DEFAULT_AGENT_BOUNDED_FORK_STARTUP_RESERVE_TOKENS,
             agent_roles: BTreeMap::new(),
+            spawn_delegation_report_profile: SpawnDelegationReportProfile::OptionalOnlyUi,
             memories: MemoriesConfig::default(),
             agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
             codex_home: fixture.codex_home(),
@@ -5341,6 +5342,7 @@ fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         agent_bounded_fork_startup_reserve_tokens:
             DEFAULT_AGENT_BOUNDED_FORK_STARTUP_RESERVE_TOKENS,
         agent_roles: BTreeMap::new(),
+        spawn_delegation_report_profile: SpawnDelegationReportProfile::OptionalOnlyUi,
         memories: MemoriesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
         codex_home: fixture.codex_home(),
@@ -5483,6 +5485,7 @@ fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         agent_bounded_fork_startup_reserve_tokens:
             DEFAULT_AGENT_BOUNDED_FORK_STARTUP_RESERVE_TOKENS,
         agent_roles: BTreeMap::new(),
+        spawn_delegation_report_profile: SpawnDelegationReportProfile::OptionalOnlyUi,
         memories: MemoriesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
         codex_home: fixture.codex_home(),
@@ -5611,6 +5614,7 @@ fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         agent_bounded_fork_startup_reserve_tokens:
             DEFAULT_AGENT_BOUNDED_FORK_STARTUP_RESERVE_TOKENS,
         agent_roles: BTreeMap::new(),
+        spawn_delegation_report_profile: SpawnDelegationReportProfile::OptionalOnlyUi,
         memories: MemoriesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
         codex_home: fixture.codex_home(),

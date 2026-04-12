@@ -149,6 +149,44 @@ pub(crate) const DEFAULT_AGENT_MAX_DEPTH: i32 = 1;
 pub(crate) const DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS: Option<u64> = None;
 pub(crate) const DEFAULT_AGENT_BOUNDED_FORK_STARTUP_RESERVE_TOKENS: i64 = 24_000;
 
+/// Spawn-time policy for delegation report handling.
+///
+/// This profile controls three report-level switches for `spawn_agent`:
+/// - whether report content is forwarded into child prompt context,
+/// - whether report content is rendered in UI/operator surfaces,
+/// - whether the report object is required at spawn ingress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SpawnDelegationReportProfile {
+    /// Show delegation metadata in UI only.
+    ///
+    /// - forward_in_spawn: off
+    /// - render_in_ui: on
+    /// - required_in_spawn: off
+    #[default]
+    OptionalOnlyUi,
+    /// Enable all delegation report channels.
+    ///
+    /// - forward_in_spawn: on
+    /// - render_in_ui: on
+    /// - required_in_spawn: on
+    AllOn,
+}
+
+impl SpawnDelegationReportProfile {
+    pub fn forward_in_spawn(self) -> bool {
+        matches!(self, Self::AllOn)
+    }
+
+    pub fn render_in_ui(self) -> bool {
+        true
+    }
+
+    pub fn required_in_spawn(self) -> bool {
+        matches!(self, Self::AllOn)
+    }
+}
+
 pub const CONFIG_TOML_FILE: &str = "config.toml";
 const OPENAI_BASE_URL_ENV_VAR: &str = "OPENAI_BASE_URL";
 const RESERVED_MODEL_PROVIDER_IDS: [&str; 3] = [
@@ -416,6 +454,9 @@ pub struct Config {
 
     /// User-defined role declarations keyed by role name.
     pub agent_roles: BTreeMap<String, AgentRoleConfig>,
+
+    /// Profile controlling delegation report ingress, forwarding, and rendering for spawn.
+    pub spawn_delegation_report_profile: SpawnDelegationReportProfile,
 
     /// Memories subsystem settings.
     pub memories: MemoriesConfig,
@@ -2076,6 +2117,12 @@ pub struct ConfigToml {
     #[serde(default)]
     pub profiles: HashMap<String, ConfigProfile>,
 
+    /// Spawn delegation report policy profile.
+    ///
+    /// - `optional_only_ui`: render only, no forwarding to child prompt context, no ingress requirement.
+    /// - `all_on`: render + forward + require report object.
+    pub spawn_delegation_report_profile: Option<SpawnDelegationReportProfile>,
+
     /// Settings that govern if and what will be written to `~/.codex/history.jsonl`.
     #[serde(default)]
     pub history: Option<History>,
@@ -3108,6 +3155,10 @@ impl Config {
 
         let agent_roles =
             agent_roles::load_agent_roles(&cfg, &config_layer_stack, &mut startup_warnings)?;
+        let spawn_delegation_report_profile = config_profile
+            .spawn_delegation_report_profile
+            .or(cfg.spawn_delegation_report_profile)
+            .unwrap_or_default();
 
         let openai_base_url = cfg
             .openai_base_url
@@ -3483,6 +3534,7 @@ impl Config {
             agent_max_depth,
             agent_bounded_fork_startup_reserve_tokens,
             agent_roles,
+            spawn_delegation_report_profile,
             memories: cfg.memories.unwrap_or_default().into(),
             agent_job_max_runtime_seconds,
             codex_home,

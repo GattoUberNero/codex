@@ -1,3 +1,4 @@
+use crate::JsonSchema;
 use crate::ToolDefinition;
 use crate::parse_tool_input_schema;
 use serde_json::Value as JsonValue;
@@ -18,7 +19,8 @@ pub fn parse_mcp_tool(tool: &rmcp::model::Tool) -> Result<ToolDefinition, serde_
         );
     }
 
-    let input_schema = parse_tool_input_schema(&serialized_input_schema)?;
+    let input_schema =
+        normalize_mcp_input_schema(parse_tool_input_schema(&serialized_input_schema)?);
     let structured_content_schema = tool
         .output_schema
         .as_ref()
@@ -34,6 +36,36 @@ pub fn parse_mcp_tool(tool: &rmcp::model::Tool) -> Result<ToolDefinition, serde_
         )),
         defer_loading: false,
     })
+}
+
+fn normalize_mcp_input_schema(schema: JsonSchema) -> JsonSchema {
+    match schema {
+        JsonSchema::Integer { description, .. } => JsonSchema::Number { description },
+        JsonSchema::Array { items, description } => JsonSchema::Array {
+            items: Box::new(normalize_mcp_input_schema(*items)),
+            description,
+        },
+        JsonSchema::Object {
+            properties,
+            required,
+            additional_properties,
+        } => JsonSchema::Object {
+            properties: properties
+                .into_iter()
+                .map(|(name, schema)| (name, normalize_mcp_input_schema(schema)))
+                .collect(),
+            required,
+            additional_properties: additional_properties.map(|additional| match additional {
+                crate::AdditionalProperties::Boolean(value) => {
+                    crate::AdditionalProperties::Boolean(value)
+                }
+                crate::AdditionalProperties::Schema(schema) => crate::AdditionalProperties::Schema(
+                    Box::new(normalize_mcp_input_schema(*schema)),
+                ),
+            }),
+        },
+        other => other,
+    }
 }
 
 pub fn mcp_call_tool_result_output_schema(structured_content_schema: JsonValue) -> JsonValue {

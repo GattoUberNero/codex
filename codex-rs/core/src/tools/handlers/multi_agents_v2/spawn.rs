@@ -38,10 +38,21 @@ impl ToolHandler for Handler {
         } = invocation;
         let arguments = function_arguments(payload)?;
         let args: SpawnAgentArgs = parse_arguments(&arguments)?;
+        let spawn_delegation_profile = turn.config.spawn_delegation_report_profile;
         let delegation_report = args.delegation_report;
+        if spawn_delegation_profile.required_in_spawn() && delegation_report.is_none() {
+            return Err(FunctionCallError::RespondToModel(
+                "spawn_agent requires delegation_report when spawn_delegation_report_profile is `all_on`".to_string(),
+            ));
+        }
         if let Some(report) = delegation_report.as_ref() {
             validate_spawn_delegation_report(report)?;
         }
+        let delegation_report_for_ui = if spawn_delegation_profile.render_in_ui() {
+            delegation_report.clone()
+        } else {
+            None
+        };
         let context_inheritance_resolution = resolve_spawn_context_inheritance_mode(
             args.fork_context,
             args.context_inheritance,
@@ -58,8 +69,11 @@ impl ToolHandler for Handler {
 
         let initial_operation = parse_collab_input(args.message, args.items)?;
         let prompt = render_input_preview(&initial_operation);
-        let initial_operation =
-            inject_spawn_delegation_report_context(initial_operation, delegation_report.as_ref())?;
+        let initial_operation = inject_spawn_delegation_report_context(
+            initial_operation,
+            delegation_report.as_ref(),
+            spawn_delegation_profile,
+        )?;
         let spawn_content = render_input_preview(&initial_operation);
 
         let session_source = turn.session_source.clone();
@@ -80,7 +94,7 @@ impl ToolHandler for Handler {
                     model: requested_model.clone(),
                     reasoning_effort: requested_reasoning_effort,
                     context_inheritance_requested: context_inheritance_resolution.requested_mode,
-                    delegation_report: delegation_report.clone(),
+                    delegation_report: delegation_report_for_ui.clone(),
                 }
                 .into(),
             )
@@ -213,7 +227,7 @@ impl ToolHandler for Handler {
                     model: effective_model,
                     reasoning_effort: effective_reasoning_effort,
                     context_inheritance_requested: context_inheritance_resolution.requested_mode,
-                    delegation_report: delegation_report.clone(),
+                    delegation_report: delegation_report_for_ui.clone(),
                     context_inheritance_effective: Some(fork_context_report.effective_mode),
                     context_inheritance_telemetry: fork_context_report.telemetry.clone(),
                     status,
@@ -238,7 +252,7 @@ impl ToolHandler for Handler {
             agent_id: None,
             task_name,
             nickname,
-            delegation_report,
+            delegation_report: delegation_report_for_ui,
             context_inheritance_requested: fork_context_report.requested_mode,
             context_inheritance_effective: fork_context_report.effective_mode,
             context_inheritance_telemetry: fork_context_report.telemetry,

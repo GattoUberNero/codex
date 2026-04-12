@@ -124,3 +124,60 @@ fn parse_mcp_tool_preserves_output_schema_without_inferred_type() {
         }
     );
 }
+
+#[test]
+fn parse_mcp_tool_normalizes_nested_integer_schema_to_number() {
+    let tool = mcp_tool(
+        "nested_integer",
+        "Nested integer schema",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "limits": {
+                    "type": "object",
+                    "properties": {
+                        "page": {"type": "integer", "minimum": 1.0, "maximum": 10.0}
+                    }
+                },
+                "pages": {
+                    "type": "array",
+                    "items": {"type": "integer", "minimum": 1.0}
+                }
+            }
+        }),
+    );
+
+    assert_eq!(
+        parse_mcp_tool(&tool).expect("parse MCP tool"),
+        ToolDefinition {
+            name: "nested_integer".to_string(),
+            description: "Nested integer schema".to_string(),
+            input_schema: JsonSchema::Object {
+                properties: BTreeMap::from([
+                    (
+                        "limits".to_string(),
+                        JsonSchema::Object {
+                            properties: BTreeMap::from([(
+                                "page".to_string(),
+                                JsonSchema::Number { description: None },
+                            )]),
+                            required: None,
+                            additional_properties: None,
+                        },
+                    ),
+                    (
+                        "pages".to_string(),
+                        JsonSchema::Array {
+                            items: Box::new(JsonSchema::Number { description: None }),
+                            description: None,
+                        },
+                    ),
+                ]),
+                required: None,
+                additional_properties: None,
+            },
+            output_schema: Some(mcp_call_tool_result_output_schema(serde_json::json!({}))),
+            defer_loading: false,
+        }
+    );
+}

@@ -3836,13 +3836,14 @@
         "brief_completeness_1_10": {
           "description": "Integer brief completeness on a 1 to 10 scale.",
           "format": "uint8",
-          "minimum": 0.0,
+          "maximum": 10.0,
+          "minimum": 1.0,
           "type": "integer"
         },
         "expected_duration_minutes": {
-          "description": "Expected duration in whole minutes.",
+          "description": "Expected duration in whole minutes (minimum 1).",
           "format": "uint32",
-          "minimum": 0.0,
+          "minimum": 1.0,
           "type": "integer"
         },
         "expected_output_shape": {
@@ -3864,13 +3865,15 @@
         "task_difficulty_1_10": {
           "description": "Integer task difficulty on a 1 to 10 scale.",
           "format": "uint8",
-          "minimum": 0.0,
+          "maximum": 10.0,
+          "minimum": 1.0,
           "type": "integer"
         },
         "task_self_sufficiency_1_10": {
           "description": "Integer task self-sufficiency on a 1 to 10 scale.",
           "format": "uint8",
-          "minimum": 0.0,
+          "maximum": 10.0,
+          "minimum": 1.0,
           "type": "integer"
         },
         "why_this_agent": {

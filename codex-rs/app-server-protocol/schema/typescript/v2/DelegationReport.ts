@@ -20,7 +20,7 @@ brief_completeness_1_10: number,
  */
 task_self_sufficiency_1_10: number, 
 /**
- * Expected duration in whole minutes.
+ * Expected duration in whole minutes (minimum 1).
  */
 expected_duration_minutes: number, 
 /**

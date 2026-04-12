@@ -595,6 +595,9 @@
         "service_tier": {
           "$ref": "#/definitions/ServiceTier"
         },
+        "spawn_delegation_report_profile": {
+          "$ref": "#/definitions/SpawnDelegationReportProfile"
+        },
         "tools": {
           "$ref": "#/definitions/ToolsToml"
         },
@@ -1661,6 +1664,25 @@
       },
       "type": "object"
     },
+    "SpawnDelegationReportProfile": {
+      "description": "Spawn-time policy for delegation report handling.\n\nThis profile controls three report-level switches for `spawn_agent`: - whether report content is forwarded into child prompt context, - whether report content is rendered in UI/operator surfaces, - whether the report object is required at spawn ingress.",
+      "oneOf": [
+        {
+          "description": "Show delegation metadata in UI only.\n\n- forward_in_spawn: off - render_in_ui: on - required_in_spawn: off",
+          "enum": [
+            "optional_only_ui"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Enable all delegation report channels.\n\n- forward_in_spawn: on - render_in_ui: on - required_in_spawn: on",
+          "enum": [
+            "all_on"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "ToolSuggestConfig": {
       "additionalProperties": false,
       "properties": {
@@ -2565,6 +2587,14 @@
         }
       ],
       "description": "User-level skill config entries keyed by SKILL.md path."
+    },
+    "spawn_delegation_report_profile": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/SpawnDelegationReportProfile"
+        }
+      ],
+      "description": "Spawn delegation report policy profile.\n\n- `optional_only_ui`: render only, no forwarding to child prompt context, no ingress requirement. - `all_on`: render + forward + require report object."
     },
     "sqlite_home": {
       "allOf": [

@@ -3,6 +3,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::config::SpawnDelegationReportProfile;
 use crate::config::ToolsToml;
 use crate::config::types::ApprovalsReviewer;
 use crate::config::types::Personality;
@@ -51,6 +52,7 @@ pub struct ConfigProfile {
     pub include_apply_patch_tool: Option<bool>,
     pub experimental_use_unified_exec_tool: Option<bool>,
     pub experimental_use_freeform_apply_patch: Option<bool>,
+    pub spawn_delegation_report_profile: Option<SpawnDelegationReportProfile>,
     pub tools_view_image: Option<bool>,
     pub tools: Option<ToolsToml>,
     pub web_search: Option<WebSearchMode>,

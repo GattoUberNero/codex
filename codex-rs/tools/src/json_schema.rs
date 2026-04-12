@@ -18,11 +18,19 @@ pub enum JsonSchema {
         #[serde(rename = "enum", skip_serializing_if = "Option::is_none")]
         enum_values: Option<Vec<String>>,
     },
-    /// MCP schema allows "number" | "integer" for Number.
-    #[serde(alias = "integer")]
+    /// Generic numeric schema ("type": "number").
     Number {
         #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
+    },
+    /// Integer-only numeric schema ("type": "integer").
+    Integer {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        minimum: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        maximum: Option<f64>,
     },
     Array {
         items: Box<JsonSchema>,
