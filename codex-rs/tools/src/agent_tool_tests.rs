@@ -34,6 +34,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
             model_preset("hidden", /*show_in_picker*/ false),
         ],
         agent_type_description: "role help".to_string(),
+        require_delegation_report: false,
     });
 
     let ToolSpec::Function(ResponsesApiTool {
@@ -152,6 +153,7 @@ fn spawn_agent_tool_v1_omits_context_inheritance_inputs() {
     let tool = create_spawn_agent_tool_v1(SpawnAgentToolOptions {
         available_models: &[model_preset("visible", /*show_in_picker*/ true)],
         agent_type_description: "role help".to_string(),
+        require_delegation_report: false,
     });
 
     let ToolSpec::Function(ResponsesApiTool {
@@ -204,6 +206,46 @@ fn spawn_agent_tool_v1_omits_context_inheritance_inputs() {
         output_schema["properties"]["delegation_report"]["type"],
         json!(["object", "null"])
     );
+}
+
+#[test]
+fn spawn_agent_tool_v2_can_require_delegation_report() {
+    let ToolSpec::Function(ResponsesApiTool { parameters, .. }) =
+        create_spawn_agent_tool_v2(SpawnAgentToolOptions {
+            available_models: &[model_preset("visible", /*show_in_picker*/ true)],
+            agent_type_description: "role help".to_string(),
+            require_delegation_report: true,
+        })
+    else {
+        panic!("spawn_agent should be a function tool");
+    };
+    let JsonSchema::Object { required, .. } = parameters else {
+        panic!("spawn_agent should use object params");
+    };
+    assert_eq!(
+        required,
+        Some(vec![
+            "task_name".to_string(),
+            "delegation_report".to_string()
+        ])
+    );
+}
+
+#[test]
+fn spawn_agent_tool_v1_can_require_delegation_report() {
+    let ToolSpec::Function(ResponsesApiTool { parameters, .. }) =
+        create_spawn_agent_tool_v1(SpawnAgentToolOptions {
+            available_models: &[model_preset("visible", /*show_in_picker*/ true)],
+            agent_type_description: "role help".to_string(),
+            require_delegation_report: true,
+        })
+    else {
+        panic!("spawn_agent should be a function tool");
+    };
+    let JsonSchema::Object { required, .. } = parameters else {
+        panic!("spawn_agent should use object params");
+    };
+    assert_eq!(required, Some(vec!["delegation_report".to_string()]));
 }
 
 #[test]

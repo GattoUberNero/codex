@@ -2726,7 +2726,7 @@ async fn resume_agent_from_rollout_skips_descendants_when_parent_resume_fails() 
 fn sanitize_spawn_delegation_context_for_summary_strips_wrapped_block() {
     let raw = "inspect this repo\n<spawn_delegation_report_json>\n{\"task\":\"review\"}\n</spawn_delegation_report_json>";
     let sanitized = sanitize_spawn_delegation_context_for_summary(raw);
-    assert_eq!(sanitized, "inspect this repo\n");
+    assert_eq!(sanitized, "inspect this repo");
 }
 
 #[test]
@@ -2737,14 +2737,14 @@ fn sanitize_spawn_delegation_context_for_summary_preserves_plain_content() {
 }
 
 #[test]
-fn sanitize_spawn_delegation_context_for_summary_preserves_whitespace() {
+fn sanitize_spawn_delegation_context_for_summary_trims_whitespace() {
     let raw = "  inspect this repo  ";
     let sanitized = sanitize_spawn_delegation_context_for_summary(raw);
-    assert_eq!(sanitized, raw);
+    assert_eq!(sanitized, "inspect this repo");
 }
 
 #[test]
-fn sanitize_spawn_delegation_context_for_summary_preserves_whitespace_while_stripping_block() {
+fn sanitize_spawn_delegation_context_for_summary_trims_whitespace_while_stripping_block() {
     let block_body = r#"{"task":"review"}"#;
     let raw = format!(
         "  inspect this repo
@@ -2754,12 +2754,7 @@ fn sanitize_spawn_delegation_context_for_summary_preserves_whitespace_while_stri
   "
     );
     let sanitized = sanitize_spawn_delegation_context_for_summary(&raw);
-    assert_eq!(
-        sanitized,
-        "  inspect this repo
-
-  "
-    );
+    assert_eq!(sanitized, "inspect this repo");
 }
 
 #[test]

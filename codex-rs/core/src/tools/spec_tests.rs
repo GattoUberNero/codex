@@ -179,6 +179,7 @@ fn spawn_agent_tool_options(config: &ToolsConfig) -> SpawnAgentToolOptions<'_> {
     SpawnAgentToolOptions {
         available_models: &config.available_models,
         agent_type_description: crate::agent::role::spawn_tool_spec::build(&config.agent_roles),
+        require_delegation_report: config.spawn_delegation_report_required,
     }
 }
 
@@ -607,6 +608,88 @@ fn test_build_specs_multi_agent_v2_uses_task_names_and_hides_resume() {
     );
     assert_lacks_tool_name(&tools, "send_input");
     assert_lacks_tool_name(&tools, "resume_agent");
+}
+
+#[test]
+fn test_build_specs_multi_agent_v2_can_require_spawn_delegation_report() {
+    let config = test_config();
+    let model_info = ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
+    let mut features = Features::with_defaults();
+    features.enable(Feature::Collab);
+    features.enable(Feature::MultiAgentV2);
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    })
+    .with_spawn_delegation_report_required(true);
+
+    let (tools, _) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*app_tools*/ None,
+        &[],
+    )
+    .build();
+    let spawn_agent = find_tool(&tools, "spawn_agent");
+    let ToolSpec::Function(ResponsesApiTool { parameters, .. }) = &spawn_agent.spec else {
+        panic!("spawn_agent should be a function tool");
+    };
+    let JsonSchema::Object {
+        required: Some(required),
+        ..
+    } = parameters
+    else {
+        panic!("spawn_agent should use object params");
+    };
+    assert_eq!(
+        required.as_slice(),
+        ["task_name".to_string(), "delegation_report".to_string()]
+    );
+}
+
+#[test]
+fn test_build_specs_multi_agent_v1_can_require_spawn_delegation_report() {
+    let config = test_config();
+    let model_info = ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
+    let mut features = Features::with_defaults();
+    features.enable(Feature::Collab);
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    })
+    .with_spawn_delegation_report_required(true);
+
+    let (tools, _) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*app_tools*/ None,
+        &[],
+    )
+    .build();
+    let spawn_agent = find_tool(&tools, "spawn_agent");
+    let ToolSpec::Function(ResponsesApiTool { parameters, .. }) = &spawn_agent.spec else {
+        panic!("spawn_agent should be a function tool");
+    };
+    let JsonSchema::Object {
+        required: Some(required),
+        ..
+    } = parameters
+    else {
+        panic!("spawn_agent should use object params");
+    };
+    assert_eq!(required.as_slice(), ["delegation_report".to_string()]);
 }
 
 #[test]
@@ -2630,7 +2713,7 @@ fn test_mcp_tool_property_missing_type_defaults_to_string() {
 }
 
 #[test]
-fn test_mcp_tool_integer_normalized_to_number() {
+fn test_mcp_tool_integer_schema_is_preserved() {
     let config = test_config();
     let model_info = ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
     let mut features = Features::with_defaults();
@@ -2672,7 +2755,11 @@ fn test_mcp_tool_integer_normalized_to_number() {
             parameters: JsonSchema::Object {
                 properties: BTreeMap::from([(
                     "page".to_string(),
-                    JsonSchema::Number { description: None }
+                    JsonSchema::Integer {
+                        description: None,
+                        minimum: None,
+                        maximum: None
+                    }
                 )]),
                 required: None,
                 additional_properties: None,

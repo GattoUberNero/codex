@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 pub struct SpawnAgentToolOptions<'a> {
     pub available_models: &'a [ModelPreset],
     pub agent_type_description: String,
+    pub require_delegation_report: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +36,9 @@ pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions<'_>) -> ToolSpe
         defer_loading: None,
         parameters: JsonSchema::Object {
             properties,
-            required: None,
+            required: options
+                .require_delegation_report
+                .then(|| vec!["delegation_report".to_string()]),
             additional_properties: Some(false.into()),
         },
         output_schema: Some(spawn_agent_output_schema_v1()),
@@ -67,7 +70,11 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions<'_>) -> ToolSpe
         defer_loading: None,
         parameters: JsonSchema::Object {
             properties,
-            required: Some(vec!["task_name".to_string()]),
+            required: Some(if options.require_delegation_report {
+                vec!["task_name".to_string(), "delegation_report".to_string()]
+            } else {
+                vec!["task_name".to_string()]
+            }),
             additional_properties: Some(false.into()),
         },
         output_schema: Some(spawn_agent_output_schema_v2()),

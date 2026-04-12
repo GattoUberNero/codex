@@ -171,6 +171,7 @@ pub(crate) struct ToolsConfig {
     pub experimental_supported_tools: Vec<String>,
     pub agent_jobs_tools: bool,
     pub agent_jobs_worker_tools: bool,
+    pub spawn_delegation_report_required: bool,
 }
 
 pub(crate) struct ToolsConfigParams<'a> {
@@ -305,6 +306,7 @@ impl ToolsConfig {
             experimental_supported_tools: model_info.experimental_supported_tools.clone(),
             agent_jobs_tools: include_agent_jobs,
             agent_jobs_worker_tools,
+            spawn_delegation_report_required: false,
         }
     }
 
@@ -343,6 +345,14 @@ impl ToolsConfig {
 
     pub fn with_web_search_config(mut self, web_search_config: Option<WebSearchConfig>) -> Self {
         self.web_search_config = web_search_config;
+        self
+    }
+
+    pub fn with_spawn_delegation_report_required(
+        mut self,
+        spawn_delegation_report_required: bool,
+    ) -> Self {
+        self.spawn_delegation_report_required = spawn_delegation_report_required;
         self
     }
 
@@ -782,6 +792,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
                     agent_type_description: crate::agent::role::spawn_tool_spec::build(
                         &config.agent_roles,
                     ),
+                    require_delegation_report: config.spawn_delegation_report_required,
                 }),
                 /*supports_parallel_tool_calls*/ false,
                 config.code_mode_enabled,
@@ -834,6 +845,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
                     agent_type_description: crate::agent::role::spawn_tool_spec::build(
                         &config.agent_roles,
                     ),
+                    require_delegation_report: config.spawn_delegation_report_required,
                 }),
                 /*supports_parallel_tool_calls*/ false,
                 config.code_mode_enabled,

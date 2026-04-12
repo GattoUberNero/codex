@@ -126,7 +126,7 @@ fn parse_mcp_tool_preserves_output_schema_without_inferred_type() {
 }
 
 #[test]
-fn parse_mcp_tool_normalizes_nested_integer_schema_to_number() {
+fn parse_mcp_tool_preserves_nested_integer_schema_and_bounds() {
     let tool = mcp_tool(
         "nested_integer",
         "Nested integer schema",
@@ -159,7 +159,11 @@ fn parse_mcp_tool_normalizes_nested_integer_schema_to_number() {
                         JsonSchema::Object {
                             properties: BTreeMap::from([(
                                 "page".to_string(),
-                                JsonSchema::Number { description: None },
+                                JsonSchema::Integer {
+                                    description: None,
+                                    minimum: Some(1.0),
+                                    maximum: Some(10.0),
+                                },
                             )]),
                             required: None,
                             additional_properties: None,
@@ -168,7 +172,11 @@ fn parse_mcp_tool_normalizes_nested_integer_schema_to_number() {
                     (
                         "pages".to_string(),
                         JsonSchema::Array {
-                            items: Box::new(JsonSchema::Number { description: None }),
+                            items: Box::new(JsonSchema::Integer {
+                                description: None,
+                                minimum: Some(1.0),
+                                maximum: None,
+                            }),
                             description: None,
                         },
                     ),
