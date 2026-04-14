@@ -656,8 +656,9 @@ async fn apply_patch_custom_tool_call_reports_failure_output(
     let output = harness.apply_patch_output(call_id, output_type).await;
 
     let expected_output = format!(
-        "apply_patch verification failed: Failed to read file to update {}/{missing_file}: No such file or directory (os error 2)",
-        harness.cwd().to_string_lossy()
+        "apply_patch verification failed: Failed to read file to update {missing_file} (cwd: {}, resolved: {}): No such file or directory (os error 2)",
+        harness.cwd().display(),
+        harness.cwd().join(missing_file).display()
     );
     assert_eq!(output, expected_output.as_str());
 

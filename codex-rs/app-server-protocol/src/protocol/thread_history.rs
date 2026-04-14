@@ -2837,6 +2837,7 @@ mod tests {
             expected_output_shape: "Short findings list".into(),
             files_or_scope: "codex-rs/tui/src/multi_agents.rs".into(),
             risks_or_unknowns: "Snapshot text can drift".into(),
+            orchestration_context: None,
         };
         let events = vec![
             EventMsg::UserMessage(UserMessageEvent {

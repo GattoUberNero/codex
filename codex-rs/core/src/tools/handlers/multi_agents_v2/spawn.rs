@@ -41,9 +41,10 @@ impl ToolHandler for Handler {
         let spawn_delegation_profile = turn.config.spawn_delegation_report_profile;
         let delegation_report = args.delegation_report;
         if spawn_delegation_profile.required_in_spawn() && delegation_report.is_none() {
-            return Err(FunctionCallError::RespondToModel(
-                "spawn_agent requires delegation_report when spawn_delegation_report_profile is `all_on`".to_string(),
-            ));
+            return Err(FunctionCallError::RespondToModel(format!(
+                "spawn_agent requires delegation_report when spawn_delegation_report_profile is `{}`",
+                spawn_delegation_profile.as_config_key()
+            )));
         }
         if let Some(report) = delegation_report.as_ref() {
             validate_spawn_delegation_report(report)?;
@@ -69,13 +70,6 @@ impl ToolHandler for Handler {
 
         let initial_operation = parse_collab_input(args.message, args.items)?;
         let prompt = render_input_preview(&initial_operation);
-        let initial_operation = inject_spawn_delegation_report_context(
-            initial_operation,
-            delegation_report.as_ref(),
-            spawn_delegation_profile,
-        )?;
-        let spawn_content = render_input_preview(&initial_operation);
-
         let session_source = turn.session_source.clone();
         let child_depth = next_thread_spawn_depth(&session_source);
         let max_depth = turn.config.agent_max_depth;
@@ -84,6 +78,18 @@ impl ToolHandler for Handler {
                 "Agent depth limit reached. Solve the task yourself.".to_string(),
             ));
         }
+        let context_block = build_spawn_delegation_context_block(
+            &session,
+            &turn,
+            &prompt,
+            delegation_report.as_ref(),
+            spawn_delegation_profile,
+        )
+        .await?;
+        let initial_operation =
+            inject_spawn_delegation_context_block(initial_operation, context_block);
+        let spawn_content = render_input_preview(&initial_operation);
+
         session
             .send_event(
                 &turn,

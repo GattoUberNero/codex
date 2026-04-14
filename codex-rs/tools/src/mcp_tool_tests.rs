@@ -177,6 +177,7 @@ fn parse_mcp_tool_preserves_nested_integer_schema_and_bounds() {
                                 minimum: Some(1.0),
                                 maximum: None,
                             }),
+                            min_items: None,
                             description: None,
                         },
                     ),

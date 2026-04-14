@@ -166,6 +166,7 @@ pub fn create_shell_tool(options: ShellToolOptions) -> ToolSpec {
                     enum_values: None,
                     description: None,
                 }),
+                min_items: None,
                 description: Some("The command to execute".to_string()),
             },
         ),
@@ -400,6 +401,7 @@ fn create_approval_parameters(
             JsonSchema::Array {
                 items: Box::new(JsonSchema::String {
                 enum_values: None, description: None }),
+                min_items: None,
                 description: Some(
                     r#"Only specify when sandbox_permissions is `require_escalated`.
                         Suggest a prefix command pattern that will allow you to fulfill similar requests from the user in the future.
@@ -453,6 +455,7 @@ fn file_system_permissions_schema() -> JsonSchema {
                         enum_values: None,
                         description: None,
                     }),
+                    min_items: None,
                     description: Some("Absolute paths to grant read access to.".to_string()),
                 },
             ),
@@ -463,6 +466,7 @@ fn file_system_permissions_schema() -> JsonSchema {
                         enum_values: None,
                         description: None,
                     }),
+                    min_items: None,
                     description: Some("Absolute paths to grant write access to.".to_string()),
                 },
             ),

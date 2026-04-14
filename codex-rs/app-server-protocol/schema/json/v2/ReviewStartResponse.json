@@ -331,6 +331,60 @@
       ],
       "type": "string"
     },
+    "DelegationOrchestrationContext": {
+      "properties": {
+        "action_type": {
+          "description": "Optional orchestration action type label.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "campaign_id": {
+          "description": "Optional campaign identifier (`^[A-Z]+$`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "execution_lane": {
+          "description": "Optional execution-lane label.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase_id": {
+          "description": "Optional phase identifier (`^\\\\d{2,}$`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "production_type": {
+          "description": "Optional orchestration production type label.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "round_id": {
+          "description": "Optional round identifier (`^[A-Za-z0-9._:-]{1,64}$`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "step_id": {
+          "description": "Optional step identifier (`^[A-Za-z0-9._:-]{1,64}$`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "DelegationReport": {
       "properties": {
         "brief_completeness_1_10": {
@@ -357,6 +411,18 @@
         "general_task_type": {
           "description": "High-level type of the delegated task.",
           "type": "string"
+        },
+        "orchestration_context": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DelegationOrchestrationContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional orchestration metadata carried with delegation telemetry."
         },
         "risks_or_unknowns": {
           "description": "Known risks or open questions.",

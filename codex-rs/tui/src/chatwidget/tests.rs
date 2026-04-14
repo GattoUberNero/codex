@@ -2420,6 +2420,7 @@ async fn collab_spawn_end_uses_effective_model_and_preserves_requested_details()
                 expected_output_shape: "Findings list ordered by severity.".to_string(),
                 files_or_scope: "codex-rs/tui/src/chatwidget.rs".to_string(),
                 risks_or_unknowns: "Might require snapshot refresh.".to_string(),
+                orchestration_context: None,
             }),
         }),
     });
@@ -2461,6 +2462,7 @@ async fn collab_spawn_end_uses_effective_model_and_preserves_requested_details()
                 expected_output_shape: "Findings list ordered by severity.".to_string(),
                 files_or_scope: "codex-rs/tui/src/chatwidget.rs".to_string(),
                 risks_or_unknowns: "Might require snapshot refresh.".to_string(),
+                orchestration_context: None,
             }),
             status: AgentStatus::PendingInit,
         }),
@@ -2514,6 +2516,7 @@ async fn replayed_collab_spawn_end_preserves_requested_details_from_begin_event(
                 expected_output_shape: "Short findings note.".to_string(),
                 files_or_scope: "repo root".to_string(),
                 risks_or_unknowns: "none known".to_string(),
+                orchestration_context: None,
             }),
         }),
     });
@@ -5251,6 +5254,7 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                     expected_output_shape: "Findings summary.".to_string(),
                     files_or_scope: "repo root".to_string(),
                     risks_or_unknowns: "none known".to_string(),
+                    orchestration_context: None,
                 }),
                 agents_states: HashMap::from([(
                     spawned_thread_id.to_string(),
@@ -5289,6 +5293,86 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
 }
 
 #[tokio::test]
+async fn live_app_server_collab_spawn_completed_renders_orchestration_context_details() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000000012").expect("valid thread id");
+    let spawned_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b91781b41a1a").expect("valid thread id");
+
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "spawn-orch-1".to_string(),
+                tool: AppServerCollabAgentTool::SpawnAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![spawned_thread_id.to_string()],
+                prompt: Some("Explore the repo".to_string()),
+                requested_model: Some("gpt-5".to_string()),
+                requested_reasoning_effort: Some(ReasoningEffortConfig::High),
+                model: Some("gpt-5".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::High),
+                effective_model: Some("gpt-5-mini".to_string()),
+                effective_reasoning_effort: Some(ReasoningEffortConfig::Medium),
+                context_inheritance_requested: Some(
+                    codex_protocol::protocol::SpawnContextInheritanceMode::Bounded,
+                ),
+                context_inheritance_effective: Some(
+                    codex_protocol::protocol::SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
+                ),
+                context_inheritance_telemetry: None,
+                delegation_report: Some(codex_protocol::protocol::DelegationReport {
+                    general_task_type: "analysis".to_string(),
+                    task_difficulty_1_10: 5,
+                    brief_completeness_1_10: 9,
+                    task_self_sufficiency_1_10: 9,
+                    expected_duration_minutes: 20,
+                    why_this_agent: "Strong fit for bounded analysis.".to_string(),
+                    expected_output_shape: "Findings summary.".to_string(),
+                    files_or_scope: "repo root".to_string(),
+                    risks_or_unknowns: "none known".to_string(),
+                    orchestration_context: Some(
+                        codex_protocol::protocol::DelegationOrchestrationContext {
+                            action_type: Some("review".to_string()),
+                            production_type: Some("ops".to_string()),
+                            campaign_id: Some("NERO".to_string()),
+                            phase_id: Some("12".to_string()),
+                            round_id: Some("r1".to_string()),
+                            step_id: Some("s2".to_string()),
+                            execution_lane: Some("analysis".to_string()),
+                        },
+                    ),
+                }),
+                agents_states: HashMap::from([(
+                    spawned_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::PendingInit,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let combined = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        combined.contains(
+            "Orchestration: action=review | production=ops | campaign=NERO | phase=12 | round=r1 | step=s2 | lane=analysis"
+        ),
+        "expected completed row to render orchestration context details, got {combined:?}"
+    );
+}
+
+#[tokio::test]
 async fn replayed_in_progress_spawn_item_renders_begin_row() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let sender_thread_id =
@@ -5323,6 +5407,7 @@ async fn replayed_in_progress_spawn_item_renders_begin_row() {
                 expected_output_shape: "Short assessment.".to_string(),
                 files_or_scope: "repo root".to_string(),
                 risks_or_unknowns: "none known".to_string(),
+                orchestration_context: None,
             }),
             agents_states: HashMap::new(),
         },
@@ -5403,6 +5488,7 @@ async fn replayed_spawn_begin_event_does_not_render_after_completed_spawn_item()
                 expected_output_shape: "Short findings note.".to_string(),
                 files_or_scope: "repo root".to_string(),
                 risks_or_unknowns: "none known".to_string(),
+                orchestration_context: None,
             }),
             agents_states: HashMap::from([(
                 spawned_thread_id.to_string(),

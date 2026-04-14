@@ -46,16 +46,15 @@ const APPLY_PATCH_LARK_GRAMMAR: &str = include_str!("tool_apply_patch.lark");
 
 fn file_paths_for_action(action: &ApplyPatchAction) -> Vec<AbsolutePathBuf> {
     let mut keys = Vec::new();
-    let cwd = action.cwd.as_path();
 
     for (path, change) in action.changes() {
-        if let Some(key) = to_abs_path(cwd, path) {
+        if let Some(key) = to_abs_path(path) {
             keys.push(key);
         }
 
         if let ApplyPatchFileChange::Update { move_path, .. } = change
             && let Some(dest) = move_path
-            && let Some(key) = to_abs_path(cwd, dest)
+            && let Some(key) = to_abs_path(dest)
         {
             keys.push(key);
         }
@@ -64,8 +63,12 @@ fn file_paths_for_action(action: &ApplyPatchAction) -> Vec<AbsolutePathBuf> {
     keys
 }
 
-fn to_abs_path(cwd: &Path, path: &Path) -> Option<AbsolutePathBuf> {
-    AbsolutePathBuf::resolve_path_against_base(path, cwd).ok()
+fn to_abs_path(path: &Path) -> Option<AbsolutePathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+
+    AbsolutePathBuf::from_absolute_path(path).ok()
 }
 
 fn write_permissions_for_paths(
@@ -119,7 +122,11 @@ async fn effective_patch_permissions(
     let effective_additional_permissions = apply_granted_turn_permissions(
         session,
         crate::sandboxing::SandboxPermissions::UseDefault,
-        write_permissions_for_paths(&file_paths, &file_system_sandbox_policy, turn.cwd.as_path()),
+        write_permissions_for_paths(
+            &file_paths,
+            &file_system_sandbox_policy,
+            action.cwd.as_path(),
+        ),
     )
     .await;
 

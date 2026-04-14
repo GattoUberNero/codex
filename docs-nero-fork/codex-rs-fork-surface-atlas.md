@@ -127,11 +127,13 @@ Companion doc:
 - Exact external outputs:
   - direct `EventMsg::Warning(WarningEvent { message })` for `visible_note`
   - `HookCompletedEvent` entries/meta shown in TUI for the after-agent reporting branch
-- Spawn-time `delegation_report` payloads can surface as a structured spawn diagnostic block in the
-  same collaboration transcript lane; they summarize task fit and readiness rather than adding a
-  new carrier. In live non-replay flows, spawn-end may still render `Delegation: not provided`
-  when delegation details were already rendered on spawn-begin (dedupe behavior), so this text is
-  not always equivalent to caller omission.
+- Spawn-time `delegation_report` payloads can appear as a structured spawn diagnostic block in the
+  same collaboration transcript lane; they summarize the handoff without adding a new carrier. The
+  full report record stays available on the protocol/UI path, while child prompt enrichment can use
+  a filtered projection or a router-generated bridge block depending on the active spawn profile.
+  In live non-replay flows, spawn-end may still render `Delegation: not provided` when delegation
+  details were already rendered on spawn-begin (dedupe behavior), so this text is not always
+  equivalent to caller omission.
 - Runtime state ownership:
   - Core owns composition and emission; TUI owns projection/render state
 - Native dependencies:
@@ -386,7 +388,7 @@ Companion doc:
     - required `task_name`
     - `message` or `items`
     - optional `agent_type`, `model`, `reasoning_effort`
-    - optional `delegation_report` with required fields:
+    - optional `delegation_report` with 9 required top-level fields when present:
       - `general_task_type`
       - `task_difficulty_1_10`
       - `brief_completeness_1_10`
@@ -396,6 +398,7 @@ Companion doc:
       - `expected_output_shape`
       - `files_or_scope`
       - `risks_or_unknowns`
+    - optional nested `delegation_report.orchestration_context`
   - `send_message` and `assign_task` are the current MultiAgentV2 text-only message tools:
     - `target`
     - `items`
@@ -410,6 +413,15 @@ Companion doc:
     - requests that include legacy `fork_context` or `context_inheritance` are rejected with a caller-facing error
     - requests that omit these fields are accepted; tool output reports `off/off`
     - event/item carriers currently emit `context_inheritance_requested: null` and `context_inheritance_effective: off`
+  - spawn delegation report handling is profile-driven:
+    - `optional_only_ui`: report stays optional and render-only
+    - `all_on`: report required at ingress, filtered child-context forward enabled
+    - `all_on_with_orchestration`: same as `all_on`, plus `orchestration_context` forward
+    - `all_on_full`: same as `all_on_with_orchestration`, plus `why_this_agent` forward
+    - `orchestration_router_block`: report required, `orchestration_context` required, child prompt gets router-generated block instead of direct JSON forward
+  - current validation is structural, not a semantic spawn-readiness gate:
+    - base report fields must satisfy non-empty / bounded-number / positive-duration rules
+    - `orchestration_context`, when present, must satisfy its per-field string/pattern rules
 - Exact external outputs:
   - `spawn_agent` output echoes:
     - `task_name` as the current canonical return field
@@ -427,6 +439,9 @@ Companion doc:
     - `model`, `reasoningEffort` (compat lane)
     - `effectiveModel`, `effectiveReasoningEffort` (explicit lane)
     - context inheritance fields + telemetry + delegation report
+  - child prompt enrichment is separate from protocol/UI storage:
+    - protocol/UI keep the full report record
+    - prompt injection uses either a filtered projection or a router-generated block, depending on profile
 - Router seam (live vs replay):
   - Live path:
     - core emits `EventMsg::CollabAgent*`
@@ -520,9 +535,16 @@ These are diagnostic keys carried in hook summary meta, not typed public RPC sch
   - `send_input` is the legacy agent-id path and accepts `message` or `items`
   - `send_message` and `assign_task` share the same text-only input shape in MultiAgentV2; `assign_task` triggers a turn, `send_message` only queues
   - `close_agent` and `send_message` / `assign_task` resolve agent ids or canonical `task_name` values in MultiAgentV2
-  - optional `delegation_report` input has a strict 9-field shape, with 1-10 bounds on the three score fields and `expected_duration_minutes > 0`
+  - optional `delegation_report` input has 9 required top-level fields when present, with 1-10 bounds on the three score fields and `expected_duration_minutes > 0`
+  - optional nested `orchestration_context` is validated only when present, with hard per-field
+    string/pattern rules
+  - whether the whole report is optional or required at spawn ingress is controlled by `spawn_delegation_report_profile`
   - spawn output still includes `delegation_report`, with `null` when not provided
   - `fork_context` / `context_inheritance` are rejected at handler level
+  - child prompt enrichment is profile-dependent:
+    - default `optional_only_ui` keeps the report out of child prompt context
+    - richer profiles forward a filtered projection
+    - `orchestration_router_block` uses a current-stage bridge helper to generate the injected block and requires `orchestration_context`
   - request/response shape highlights:
     - `send_input` / `send_message` / `assign_task`: return `submission_id`
     - `close_agent`: `target` -> `previous_status`
@@ -651,9 +673,10 @@ This atlas maps `codex-rs` only. The systems below are external and included onl
   - consumes app-server RPC and protocol surfaces exposed by `codex-rs`
   - does not redefine `codex-rs` internal capability ownership
 
-## Multi-agent Coverage Checklist
+## Multi-agent Coverage Map
 
-Goal: verify the delegation seam remains deterministic across policy, wire contracts, replay, and UI projection.
+Goal: map current coverage for policy, wire contracts, replay, and UI projection. This is a coverage
+map, not a semantic spawn-readiness gate.
 
 - Core handler policy and validation:
   - `codex-rs/core/src/tools/handlers/multi_agents_tests.rs`
@@ -686,9 +709,10 @@ Goal: verify the delegation seam remains deterministic across policy, wire contr
     - delegation report persistence and context-inheritance lines
   - `completed_spawn_item_falls_back_to_legacy_model_fields_when_effective_missing` is the explicit fallback caveat for completed spawn rows
 
-Current practical gap to watch:
+Current replay/bridge limitation to note:
 
 - there is now an app-server E2E parity anchor (`turn_start_spawn_agent_thread_read_replay_matches_live_item_v2`)
   proving live spawn item parity with replayed `thread/read` for the same turn when the thread is started with
   `persist_extended_history: true`; with default limited persistence, collab replay parity is not guaranteed.
 - full-chain parity still remains split across app-server + app-server-protocol + TUI fixtures (not a single cross-crate fixture).
+- `orchestration_router_block` remains current-stage bridge behavior rather than a final native campaign lane.

@@ -91,6 +91,7 @@ fn parse_tool_input_schema_normalizes_integer_and_missing_array_items() {
                             enum_values: None,
                             description: None
                         }),
+                        min_items: None,
                         description: None,
                     },
                 ),
@@ -132,6 +133,42 @@ fn parse_tool_input_schema_sanitizes_additional_properties_schema() {
                     additional_properties: None,
                 },
             ))),
+        }
+    );
+}
+
+#[test]
+fn parse_tool_input_schema_preserves_array_min_items() {
+    let schema = parse_tool_input_schema(&serde_json::json!({
+        "type": "object",
+        "properties": {
+            "requests": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string" }
+            }
+        },
+        "required": ["requests"],
+        "additionalProperties": false
+    }))
+    .expect("parse schema");
+
+    assert_eq!(
+        schema,
+        JsonSchema::Object {
+            properties: BTreeMap::from([(
+                "requests".to_string(),
+                JsonSchema::Array {
+                    items: Box::new(JsonSchema::String {
+                        enum_values: None,
+                        description: None,
+                    }),
+                    min_items: Some(1),
+                    description: None,
+                },
+            )]),
+            required: Some(vec!["requests".to_string()]),
+            additional_properties: Some(false.into()),
         }
     );
 }

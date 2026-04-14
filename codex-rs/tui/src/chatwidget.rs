@@ -4194,6 +4194,67 @@ impl ChatWidget {
                 risks_or_unknowns.to_owned().into(),
             ]));
         }
+        if let Some(orchestration_context) = &delegation_report.orchestration_context {
+            let mut details = Vec::new();
+            if let Some(action_type) = orchestration_context
+                .action_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                details.push(format!("action={action_type}"));
+            }
+            if let Some(production_type) = orchestration_context
+                .production_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                details.push(format!("production={production_type}"));
+            }
+            if let Some(campaign_id) = orchestration_context
+                .campaign_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                details.push(format!("campaign={campaign_id}"));
+            }
+            if let Some(phase_id) = orchestration_context
+                .phase_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                details.push(format!("phase={phase_id}"));
+            }
+            if let Some(round_id) = orchestration_context
+                .round_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                details.push(format!("round={round_id}"));
+            }
+            if let Some(step_id) = orchestration_context
+                .step_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                details.push(format!("step={step_id}"));
+            }
+            if let Some(execution_lane) = orchestration_context
+                .execution_lane
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                details.push(format!("lane={execution_lane}"));
+            }
+            if !details.is_empty() {
+                delegation_report_lines.push(Line::from(vec![
+                    "Orchestration: ".dim(),
+                    details.join(" | ").into(),
+                ]));
+            }
+        }
 
         let initial_prefix = if lines.len() > 1 {
             "    ".into()

@@ -3458,6 +3458,25 @@ pub struct SpawnContextInheritanceTelemetry {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 #[ts(export_to = "v2/")]
+pub struct DelegationOrchestrationContext {
+    /// Optional orchestration action type label.
+    pub action_type: Option<String>,
+    /// Optional orchestration production type label.
+    pub production_type: Option<String>,
+    /// Optional campaign identifier (`^[A-Z]+$`).
+    pub campaign_id: Option<String>,
+    /// Optional phase identifier (`^\\d{2,}$`).
+    pub phase_id: Option<String>,
+    /// Optional round identifier (`^[A-Za-z0-9._:-]{1,64}$`).
+    pub round_id: Option<String>,
+    /// Optional step identifier (`^[A-Za-z0-9._:-]{1,64}$`).
+    pub step_id: Option<String>,
+    /// Optional execution-lane label.
+    pub execution_lane: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[ts(export_to = "v2/")]
 pub struct DelegationReport {
     /// High-level type of the delegated task.
     pub general_task_type: String,
@@ -3481,6 +3500,9 @@ pub struct DelegationReport {
     pub files_or_scope: String,
     /// Known risks or open questions.
     pub risks_or_unknowns: String,
+    /// Optional orchestration metadata carried with delegation telemetry.
+    #[serde(default)]
+    pub orchestration_context: Option<DelegationOrchestrationContext>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]

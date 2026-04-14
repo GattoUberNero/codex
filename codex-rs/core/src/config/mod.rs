@@ -165,17 +165,51 @@ pub enum SpawnDelegationReportProfile {
     /// - required_in_spawn: off
     #[default]
     OptionalOnlyUi,
-    /// Enable all delegation report channels.
+    /// Enable all delegation report channels with the default child-context subset.
     ///
     /// - forward_in_spawn: on
     /// - render_in_ui: on
     /// - required_in_spawn: on
     AllOn,
+    /// Like `all_on`, but also forward `orchestration_context` into child context.
+    ///
+    /// - forward_in_spawn: on
+    /// - render_in_ui: on
+    /// - required_in_spawn: on
+    /// - forward_orchestration_context: on
+    AllOnWithOrchestration,
+    /// Like `all_on_with_orchestration`, and also forward `why_this_agent`.
+    ///
+    /// - forward_in_spawn: on
+    /// - render_in_ui: on
+    /// - required_in_spawn: on
+    /// - forward_orchestration_context: on
+    /// - forward_why_this_agent: on
+    AllOnFull,
+    /// Require report + orchestration context, then inject router-generated block into child context.
+    ///
+    /// - forward_in_spawn: on (router-generated block only)
+    /// - render_in_ui: on
+    /// - required_in_spawn: on
+    /// - requires_orchestration_context: on
+    /// - forward_orchestration_context: off
+    /// - forward_why_this_agent: off
+    OrchestrationRouterBlock,
 }
 
 impl SpawnDelegationReportProfile {
+    pub fn as_config_key(self) -> &'static str {
+        match self {
+            Self::OptionalOnlyUi => "optional_only_ui",
+            Self::AllOn => "all_on",
+            Self::AllOnWithOrchestration => "all_on_with_orchestration",
+            Self::AllOnFull => "all_on_full",
+            Self::OrchestrationRouterBlock => "orchestration_router_block",
+        }
+    }
+
     pub fn forward_in_spawn(self) -> bool {
-        matches!(self, Self::AllOn)
+        !matches!(self, Self::OptionalOnlyUi)
     }
 
     pub fn render_in_ui(self) -> bool {
@@ -183,7 +217,23 @@ impl SpawnDelegationReportProfile {
     }
 
     pub fn required_in_spawn(self) -> bool {
-        matches!(self, Self::AllOn)
+        !matches!(self, Self::OptionalOnlyUi)
+    }
+
+    pub fn forward_why_this_agent(self) -> bool {
+        matches!(self, Self::AllOnFull)
+    }
+
+    pub fn forward_orchestration_context(self) -> bool {
+        matches!(self, Self::AllOnWithOrchestration | Self::AllOnFull)
+    }
+
+    pub fn requires_orchestration_context(self) -> bool {
+        matches!(self, Self::OrchestrationRouterBlock)
+    }
+
+    pub fn forward_via_orchestration_router(self) -> bool {
+        matches!(self, Self::OrchestrationRouterBlock)
     }
 }
 
@@ -2120,7 +2170,10 @@ pub struct ConfigToml {
     /// Spawn delegation report policy profile.
     ///
     /// - `optional_only_ui`: render only, no forwarding to child prompt context, no ingress requirement.
-    /// - `all_on`: render + forward + require report object.
+    /// - `all_on`: render + forward + require report object (forward excludes `why_this_agent` and `orchestration_context`).
+    /// - `all_on_with_orchestration`: like `all_on`, but also forwards `orchestration_context`.
+    /// - `all_on_full`: like `all_on_with_orchestration`, and also forwards `why_this_agent`.
+    /// - `orchestration_router_block`: require `delegation_report.orchestration_context` and inject router-generated block (instead of direct report JSON forward).
     pub spawn_delegation_report_profile: Option<SpawnDelegationReportProfile>,
 
     /// Settings that govern if and what will be written to `~/.codex/history.jsonl`.

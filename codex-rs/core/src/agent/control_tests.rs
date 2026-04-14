@@ -2737,14 +2737,14 @@ fn sanitize_spawn_delegation_context_for_summary_preserves_plain_content() {
 }
 
 #[test]
-fn sanitize_spawn_delegation_context_for_summary_trims_whitespace() {
+fn sanitize_spawn_delegation_context_for_summary_preserves_whitespace() {
     let raw = "  inspect this repo  ";
     let sanitized = sanitize_spawn_delegation_context_for_summary(raw);
-    assert_eq!(sanitized, "inspect this repo");
+    assert_eq!(sanitized, raw);
 }
 
 #[test]
-fn sanitize_spawn_delegation_context_for_summary_trims_whitespace_while_stripping_block() {
+fn sanitize_spawn_delegation_context_for_summary_preserves_whitespace_while_stripping_block() {
     let block_body = r#"{"task":"review"}"#;
     let raw = format!(
         "  inspect this repo
@@ -2752,6 +2752,64 @@ fn sanitize_spawn_delegation_context_for_summary_trims_whitespace_while_strippin
 {block_body}
 {SPAWN_DELEGATION_CONTEXT_BLOCK_END_TAG}
   "
+    );
+    let sanitized = sanitize_spawn_delegation_context_for_summary(&raw);
+    assert_eq!(sanitized, "  inspect this repo\n  ");
+}
+
+#[test]
+fn sanitize_spawn_delegation_context_for_summary_collapses_bridge_newline() {
+    let block_body = r#"{"task":"review"}"#;
+    let raw = format!(
+        "inspect this repo
+{SPAWN_DELEGATION_CONTEXT_BLOCK_START_TAG}
+{block_body}
+{SPAWN_DELEGATION_CONTEXT_BLOCK_END_TAG}
+and report findings"
+    );
+    let sanitized = sanitize_spawn_delegation_context_for_summary(&raw);
+    assert_eq!(sanitized, "inspect this repo\nand report findings");
+}
+
+#[test]
+fn sanitize_spawn_delegation_context_for_summary_preserves_trailing_newline_after_suffix() {
+    let block_body = r#"{"task":"review"}"#;
+    let raw = format!(
+        "inspect this repo
+{SPAWN_DELEGATION_CONTEXT_BLOCK_START_TAG}
+{block_body}
+{SPAWN_DELEGATION_CONTEXT_BLOCK_END_TAG}
+and report findings
+"
+    );
+    let sanitized = sanitize_spawn_delegation_context_for_summary(&raw);
+    assert_eq!(sanitized, "inspect this repo\nand report findings\n");
+}
+
+#[test]
+fn sanitize_spawn_delegation_context_for_summary_strips_double_newline_before_terminal_block() {
+    let block_body = r#"{"task":"review"}"#;
+    let raw = format!(
+        "inspect this repo
+
+{SPAWN_DELEGATION_CONTEXT_BLOCK_START_TAG}
+{block_body}
+{SPAWN_DELEGATION_CONTEXT_BLOCK_END_TAG}"
+    );
+    let sanitized = sanitize_spawn_delegation_context_for_summary(&raw);
+    assert_eq!(sanitized, "inspect this repo");
+}
+
+#[test]
+fn sanitize_spawn_delegation_context_for_summary_strips_triple_newline_before_terminal_block() {
+    let block_body = r#"{"task":"review"}"#;
+    let raw = format!(
+        "inspect this repo
+
+
+{SPAWN_DELEGATION_CONTEXT_BLOCK_START_TAG}
+{block_body}
+{SPAWN_DELEGATION_CONTEXT_BLOCK_END_TAG}"
     );
     let sanitized = sanitize_spawn_delegation_context_for_summary(&raw);
     assert_eq!(sanitized, "inspect this repo");

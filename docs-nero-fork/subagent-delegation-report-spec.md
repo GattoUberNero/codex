@@ -1,6 +1,6 @@
 # Delegation Report for Spawned Subagents
 
-Status: draft for architecture review
+Status: draft under review
 
 Scope:
 
@@ -15,12 +15,12 @@ Scope:
 `delegation_report` to maly, strukturalny raport tworzony przez glowny agent przed spawnem
 subagenta.
 
-Raport odpowiada na jedno pytanie: czy zadanie jest juz gotowe do przekazania i co dokladnie ma
-zwrocic subagent.
+Raport odpowiada na dwa praktyczne pytania: jak delegator ocenia gotowosc briefu oraz co dokladnie
+ma zwrocic subagent.
 
 To nie jest nowy scheduler, nowa lane telemetryczna ani zamiennik dla istniejacych pol spawn
-prompt/model/reasoning. To jest zwiezly quality check i fit summary, ktory ma uczynic delegacje
-jawnym i audytowalnym krokiem.
+prompt/model/reasoning. To jest zwiezly handoff summary, ktory ma uczynic delegacje jawnym i
+audytowalnym krokiem.
 
 ## Kontrakt
 
@@ -42,10 +42,19 @@ jawnym i audytowalnym krokiem.
 }
 ```
 
+Bazowy kontrakt raportu ma 9 wymaganych pol top-level. Dodatkowo moze wystapic opcjonalne
+`orchestration_context`; runtime akceptuje, waliduje, zachowuje i renderuje je zawsze, gdy jest
+obecne. Profil spawnu steruje tylko tym, czy ten blok trafi do promptu dziecka oraz czy
+`orchestration_router_block` uczyni go wymaganym.
+
 ### Output
 
-Outputem jest ten sam, znormalizowany obiekt, zachowany na sciezce spawn begin i wyrenderowany w
-TUI jako czesc istniejacego collab spawn bloku.
+Na sciezce protocol/UI zachowywany jest ten sam, znormalizowany rekord raportu, a TUI renderuje go
+jako czesc istniejacego collab spawn bloku.
+
+Do promptu dziecka nie musi trafic identyczny obiekt. Forward do subagenta jest profile-dependent:
+moze byc wylaczony, moze uzyc przefiltrowanej projekcji raportu albo moze zostac zastapiony przez
+router-generated bridge block.
 
 Kolejnosc pol musi byc stabilna i zgodna z requestem:
 
@@ -59,20 +68,24 @@ Kolejnosc pol musi byc stabilna i zgodna z requestem:
 8. `files_or_scope`
 9. `risks_or_unknowns`
 
-Raport musi byc dostepny przed startem pracy subagenta, tak aby delegator mogl jeszcze poprawic
-brief, gdy koszt zmiany jest nadal niski.
+Jesli aktywny profil forwarduje kontekst delegacji, raport musi byc dostepny przed startem pracy
+subagenta, tak aby delegator mogl jeszcze poprawic brief, gdy koszt zmiany jest nadal niski.
 
 ## Walidacje
 
-### Wymagany ksztalt
+### Wymagany ksztalt runtime
 
-- Wszystkie pola sa wymagane, gdy `delegation_report` jest obecny.
+- 9 bazowych pol jest wymaganych, gdy `delegation_report` jest obecny.
 - `general_task_type`, `why_this_agent` i `expected_output_shape` nie moga byc pustymi stringami.
 - `files_or_scope` i `risks_or_unknowns` nie moga byc pustymi stringami.
 - Pola numeryczne musza byc integerami w zakresie `1..=10`.
 - `expected_duration_minutes` musi byc dodatnim integerem.
+- `orchestration_context`, jesli wystepuje, jest walidowany osobno jako opcjonalne rozszerzenie z
+  twardymi regułami per field.
+- Obecny runtime waliduje ksztalt i requiredness zgodnie z aktywnym profilem; nie wykonuje
+  semantycznej oceny, czy zadanie jest rzeczywiscie gotowe do spawnu.
 
-### Quality gate
+### Wskazowki gotowosci spawnu
 
 Zadanie samo w sobie musi byc pelne, jasne i samowystarczalne.
 
@@ -83,9 +96,10 @@ To znaczy:
 - scope jest wystarczajaco waski, aby jeden agent mogl go wziac na wlasnosc,
 - brief nie ukrywa kluczowych ograniczen w pobocznej historii rozmowy.
 
-Jesli `brief_completeness_1_10` albo `task_self_sufficiency_1_10` nie wskazuja na gotowe do
-startu zadanie, spawn nie jest gotowy. Zadanie trzeba dosycic albo rozbic przed spawnowaniem.
-Nie wolno maskowac slabego briefu ogolnym raportem.
+Niskie `brief_completeness_1_10` albo `task_self_sufficiency_1_10` powinny byc traktowane jako
+sygnal, ze brief warto dosycic albo rozbic przed spawnowaniem. To jest guidance dla delegatora, a
+nie osobny semantic gate wymuszany przez obecny runtime. Nie wolno maskowac slabego briefu ogolnym
+raportem.
 
 ### Semantyka pol
 
@@ -135,7 +149,7 @@ Suggested summary line:
 
 `Delegation: <general_task_type> | difficulty X/10 | brief Y/10 | self Z/10 | ~N min`
 
-## Minimal-Touch Plan
+## Current Implementation Shape
 
 1. Dodac `delegation_report` jako opcjonalne spawn metadata na istniejacej collab spawn begin path.
 2. Przepchnac je przez obecny thread-history bridge i TUI spawn summary bez tworzenia nowej
@@ -145,12 +159,13 @@ Suggested summary line:
    odtwarzania.
 5. Nie dotykac pozostalych reporting lanes.
 
-## Acceptance
+## Current Success Criteria
 
 Ta specyfikacja jest spelniona, gdy:
 
 - delegator moze opisac pelny handoff w jednym strukturalnym bloku,
-- subagent widzi dokladnie, co ma zrobic,
+- subagent widzi dokladnie, co ma zrobic, jesli aktywny profil forwarduje kontekst delegacji,
 - UI moze pokazac raport bez wymyslania nowej machinerii prezentacyjnej,
 - brak raportu nie zmienia istniejacego zachowania spawnu,
-- a zadania niskiej jakosci sa blokowane przed spawn, zamiast byc delegowane polowicznie.
+- a niskie score'y pozostaja czytelnym sygnalem dla delegatora, zamiast byc ukryte w historii
+  rozmowy.

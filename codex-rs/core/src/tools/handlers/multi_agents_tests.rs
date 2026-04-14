@@ -373,7 +373,16 @@ async fn spawn_agent_returns_agent_id_without_task_name() {
                     "why_this_agent": "This task is self-contained and needs a lightweight scan.",
                     "expected_output_shape": "A short summary with findings and next steps.",
                     "files_or_scope": "Repository root",
-                    "risks_or_unknowns": "May need a second pass if the repo layout is unexpected."
+                    "risks_or_unknowns": "May need a second pass if the repo layout is unexpected.",
+                    "orchestration_context": {
+                        "action_type": "implementation",
+                        "production_type": "main",
+                        "campaign_id": "NERO",
+                        "phase_id": "01",
+                        "round_id": "r1",
+                        "step_id": "s1",
+                        "execution_lane": "main"
+                    }
                 }
             })),
         ))
@@ -397,7 +406,16 @@ async fn spawn_agent_returns_agent_id_without_task_name() {
             "why_this_agent": "This task is self-contained and needs a lightweight scan.",
             "expected_output_shape": "A short summary with findings and next steps.",
             "files_or_scope": "Repository root",
-            "risks_or_unknowns": "May need a second pass if the repo layout is unexpected."
+            "risks_or_unknowns": "May need a second pass if the repo layout is unexpected.",
+            "orchestration_context": {
+                "action_type": "implementation",
+                "production_type": "main",
+                "campaign_id": "NERO",
+                "phase_id": "01",
+                "round_id": "r1",
+                "step_id": "s1",
+                "execution_lane": "main"
+            }
         })
     );
     assert_eq!(result["context_inheritance_requested"], "off");
@@ -482,6 +500,87 @@ async fn spawn_agent_injects_delegation_report_block_into_child_input_context() 
 }
 
 #[tokio::test]
+async fn spawn_agent_all_on_with_orchestration_forwards_orchestration_context() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let mut config = (*turn.config).clone();
+    config.spawn_delegation_report_profile = SpawnDelegationReportProfile::AllOnWithOrchestration;
+    turn.config = Arc::new(config);
+
+    let output = SpawnAgentHandler
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "delegation_report": {
+                    "general_task_type": "inspection",
+                    "task_difficulty_1_10": 4,
+                    "brief_completeness_1_10": 8,
+                    "task_self_sufficiency_1_10": 7,
+                    "expected_duration_minutes": 15,
+                    "why_this_agent": "This task is self-contained and needs a lightweight scan.",
+                    "expected_output_shape": "A short summary with findings and next steps.",
+                    "files_or_scope": "Repository root",
+                    "risks_or_unknowns": "May need a second pass if the repo layout is unexpected.",
+                    "orchestration_context": {
+                        "action_type": "review",
+                        "phase_id": "12",
+                        "execution_lane": "analysis"
+                    }
+                }
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed");
+    let (content, _) = expect_text_output(output);
+    let result: serde_json::Value =
+        serde_json::from_str(&content).expect("spawn result should parse");
+    let child_agent_id = parse_agent_id(
+        result["agent_id"]
+            .as_str()
+            .expect("spawn result should include agent_id"),
+    );
+
+    let delegation_context = manager
+        .captured_ops()
+        .iter()
+        .find_map(|(thread_id, op)| {
+            if *thread_id != child_agent_id {
+                return None;
+            }
+            let Op::UserInput { items, .. } = op else {
+                return None;
+            };
+            items.iter().find_map(|item| match item {
+                UserInput::Text { text, .. } if text.contains("<spawn_delegation_report_json>") => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+        })
+        .expect("spawned child input should include delegation context block");
+
+    let delegation_context_json = extract_spawn_delegation_context_json(&delegation_context);
+    let delegation_context_object = delegation_context_json
+        .as_object()
+        .expect("delegation context block should be a json object");
+    assert_eq!(delegation_context_object.len(), 9);
+    assert_eq!(delegation_context_object.get("why_this_agent"), None);
+    assert_eq!(
+        delegation_context_object.get("orchestration_context"),
+        Some(&json!({
+            "action_type": "review",
+            "phase_id": "12",
+            "execution_lane": "analysis"
+        }))
+    );
+    assert!(delegation_context.contains("</spawn_delegation_report_json>"));
+}
+
+#[tokio::test]
 async fn spawn_agent_does_not_forward_delegation_report_in_optional_only_ui_profile() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -560,6 +659,44 @@ async fn spawn_agent_all_on_profile_requires_delegation_report() {
     assert_eq!(
         message,
         "spawn_agent requires delegation_report when spawn_delegation_report_profile is `all_on`"
+    );
+}
+
+#[tokio::test]
+async fn spawn_agent_orchestration_router_profile_requires_orchestration_context() {
+    let (session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config.spawn_delegation_report_profile = SpawnDelegationReportProfile::OrchestrationRouterBlock;
+    turn.config = Arc::new(config);
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "inspect this repo",
+            "delegation_report": {
+                "general_task_type": "inspection",
+                "task_difficulty_1_10": 4,
+                "brief_completeness_1_10": 8,
+                "task_self_sufficiency_1_10": 7,
+                "expected_duration_minutes": 15,
+                "why_this_agent": "This task is self-contained and needs a lightweight scan.",
+                "expected_output_shape": "A short summary with findings and next steps.",
+                "files_or_scope": "Repository root",
+                "risks_or_unknowns": "May need a second pass if the repo layout is unexpected."
+            }
+        })),
+    );
+    let Err(err) = SpawnAgentHandler.handle(invocation).await else {
+        panic!("missing orchestration_context should be rejected for orchestration_router_block");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("missing orchestration_context should surface as a model-facing error");
+    };
+    assert_eq!(
+        message,
+        "spawn_agent requires delegation_report.orchestration_context when spawn_delegation_report_profile is `orchestration_router_block`"
     );
 }
 
@@ -1585,7 +1722,8 @@ async fn multi_agent_v2_spawn_includes_agent_id_key_when_named() {
             "why_this_agent": "This task is self-contained and needs a lightweight scan.",
             "expected_output_shape": "A short summary with findings and next steps.",
             "files_or_scope": "Repository root",
-            "risks_or_unknowns": "May need a second pass if the repo layout is unexpected."
+            "risks_or_unknowns": "May need a second pass if the repo layout is unexpected.",
+            "orchestration_context": null
         })
     );
     assert_eq!(success, Some(true));
@@ -1675,7 +1813,105 @@ async fn multi_agent_v2_spawn_injects_delegation_report_block_into_inter_agent_c
         Some(&json!(4))
     );
     assert_eq!(delegation_context_object.get("why_this_agent"), None);
+    assert_eq!(delegation_context_object.get("orchestration_context"), None);
     assert!(delegation_context.contains("</spawn_delegation_report_json>"));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_all_on_full_forwards_why_and_orchestration_context() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config.spawn_delegation_report_profile = SpawnDelegationReportProfile::AllOnFull;
+    turn.config = Arc::new(config);
+
+    SpawnAgentHandlerV2
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": "test_process",
+                "delegation_report": {
+                    "general_task_type": "inspection",
+                    "task_difficulty_1_10": 4,
+                    "brief_completeness_1_10": 8,
+                    "task_self_sufficiency_1_10": 7,
+                    "expected_duration_minutes": 15,
+                    "why_this_agent": "This task is self-contained and needs a lightweight scan.",
+                    "expected_output_shape": "A short summary with findings and next steps.",
+                    "files_or_scope": "Repository root",
+                    "risks_or_unknowns": "May need a second pass if the repo layout is unexpected.",
+                    "orchestration_context": {
+                        "campaign_id": "NERO",
+                        "phase_id": "12",
+                        "round_id": "r1"
+                    }
+                }
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed");
+
+    let captured_ops = manager.captured_ops();
+    let child_thread_id = captured_ops
+        .iter()
+        .find_map(|(thread_id, op)| match op {
+            Op::InterAgentCommunication { communication }
+                if communication.trigger_turn
+                    && communication.recipient.as_str() == "/root/test_process" =>
+            {
+                Some(*thread_id)
+            }
+            _ => None,
+        })
+        .expect("spawned child thread should receive initial inter-agent operation");
+
+    let delegation_context = captured_ops
+        .iter()
+        .find_map(|(thread_id, op)| {
+            if *thread_id != child_thread_id {
+                return None;
+            }
+            let Op::InterAgentCommunication { communication } = op else {
+                return None;
+            };
+            communication
+                .trigger_turn
+                .then_some(communication.content.clone())
+        })
+        .expect("spawned child should receive trigger-turn inter-agent content");
+
+    let delegation_context_json = extract_spawn_delegation_context_json(&delegation_context);
+    let delegation_context_object = delegation_context_json
+        .as_object()
+        .expect("delegation context block should be a json object");
+    assert_eq!(delegation_context_object.len(), 10);
+    assert_eq!(
+        delegation_context_object.get("why_this_agent"),
+        Some(&json!(
+            "This task is self-contained and needs a lightweight scan."
+        ))
+    );
+    assert_eq!(
+        delegation_context_object.get("orchestration_context"),
+        Some(&json!({
+            "campaign_id": "NERO",
+            "phase_id": "12",
+            "round_id": "r1"
+        }))
+    );
 }
 
 #[tokio::test]
@@ -1815,6 +2051,56 @@ async fn multi_agent_v2_spawn_all_on_profile_requires_delegation_report() {
     assert_eq!(
         message,
         "spawn_agent requires delegation_report when spawn_delegation_report_profile is `all_on`"
+    );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_orchestration_router_profile_requires_orchestration_context() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config.spawn_delegation_report_profile = SpawnDelegationReportProfile::OrchestrationRouterBlock;
+    turn.config = Arc::new(config);
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "inspect this repo",
+            "task_name": "test_process",
+            "delegation_report": {
+                "general_task_type": "inspection",
+                "task_difficulty_1_10": 4,
+                "brief_completeness_1_10": 8,
+                "task_self_sufficiency_1_10": 7,
+                "expected_duration_minutes": 15,
+                "why_this_agent": "This task is self-contained and needs a lightweight scan.",
+                "expected_output_shape": "A short summary with findings and next steps.",
+                "files_or_scope": "Repository root",
+                "risks_or_unknowns": "May need a second pass if the repo layout is unexpected."
+            }
+        })),
+    );
+    let Err(err) = SpawnAgentHandlerV2.handle(invocation).await else {
+        panic!("missing orchestration_context should be rejected for orchestration_router_block");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("missing orchestration_context should surface as a model-facing error");
+    };
+    assert_eq!(
+        message,
+        "spawn_agent requires delegation_report.orchestration_context when spawn_delegation_report_profile is `orchestration_router_block`"
     );
 }
 
@@ -2003,6 +2289,147 @@ async fn multi_agent_v2_spawn_rejects_delegation_report_zero_duration() {
 }
 
 #[tokio::test]
+async fn multi_agent_v2_spawn_rejects_delegation_report_invalid_orchestration_campaign_id() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    turn.config = Arc::new(config);
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "inspect this repo",
+            "task_name": "test_process",
+            "delegation_report": {
+                "general_task_type": "inspection",
+                "task_difficulty_1_10": 4,
+                "brief_completeness_1_10": 8,
+                "task_self_sufficiency_1_10": 7,
+                "expected_duration_minutes": 15,
+                "why_this_agent": "This task is self-contained and needs a lightweight scan.",
+                "expected_output_shape": "A short summary with findings and next steps.",
+                "files_or_scope": "Repository root",
+                "risks_or_unknowns": "May need a second pass if the repo layout is unexpected.",
+                "orchestration_context": {
+                    "campaign_id": "nero"
+                }
+            }
+        })),
+    );
+    let Err(err) = SpawnAgentHandlerV2.handle(invocation).await else {
+        panic!("invalid orchestration campaign id should be rejected");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("delegation validation should surface as a model-facing error");
+    };
+    assert_eq!(
+        message,
+        "delegation_report.orchestration_context.campaign_id must match `^[A-Z]+$`"
+    );
+}
+
+#[tokio::test]
+async fn spawn_agent_rejects_delegation_report_empty_orchestration_campaign_id() {
+    let (session, turn) = make_session_and_context().await;
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "inspect this repo",
+            "delegation_report": {
+                "general_task_type": "inspection",
+                "task_difficulty_1_10": 4,
+                "brief_completeness_1_10": 8,
+                "task_self_sufficiency_1_10": 7,
+                "expected_duration_minutes": 15,
+                "why_this_agent": "This task is self-contained and needs a lightweight scan.",
+                "expected_output_shape": "A short summary with findings and next steps.",
+                "files_or_scope": "Repository root",
+                "risks_or_unknowns": "May need a second pass if the repo layout is unexpected.",
+                "orchestration_context": {
+                    "campaign_id": ""
+                }
+            }
+        })),
+    );
+    let Err(err) = SpawnAgentHandler.handle(invocation).await else {
+        panic!("empty orchestration campaign id should be rejected");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("delegation validation should surface as a model-facing error");
+    };
+    assert_eq!(
+        message,
+        "delegation_report.orchestration_context.campaign_id must match `^[A-Z]+$`"
+    );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_rejects_delegation_report_empty_orchestration_campaign_id() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    turn.config = Arc::new(config);
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "inspect this repo",
+            "task_name": "test_process",
+            "delegation_report": {
+                "general_task_type": "inspection",
+                "task_difficulty_1_10": 4,
+                "brief_completeness_1_10": 8,
+                "task_self_sufficiency_1_10": 7,
+                "expected_duration_minutes": 15,
+                "why_this_agent": "This task is self-contained and needs a lightweight scan.",
+                "expected_output_shape": "A short summary with findings and next steps.",
+                "files_or_scope": "Repository root",
+                "risks_or_unknowns": "May need a second pass if the repo layout is unexpected.",
+                "orchestration_context": {
+                    "campaign_id": ""
+                }
+            }
+        })),
+    );
+    let Err(err) = SpawnAgentHandlerV2.handle(invocation).await else {
+        panic!("empty orchestration campaign id should be rejected");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("delegation validation should surface as a model-facing error");
+    };
+    assert_eq!(
+        message,
+        "delegation_report.orchestration_context.campaign_id must match `^[A-Z]+$`"
+    );
+}
+
+#[tokio::test]
 async fn spawn_agent_reapplies_runtime_sandbox_after_role_config() {
     fn pick_allowed_sandbox_policy(
         constraint: &crate::config::Constrained<SandboxPolicy>,
@@ -2118,6 +2545,129 @@ async fn spawn_agent_rejects_when_depth_limit_exceeded() {
         function_payload(json!({"message": "hello"})),
     );
     let Err(err) = SpawnAgentHandler.handle(invocation).await else {
+        panic!("spawn should fail when depth limit exceeded");
+    };
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "Agent depth limit reached. Solve the task yourself.".to_string()
+        )
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn spawn_agent_depth_limit_is_checked_before_orchestration_router_call() {
+    let _python_guard = EnvVarGuard::set_os(
+        "NERO_RUNTIME_PYTHON_BIN",
+        OsStr::new("/definitely/not-python"),
+    );
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+
+    let mut config = (*turn.config).clone();
+    config.spawn_delegation_report_profile = SpawnDelegationReportProfile::OrchestrationRouterBlock;
+    turn.config = Arc::new(config);
+    let max_depth = turn.config.agent_max_depth;
+    turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: session.conversation_id,
+        depth: max_depth,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    });
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "hello",
+            "delegation_report": {
+                "general_task_type": "inspection",
+                "task_difficulty_1_10": 4,
+                "brief_completeness_1_10": 8,
+                "task_self_sufficiency_1_10": 7,
+                "expected_duration_minutes": 15,
+                "why_this_agent": "This task is self-contained and needs a lightweight scan.",
+                "expected_output_shape": "A short summary with findings and next steps.",
+                "files_or_scope": "Repository root",
+                "risks_or_unknowns": "May need a second pass if the repo layout is unexpected.",
+                "orchestration_context": {
+                    "campaign_id": "NERO"
+                }
+            }
+        })),
+    );
+    let Err(err) = SpawnAgentHandler.handle(invocation).await else {
+        panic!("spawn should fail when depth limit exceeded");
+    };
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "Agent depth limit reached. Solve the task yourself.".to_string()
+        )
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn multi_agent_v2_spawn_depth_limit_is_checked_before_orchestration_router_call() {
+    let _python_guard = EnvVarGuard::set_os(
+        "NERO_RUNTIME_PYTHON_BIN",
+        OsStr::new("/definitely/not-python"),
+    );
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config.spawn_delegation_report_profile = SpawnDelegationReportProfile::OrchestrationRouterBlock;
+    turn.config = Arc::new(config);
+    let max_depth = turn.config.agent_max_depth;
+    turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: session.conversation_id,
+        depth: max_depth,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    });
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "hello",
+            "task_name": "test_process",
+            "delegation_report": {
+                "general_task_type": "inspection",
+                "task_difficulty_1_10": 4,
+                "brief_completeness_1_10": 8,
+                "task_self_sufficiency_1_10": 7,
+                "expected_duration_minutes": 15,
+                "why_this_agent": "This task is self-contained and needs a lightweight scan.",
+                "expected_output_shape": "A short summary with findings and next steps.",
+                "files_or_scope": "Repository root",
+                "risks_or_unknowns": "May need a second pass if the repo layout is unexpected.",
+                "orchestration_context": {
+                    "campaign_id": "NERO"
+                }
+            }
+        })),
+    );
+    let Err(err) = SpawnAgentHandlerV2.handle(invocation).await else {
         panic!("spawn should fail when depth limit exceeded");
     };
     assert_eq!(

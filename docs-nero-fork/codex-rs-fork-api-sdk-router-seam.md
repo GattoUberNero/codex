@@ -42,7 +42,7 @@ Ingress:
 - v2 requires `task_name`.
 - `message` or `items`.
 - optional: `agent_type`, `model`, `reasoning_effort`, `delegation_report`.
-- `delegation_report` input object has 9 required fields:
+- `delegation_report`, when present, has 9 required top-level fields:
   - `general_task_type`
   - `task_difficulty_1_10` (1..10)
   - `brief_completeness_1_10` (1..10)
@@ -52,11 +52,17 @@ Ingress:
   - `expected_output_shape`
   - `files_or_scope`
   - `risks_or_unknowns`
+- optional nested extension: `orchestration_context`
 
 Ingress policy:
 
 - passing `fork_context` or `context_inheritance` is rejected (hard-disabled ingress).
 - accepted calls without those fields return inheritance output as `off/off`.
+- whether `delegation_report` is optional or required at ingress is controlled by
+  `spawn_delegation_report_profile`; default `optional_only_ui` keeps it optional, richer profiles
+  require it.
+- current runtime validation is structural: non-empty required strings, bounded numeric scores,
+  positive duration, and hard per-field validation for `orchestration_context` when present.
 
 Egress:
 
@@ -68,6 +74,17 @@ Egress:
   - `context_inheritance_requested`
   - `context_inheritance_effective`
   - `context_inheritance_telemetry`
+
+Spawn child-context projection:
+
+- the full report record is preserved on the protocol/UI path.
+- child prompt enrichment is profile-dependent:
+  - `optional_only_ui`: no child-context forward
+  - `all_on`: filtered report projection
+  - `all_on_with_orchestration`: filtered report projection + `orchestration_context`
+  - `all_on_full`: filtered report projection + `orchestration_context` + `why_this_agent`
+  - `orchestration_router_block`: router-generated block; requires `orchestration_context`
+- `orchestration_router_block` is current-stage bridge behavior, not a stable public lane.
 
 ### Message tools
 
@@ -83,7 +100,7 @@ Egress:
 - `close_agent`: output `previous_status`.
 - `list_agents`: output `agents[]` with `agent_name`, `agent_status`, `last_task_message`.
 
-### Known compatibility drift
+### Current schema/runtime mismatch
 
 - v2 schema for `wait_agent` declares `targets`; current v2 runtime still accepts timeout-only call (mailbox-activity mode).
 
@@ -192,9 +209,9 @@ Primary modules: `codex-rs/tui/src/chatwidget.rs`, `codex-rs/tui/src/multi_agent
 - `codex-rs/tui/src/multi_agents.rs` snapshots
 - validates requested/effective rendering, replay suppression, fallback semantics, delegation block rendering.
 
-## 10) Seam DoD (Definition of Done)
+## 10) Verification Checklist
 
-A seam change is considered complete only if all are true:
+If you change this seam, confirm the affected layers below still match current behavior:
 
 1. tool schema updated (`agent_tool.rs`) and docs updated (atlas + this supplement).
 2. protocol event compatibility tests cover new/legacy decode.

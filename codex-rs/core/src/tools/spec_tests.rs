@@ -20,6 +20,7 @@ use codex_tools::ResponsesApiTool;
 use codex_tools::ResponsesApiWebSearchFilters;
 use codex_tools::ResponsesApiWebSearchUserLocation;
 use codex_tools::SpawnAgentToolOptions;
+use codex_tools::SpawnAgentToolRequirements;
 use codex_tools::ViewImageToolOptions;
 use codex_tools::WaitAgentTimeoutOptions;
 use codex_tools::create_close_agent_tool_v1;
@@ -30,8 +31,8 @@ use codex_tools::create_request_user_input_tool;
 use codex_tools::create_resume_agent_tool;
 use codex_tools::create_send_input_tool_v1;
 use codex_tools::create_send_message_tool;
-use codex_tools::create_spawn_agent_tool_v1;
-use codex_tools::create_spawn_agent_tool_v2;
+use codex_tools::create_spawn_agent_tool_v1_with_requirements;
+use codex_tools::create_spawn_agent_tool_v2_with_requirements;
 use codex_tools::create_view_image_tool;
 use codex_tools::create_wait_agent_tool_v1;
 use codex_tools::create_wait_agent_tool_v2;
@@ -179,7 +180,6 @@ fn spawn_agent_tool_options(config: &ToolsConfig) -> SpawnAgentToolOptions<'_> {
     SpawnAgentToolOptions {
         available_models: &config.available_models,
         agent_type_description: crate::agent::role::spawn_tool_spec::build(&config.agent_roles),
-        require_delegation_report: config.spawn_delegation_report_required,
     }
 }
 
@@ -213,7 +213,11 @@ fn strip_descriptions_schema(schema: &mut JsonSchema) {
         } => {
             *description = None;
         }
-        JsonSchema::Array { items, description } => {
+        JsonSchema::Array {
+            items,
+            min_items: _,
+            description,
+        } => {
             strip_descriptions_schema(items);
             *description = None;
         }
@@ -370,14 +374,28 @@ fn test_full_toolset_specs_for_gpt5_codex_unified_exec_web_search() {
     }
     let collab_specs = if config.multi_agent_v2 {
         vec![
-            create_spawn_agent_tool_v2(spawn_agent_tool_options(&config)),
+            create_spawn_agent_tool_v2_with_requirements(
+                spawn_agent_tool_options(&config),
+                SpawnAgentToolRequirements {
+                    delegation_report_required: config.spawn_delegation_report_required,
+                    delegation_orchestration_context_required: config
+                        .spawn_delegation_orchestration_context_required,
+                },
+            ),
             create_send_message_tool(),
             create_wait_agent_tool_v2(wait_agent_timeout_options()),
             create_close_agent_tool_v2(),
         ]
     } else {
         vec![
-            create_spawn_agent_tool_v1(spawn_agent_tool_options(&config)),
+            create_spawn_agent_tool_v1_with_requirements(
+                spawn_agent_tool_options(&config),
+                SpawnAgentToolRequirements {
+                    delegation_report_required: config.spawn_delegation_report_required,
+                    delegation_orchestration_context_required: config
+                        .spawn_delegation_orchestration_context_required,
+                },
+            ),
             create_send_input_tool_v1(),
             create_wait_agent_tool_v1(wait_agent_timeout_options()),
             create_close_agent_tool_v1(),
@@ -690,6 +708,106 @@ fn test_build_specs_multi_agent_v1_can_require_spawn_delegation_report() {
         panic!("spawn_agent should use object params");
     };
     assert_eq!(required.as_slice(), ["delegation_report".to_string()]);
+}
+
+#[test]
+fn test_build_specs_multi_agent_v2_can_require_spawn_delegation_orchestration_context() {
+    let config = test_config();
+    let model_info = ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
+    let mut features = Features::with_defaults();
+    features.enable(Feature::Collab);
+    features.enable(Feature::MultiAgentV2);
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    })
+    .with_spawn_delegation_orchestration_context_required(true);
+
+    let (tools, _) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*app_tools*/ None,
+        &[],
+    )
+    .build();
+    let spawn_agent = find_tool(&tools, "spawn_agent");
+    let ToolSpec::Function(ResponsesApiTool { parameters, .. }) = &spawn_agent.spec else {
+        panic!("spawn_agent should be a function tool");
+    };
+    let JsonSchema::Object {
+        properties,
+        required: Some(required),
+        ..
+    } = parameters
+    else {
+        panic!("spawn_agent should use object params");
+    };
+    assert_eq!(
+        required.as_slice(),
+        ["task_name".to_string(), "delegation_report".to_string()]
+    );
+    let Some(JsonSchema::Object {
+        required: Some(report_required),
+        ..
+    }) = properties.get("delegation_report")
+    else {
+        panic!("delegation_report should include nested required fields");
+    };
+    assert!(report_required.contains(&"orchestration_context".to_string()));
+}
+
+#[test]
+fn test_build_specs_multi_agent_v1_can_require_spawn_delegation_orchestration_context() {
+    let config = test_config();
+    let model_info = ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
+    let mut features = Features::with_defaults();
+    features.enable(Feature::Collab);
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    })
+    .with_spawn_delegation_orchestration_context_required(true);
+
+    let (tools, _) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*app_tools*/ None,
+        &[],
+    )
+    .build();
+    let spawn_agent = find_tool(&tools, "spawn_agent");
+    let ToolSpec::Function(ResponsesApiTool { parameters, .. }) = &spawn_agent.spec else {
+        panic!("spawn_agent should be a function tool");
+    };
+    let JsonSchema::Object {
+        properties,
+        required: Some(required),
+        ..
+    } = parameters
+    else {
+        panic!("spawn_agent should use object params");
+    };
+    assert_eq!(required.as_slice(), ["delegation_report".to_string()]);
+    let Some(JsonSchema::Object {
+        required: Some(report_required),
+        ..
+    }) = properties.get("delegation_report")
+    else {
+        panic!("delegation_report should include nested required fields");
+    };
+    assert!(report_required.contains(&"orchestration_context".to_string()));
 }
 
 #[test]
@@ -1177,6 +1295,61 @@ fn js_repl_enabled_adds_tools() {
     )
     .build();
     assert_contains_tool_names(&tools, &["js_repl", "js_repl_reset"]);
+}
+
+#[test]
+fn multi_file_reader_requires_feature_flag() {
+    let config = test_config();
+    let model_info = ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
+    let features = Features::with_defaults();
+
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+    let (tools, _) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*app_tools*/ None,
+        &[],
+    )
+    .build();
+
+    assert_lacks_tool_name(&tools, "multi_file_reader");
+}
+
+#[test]
+fn multi_file_reader_enabled_adds_tool() {
+    let config = test_config();
+    let model_info = ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
+    let mut features = Features::with_defaults();
+    features.enable(Feature::MultiFileReader);
+
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+    let (tools, _) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*app_tools*/ None,
+        &[],
+    )
+    .build();
+
+    assert_contains_tool_names(&tools, &["multi_file_reader"]);
 }
 
 #[test]
@@ -2821,6 +2994,7 @@ fn test_mcp_tool_array_without_items_gets_default_string_items() {
                             enum_values: None,
                             description: None
                         }),
+                        min_items: None,
                         description: None
                     }
                 )]),

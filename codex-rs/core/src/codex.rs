@@ -1696,6 +1696,11 @@ impl TurnContext {
         .with_agent_roles(config.agent_roles.clone())
         .with_spawn_delegation_report_required(
             config.spawn_delegation_report_profile.required_in_spawn(),
+        )
+        .with_spawn_delegation_orchestration_context_required(
+            config
+                .spawn_delegation_report_profile
+                .requires_orchestration_context(),
         );
 
         Self {
@@ -2277,6 +2282,11 @@ impl Session {
             per_turn_config
                 .spawn_delegation_report_profile
                 .required_in_spawn(),
+        )
+        .with_spawn_delegation_orchestration_context_required(
+            per_turn_config
+                .spawn_delegation_report_profile
+                .requires_orchestration_context(),
         );
 
         let cwd = session_configuration.cwd.clone();
@@ -7879,6 +7889,11 @@ async fn spawn_review_thread(
     .with_agent_roles(config.agent_roles.clone())
     .with_spawn_delegation_report_required(
         config.spawn_delegation_report_profile.required_in_spawn(),
+    )
+    .with_spawn_delegation_orchestration_context_required(
+        config
+            .spawn_delegation_report_profile
+            .requires_orchestration_context(),
     );
 
     let review_prompt = resolved.prompt.clone();

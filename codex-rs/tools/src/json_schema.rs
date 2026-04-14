@@ -35,6 +35,9 @@ pub enum JsonSchema {
     Array {
         items: Box<JsonSchema>,
 
+        #[serde(rename = "minItems", skip_serializing_if = "Option::is_none")]
+        min_items: Option<u64>,
+
         #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
     },
@@ -189,6 +192,14 @@ fn sanitize_json_schema(value: &mut JsonValue) {
 
             if schema_type == "array" && !map.contains_key("items") {
                 map.insert("items".to_string(), json!({ "type": "string" }));
+            }
+            if let Some(min_items) = map.get("minItems").and_then(serde_json::Value::as_f64)
+                && min_items.fract() == 0.0
+                && min_items >= 0.0
+            {
+                map.insert("minItems".to_string(), JsonValue::from(min_items as u64));
+            } else {
+                map.remove("minItems");
             }
         }
         _ => {}

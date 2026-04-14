@@ -1,4 +1,4 @@
-use codex_utils_cargo_bin::repo_root;
+use codex_utils_cargo_bin::find_resource;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
 use std::fs;
@@ -9,19 +9,20 @@ use tempfile::tempdir;
 
 #[test]
 fn test_apply_patch_scenarios() -> anyhow::Result<()> {
-    let scenarios_dir = repo_root()?
-        .join("codex-rs")
-        .join("apply-patch")
-        .join("tests")
-        .join("fixtures")
-        .join("scenarios");
+    let scenarios_dir = find_resource!("tests/fixtures/scenarios")?;
+    let mut scenario_count = 0;
     for scenario in fs::read_dir(scenarios_dir)? {
         let scenario = scenario?;
         let path = scenario.path();
         if path.is_dir() {
+            scenario_count += 1;
             run_apply_patch_scenario(&path)?;
         }
     }
+    assert!(
+        scenario_count > 0,
+        "expected at least one apply_patch scenario"
+    );
     Ok(())
 }
 

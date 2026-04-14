@@ -2,6 +2,7 @@ use assert_cmd::Command;
 use pretty_assertions::assert_eq;
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
 use tempfile::tempdir;
 
 fn run_apply_patch_in_dir(dir: &Path, patch: &str) -> anyhow::Result<assert_cmd::assert::Assert> {
@@ -62,6 +63,43 @@ fn test_apply_patch_cli_applies_multiple_chunks() -> anyhow::Result<()> {
 }
 
 #[test]
+fn test_apply_patch_cli_applies_add_then_update_to_same_path() -> anyhow::Result<()> {
+    let tmp = tempdir()?;
+
+    run_apply_patch_in_dir(
+        tmp.path(),
+        "*** Begin Patch\n*** Add File: nested/generated.txt\n+line1\n*** Update File: nested/generated.txt\n@@\n-line1\n+line2\n*** End Patch",
+    )?
+    .success()
+    .stdout("Success. Updated the following files:\nA nested/generated.txt\n");
+
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("nested/generated.txt"))?,
+        "line2\n"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_apply_patch_cli_applies_multiple_updates_to_same_path() -> anyhow::Result<()> {
+    let tmp = tempdir()?;
+    let target_path = tmp.path().join("multi-update.txt");
+    fs::write(&target_path, "alpha\nbeta\ngamma\n")?;
+
+    run_apply_patch_in_dir(
+        tmp.path(),
+        "*** Begin Patch\n*** Update File: multi-update.txt\n@@\n-beta\n+delta\n*** Update File: multi-update.txt\n@@\n-gamma\n+omega\n*** End Patch",
+    )?
+    .success()
+    .stdout("Success. Updated the following files:\nM multi-update.txt\n");
+
+    assert_eq!(fs::read_to_string(&target_path)?, "alpha\ndelta\nomega\n");
+
+    Ok(())
+}
+
+#[test]
 fn test_apply_patch_cli_moves_file_to_new_directory() -> anyhow::Result<()> {
     let tmp = tempdir()?;
     let original_path = tmp.path().join("old/name.txt");
@@ -100,11 +138,19 @@ fn test_apply_patch_cli_reports_missing_context() -> anyhow::Result<()> {
     let target_path = tmp.path().join("modify.txt");
     fs::write(&target_path, "line1\nline2\n")?;
 
-    apply_patch_command(tmp.path())?
+    let output = apply_patch_command(tmp.path())?
         .arg("*** Begin Patch\n*** Update File: modify.txt\n@@\n-missing\n+changed\n*** End Patch")
-        .assert()
-        .failure()
-        .stderr("Failed to find expected lines in modify.txt:\nmissing\n");
+        .output()?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert_eq!(
+        stderr,
+        format!(
+            "Failed to find expected lines in modify.txt (cwd: {}, resolved: {}):\nmissing\n",
+            tmp.path().display(),
+            tmp.path().join("modify.txt").display()
+        )
+    );
     assert_eq!(fs::read_to_string(&target_path)?, "line1\nline2\n");
 
     Ok(())
@@ -114,11 +160,19 @@ fn test_apply_patch_cli_reports_missing_context() -> anyhow::Result<()> {
 fn test_apply_patch_cli_rejects_missing_file_delete() -> anyhow::Result<()> {
     let tmp = tempdir()?;
 
-    apply_patch_command(tmp.path())?
+    let output = apply_patch_command(tmp.path())?
         .arg("*** Begin Patch\n*** Delete File: missing.txt\n*** End Patch")
-        .assert()
-        .failure()
-        .stderr("Failed to delete file missing.txt\n");
+        .output()?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert_eq!(
+        stderr,
+        format!(
+            "Failed to delete file missing.txt (cwd: {}, resolved: {}): No such file or directory (os error 2)\n",
+            tmp.path().display(),
+            tmp.path().join("missing.txt").display()
+        )
+    );
 
     Ok(())
 }
@@ -140,13 +194,19 @@ fn test_apply_patch_cli_rejects_empty_update_hunk() -> anyhow::Result<()> {
 fn test_apply_patch_cli_requires_existing_file_for_update() -> anyhow::Result<()> {
     let tmp = tempdir()?;
 
-    apply_patch_command(tmp.path())?
+    let output = apply_patch_command(tmp.path())?
         .arg("*** Begin Patch\n*** Update File: missing.txt\n@@\n-old\n+new\n*** End Patch")
-        .assert()
-        .failure()
-        .stderr(
-            "Failed to read file to update missing.txt: No such file or directory (os error 2)\n",
-        );
+        .output()?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert_eq!(
+        stderr,
+        format!(
+            "Failed to read file to update missing.txt (cwd: {}, resolved: {}): No such file or directory (os error 2)\n",
+            tmp.path().display(),
+            tmp.path().join("missing.txt").display()
+        )
+    );
 
     Ok(())
 }
@@ -175,6 +235,41 @@ fn test_apply_patch_cli_move_overwrites_existing_destination() -> anyhow::Result
 }
 
 #[test]
+fn test_apply_patch_cli_move_to_same_normalized_path_updates_in_place() -> anyhow::Result<()> {
+    let tmp = tempdir()?;
+    let path = tmp.path().join("same.txt");
+    fs::write(&path, "before\n")?;
+
+    run_apply_patch_in_dir(
+        tmp.path(),
+        "*** Begin Patch\n*** Update File: same.txt\n*** Move to: ./same.txt\n@@\n-before\n+after\n*** End Patch",
+    )?
+    .success()
+    .stdout("Success. Updated the following files:\nM same.txt\n");
+
+    assert_eq!(fs::read_to_string(&path)?, "after\n");
+
+    Ok(())
+}
+#[test]
+fn test_apply_patch_cli_move_from_same_normalized_path_updates_in_place() -> anyhow::Result<()> {
+    let tmp = tempdir()?;
+    let path = tmp.path().join("same.txt");
+    fs::write(&path, "before\n")?;
+
+    run_apply_patch_in_dir(
+        tmp.path(),
+        "*** Begin Patch\n*** Update File: ./same.txt\n*** Move to: same.txt\n@@\n-before\n+after\n*** End Patch",
+    )?
+    .success()
+    .stdout("Success. Updated the following files:\nM ./same.txt\n");
+
+    assert_eq!(fs::read_to_string(&path)?, "after\n");
+
+    Ok(())
+}
+
+#[test]
 fn test_apply_patch_cli_add_overwrites_existing_file() -> anyhow::Result<()> {
     let tmp = tempdir()?;
     let path = tmp.path().join("duplicate.txt");
@@ -197,11 +292,19 @@ fn test_apply_patch_cli_delete_directory_fails() -> anyhow::Result<()> {
     let tmp = tempdir()?;
     fs::create_dir(tmp.path().join("dir"))?;
 
-    apply_patch_command(tmp.path())?
+    let output = apply_patch_command(tmp.path())?
         .arg("*** Begin Patch\n*** Delete File: dir\n*** End Patch")
-        .assert()
-        .failure()
-        .stderr("Failed to delete file dir\n");
+        .output()?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert_eq!(
+        stderr,
+        format!(
+            "Failed to delete file dir (cwd: {}, resolved: {}): target is not a file\n",
+            tmp.path().display(),
+            tmp.path().join("dir").display()
+        )
+    );
 
     Ok(())
 }
@@ -240,18 +343,113 @@ fn test_apply_patch_cli_updates_file_appends_trailing_newline() -> anyhow::Resul
 }
 
 #[test]
-fn test_apply_patch_cli_failure_after_partial_success_leaves_changes() -> anyhow::Result<()> {
+fn test_apply_patch_cli_failure_before_writes_leaves_filesystem_unchanged() -> anyhow::Result<()> {
     let tmp = tempdir()?;
     let new_file = tmp.path().join("created.txt");
 
-    apply_patch_command(tmp.path())?
+    let output = apply_patch_command(tmp.path())?
         .arg("*** Begin Patch\n*** Add File: created.txt\n+hello\n*** Update File: missing.txt\n@@\n-old\n+new\n*** End Patch")
-        .assert()
-        .failure()
-        .stdout("")
-        .stderr("Failed to read file to update missing.txt: No such file or directory (os error 2)\n");
+        .output()?;
+    assert!(!output.status.success());
+    assert_eq!(String::from_utf8(output.stdout)?, "");
+    let stderr = String::from_utf8(output.stderr)?;
+    assert_eq!(
+        stderr,
+        format!(
+            "Failed to read file to update missing.txt (cwd: {}, resolved: {}): No such file or directory (os error 2)\n",
+            tmp.path().display(),
+            tmp.path().join("missing.txt").display()
+        )
+    );
 
-    assert_eq!(fs::read_to_string(&new_file)?, "hello\n");
+    assert!(!new_file.exists());
+
+    Ok(())
+}
+
+#[test]
+fn test_apply_patch_cli_rolls_back_after_commit_failure() -> anyhow::Result<()> {
+    let tmp = tempdir()?;
+    let created_file = tmp.path().join("created.txt");
+    let blocking_file = tmp.path().join("blocking");
+    fs::write(&blocking_file, "not a directory\n")?;
+
+    let output = apply_patch_command(tmp.path())?
+        .arg("*** Begin Patch\n*** Add File: created.txt\n+hello\n*** Add File: blocking/child.txt\n+world\n*** End Patch")
+        .output()?;
+    assert!(!output.status.success());
+
+    assert!(!created_file.exists());
+    assert_eq!(fs::read_to_string(&blocking_file)?, "not a directory\n");
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn test_apply_patch_cli_deletes_dangling_symlink() -> anyhow::Result<()> {
+    let tmp = tempdir()?;
+    let link_path = tmp.path().join("dangling-link");
+    std::os::unix::fs::symlink("missing-target", &link_path)?;
+
+    run_apply_patch_in_dir(
+        tmp.path(),
+        "*** Begin Patch\n*** Delete File: dangling-link\n*** End Patch",
+    )?
+    .success()
+    .stdout("Success. Updated the following files:\nD dangling-link\n");
+
+    assert!(!link_path.exists());
+    assert!(std::fs::symlink_metadata(&link_path).is_err());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn test_apply_patch_cli_deletes_live_symlink_without_touching_target() -> anyhow::Result<()> {
+    let tmp = tempdir()?;
+    let target_path = tmp.path().join("target.txt");
+    fs::write(&target_path, "target contents\n")?;
+    let link_path = tmp.path().join("live-link");
+    std::os::unix::fs::symlink("target.txt", &link_path)?;
+
+    run_apply_patch_in_dir(
+        tmp.path(),
+        "*** Begin Patch\n*** Delete File: live-link\n*** End Patch",
+    )?
+    .success()
+    .stdout("Success. Updated the following files:\nD live-link\n");
+
+    assert_eq!(fs::read_to_string(&target_path)?, "target contents\n");
+    assert!(std::fs::symlink_metadata(&link_path).is_err());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn test_apply_patch_cli_rolls_back_symlink_target_after_later_failure() -> anyhow::Result<()> {
+    let tmp = tempdir()?;
+    let target_path = tmp.path().join("target.txt");
+    fs::write(&target_path, "original\n")?;
+    let link_path = tmp.path().join("live-link");
+    std::os::unix::fs::symlink("target.txt", &link_path)?;
+
+    let output = apply_patch_command(tmp.path())?
+        .arg(
+            "*** Begin Patch\n*** Update File: live-link\n@@\n-original\n+changed\n*** Delete File: missing.txt\n*** End Patch",
+        )
+        .output()?;
+    assert!(!output.status.success());
+
+    assert_eq!(fs::read_to_string(&target_path)?, "original\n");
+    assert!(
+        std::fs::symlink_metadata(&link_path)?
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read_link(&link_path)?, PathBuf::from("target.txt"));
 
     Ok(())
 }

@@ -34,7 +34,6 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
             model_preset("hidden", /*show_in_picker*/ false),
         ],
         agent_type_description: "role help".to_string(),
-        require_delegation_report: false,
     });
 
     let ToolSpec::Function(ResponsesApiTool {
@@ -90,6 +89,14 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         parameters_json["properties"]["delegation_report"]["additionalProperties"],
         json!(false)
     );
+    assert_eq!(
+        parameters_json["properties"]["delegation_report"]["properties"]["orchestration_context"]["type"],
+        json!("object")
+    );
+    assert_eq!(
+        parameters_json["properties"]["delegation_report"]["properties"]["orchestration_context"]["additionalProperties"],
+        json!(false)
+    );
     let output_schema = output_schema.expect("spawn_agent output schema");
     assert_eq!(
         output_schema["required"],
@@ -127,6 +134,20 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         json!(1)
     );
     assert_eq!(
+        output_schema["properties"]["delegation_report"]["properties"]["orchestration_context"]["type"],
+        json!(["object", "null"])
+    );
+    assert_eq!(
+        output_schema["properties"]["delegation_report"]["properties"]["orchestration_context"]["properties"]
+            ["action_type"]["type"],
+        json!(["string", "null"])
+    );
+    assert_eq!(
+        output_schema["properties"]["delegation_report"]["properties"]["orchestration_context"]["properties"]
+            ["campaign_id"]["type"],
+        json!(["string", "null"])
+    );
+    assert_eq!(
         output_schema["properties"]["context_inheritance_effective"]["enum"],
         json!([
             "off",
@@ -153,7 +174,6 @@ fn spawn_agent_tool_v1_omits_context_inheritance_inputs() {
     let tool = create_spawn_agent_tool_v1(SpawnAgentToolOptions {
         available_models: &[model_preset("visible", /*show_in_picker*/ true)],
         agent_type_description: "role help".to_string(),
-        require_delegation_report: false,
     });
 
     let ToolSpec::Function(ResponsesApiTool {
@@ -190,6 +210,10 @@ fn spawn_agent_tool_v1_omits_context_inheritance_inputs() {
             "risks_or_unknowns"
         ])
     );
+    assert_eq!(
+        parameters_json["properties"]["delegation_report"]["properties"]["orchestration_context"]["type"],
+        json!("object")
+    );
     let output_schema = output_schema.expect("spawn_agent output schema");
     assert_eq!(
         output_schema["required"],
@@ -211,11 +235,16 @@ fn spawn_agent_tool_v1_omits_context_inheritance_inputs() {
 #[test]
 fn spawn_agent_tool_v2_can_require_delegation_report() {
     let ToolSpec::Function(ResponsesApiTool { parameters, .. }) =
-        create_spawn_agent_tool_v2(SpawnAgentToolOptions {
-            available_models: &[model_preset("visible", /*show_in_picker*/ true)],
-            agent_type_description: "role help".to_string(),
-            require_delegation_report: true,
-        })
+        create_spawn_agent_tool_v2_with_requirements(
+            SpawnAgentToolOptions {
+                available_models: &[model_preset("visible", /*show_in_picker*/ true)],
+                agent_type_description: "role help".to_string(),
+            },
+            SpawnAgentToolRequirements {
+                delegation_report_required: true,
+                delegation_orchestration_context_required: false,
+            },
+        )
     else {
         panic!("spawn_agent should be a function tool");
     };
@@ -234,11 +263,16 @@ fn spawn_agent_tool_v2_can_require_delegation_report() {
 #[test]
 fn spawn_agent_tool_v1_can_require_delegation_report() {
     let ToolSpec::Function(ResponsesApiTool { parameters, .. }) =
-        create_spawn_agent_tool_v1(SpawnAgentToolOptions {
-            available_models: &[model_preset("visible", /*show_in_picker*/ true)],
-            agent_type_description: "role help".to_string(),
-            require_delegation_report: true,
-        })
+        create_spawn_agent_tool_v1_with_requirements(
+            SpawnAgentToolOptions {
+                available_models: &[model_preset("visible", /*show_in_picker*/ true)],
+                agent_type_description: "role help".to_string(),
+            },
+            SpawnAgentToolRequirements {
+                delegation_report_required: true,
+                delegation_orchestration_context_required: false,
+            },
+        )
     else {
         panic!("spawn_agent should be a function tool");
     };
@@ -246,6 +280,82 @@ fn spawn_agent_tool_v1_can_require_delegation_report() {
         panic!("spawn_agent should use object params");
     };
     assert_eq!(required, Some(vec!["delegation_report".to_string()]));
+}
+
+#[test]
+fn spawn_agent_tool_v2_can_require_delegation_orchestration_context() {
+    let ToolSpec::Function(ResponsesApiTool { parameters, .. }) =
+        create_spawn_agent_tool_v2_with_requirements(
+            SpawnAgentToolOptions {
+                available_models: &[model_preset("visible", /*show_in_picker*/ true)],
+                agent_type_description: "role help".to_string(),
+            },
+            SpawnAgentToolRequirements {
+                delegation_report_required: false,
+                delegation_orchestration_context_required: true,
+            },
+        )
+    else {
+        panic!("spawn_agent should be a function tool");
+    };
+    let JsonSchema::Object {
+        properties,
+        required,
+        ..
+    } = parameters
+    else {
+        panic!("spawn_agent should use object params");
+    };
+    assert_eq!(
+        required,
+        Some(vec![
+            "task_name".to_string(),
+            "delegation_report".to_string()
+        ])
+    );
+    let Some(JsonSchema::Object {
+        required: Some(report_required),
+        ..
+    }) = properties.get("delegation_report")
+    else {
+        panic!("delegation_report should include required fields");
+    };
+    assert!(report_required.contains(&"orchestration_context".to_string()));
+}
+
+#[test]
+fn spawn_agent_tool_v1_can_require_delegation_orchestration_context() {
+    let ToolSpec::Function(ResponsesApiTool { parameters, .. }) =
+        create_spawn_agent_tool_v1_with_requirements(
+            SpawnAgentToolOptions {
+                available_models: &[model_preset("visible", /*show_in_picker*/ true)],
+                agent_type_description: "role help".to_string(),
+            },
+            SpawnAgentToolRequirements {
+                delegation_report_required: false,
+                delegation_orchestration_context_required: true,
+            },
+        )
+    else {
+        panic!("spawn_agent should be a function tool");
+    };
+    let JsonSchema::Object {
+        properties,
+        required,
+        ..
+    } = parameters
+    else {
+        panic!("spawn_agent should use object params");
+    };
+    assert_eq!(required, Some(vec!["delegation_report".to_string()]));
+    let Some(JsonSchema::Object {
+        required: Some(report_required),
+        ..
+    }) = properties.get("delegation_report")
+    else {
+        panic!("delegation_report should include required fields");
+    };
+    assert!(report_required.contains(&"orchestration_context".to_string()));
 }
 
 #[test]

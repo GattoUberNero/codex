@@ -1273,14 +1273,28 @@ fn sanitize_spawn_delegation_context_for_summary(content: &str) -> String {
         let Some(end_rel) = remaining[block_start..].find(SPAWN_DELEGATION_CONTEXT_BLOCK_END_TAG)
         else {
             output.push_str(&remaining[start..]);
-            return output.trim().to_string();
+            return output;
         };
         let block_end = block_start + end_rel + SPAWN_DELEGATION_CONTEXT_BLOCK_END_TAG.len();
         remaining = &remaining[block_end..];
+        if remaining.is_empty() {
+            while output.ends_with('\n') {
+                output.pop();
+                if output.ends_with('\r') {
+                    output.pop();
+                }
+            }
+        } else if output.ends_with('\n') {
+            if let Some(rest) = remaining.strip_prefix("\r\n") {
+                remaining = rest;
+            } else if let Some(rest) = remaining.strip_prefix('\n') {
+                remaining = rest;
+            }
+        }
     }
 
     output.push_str(remaining);
-    output.trim().to_string()
+    output
 }
 
 fn thread_spawn_depth(session_source: &SessionSource) -> Option<i32> {

@@ -1,11 +1,12 @@
 load("//:defs.bzl", "codex_rust_crate")
 
-exports_files(["apply_patch_tool_instructions.md"])
+alias(
+    name = "apply_patch_tool_instructions.md",
+    actual = "//codex-rs/nero-apply-patch:apply_patch_tool_instructions.md",
+    visibility = ["//visibility:public"],
+)
 
 codex_rust_crate(
     name = "apply-patch",
     crate_name = "codex_apply_patch",
-    compile_data = [
-        "apply_patch_tool_instructions.md",
-    ],
 )

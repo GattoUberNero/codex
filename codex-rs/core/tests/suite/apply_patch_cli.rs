@@ -331,6 +331,34 @@ async fn apply_patch_cli_move_overwrites_existing_destination(
 #[test_case(ApplyPatchModelOutput::Shell)]
 #[test_case(ApplyPatchModelOutput::ShellViaHeredoc)]
 #[test_case(ApplyPatchModelOutput::ShellCommandViaHeredoc)]
+async fn apply_patch_cli_update_then_delete_existing_file_removes_file(
+    model_output: ApplyPatchModelOutput,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = apply_patch_harness().await?;
+
+    let target = harness.path("replace_then_delete.txt");
+    fs::write(&target, "before\n")?;
+
+    let patch = "*** Begin Patch\n*** Update File: replace_then_delete.txt\n@@\n-before\n+after\n*** Delete File: replace_then_delete.txt\n*** End Patch";
+    let call_id = "apply-update-delete";
+    mount_apply_patch(&harness, call_id, patch, "ok", model_output).await;
+
+    harness
+        .submit("update then delete a file via apply_patch")
+        .await?;
+
+    assert!(!target.exists());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[test_case(ApplyPatchModelOutput::Freeform)]
+#[test_case(ApplyPatchModelOutput::Function)]
+#[test_case(ApplyPatchModelOutput::Shell)]
+#[test_case(ApplyPatchModelOutput::ShellViaHeredoc)]
+#[test_case(ApplyPatchModelOutput::ShellCommandViaHeredoc)]
 async fn apply_patch_cli_move_without_content_change_has_no_turn_diff(
     model_output: ApplyPatchModelOutput,
 ) -> Result<()> {
@@ -541,13 +569,14 @@ async fn apply_patch_cli_delete_missing_file_reports_error(
         out.contains("apply_patch verification failed"),
         "expected verification failure message: {out}"
     );
-    assert!(
-        out.contains("Failed to read"),
-        "missing delete diagnostics should mention read failure: {out}"
+    let expected_fragment = format!(
+        "Failed to delete file missing.txt (cwd: {}, resolved: {}): No such file or directory (os error 2)",
+        harness.cwd().display(),
+        harness.path("missing.txt").display()
     );
     assert!(
-        out.contains("missing.txt"),
-        "missing delete diagnostics should surface target path: {out}"
+        out.contains(&expected_fragment),
+        "missing delete diagnostics should surface cwd and resolved path: {out}"
     );
     assert!(!harness.path("missing.txt").exists());
     Ok(())
@@ -600,8 +629,17 @@ async fn apply_patch_cli_delete_directory_reports_verification_error(
     harness.submit("delete a directory via apply_patch").await?;
 
     let out = harness.apply_patch_output(call_id, model_output).await;
+    let expected_fragment = format!(
+        "Failed to delete file dir (cwd: {}, resolved: {}): target is not a file",
+        harness.cwd().display(),
+        harness.path("dir").display()
+    );
     assert!(out.contains("apply_patch verification failed"));
-    assert!(out.contains("Failed to read"));
+    assert!(
+        out.contains(&expected_fragment),
+        "directory delete diagnostics should preserve cwd and resolved path: {out}"
+    );
+    assert!(harness.path("dir").is_dir());
     Ok(())
 }
 

@@ -40,9 +40,10 @@ impl ToolHandler for Handler {
         let spawn_delegation_profile = turn.config.spawn_delegation_report_profile;
         let delegation_report = args.delegation_report;
         if spawn_delegation_profile.required_in_spawn() && delegation_report.is_none() {
-            return Err(FunctionCallError::RespondToModel(
-                "spawn_agent requires delegation_report when spawn_delegation_report_profile is `all_on`".to_string(),
-            ));
+            return Err(FunctionCallError::RespondToModel(format!(
+                "spawn_agent requires delegation_report when spawn_delegation_report_profile is `{}`",
+                spawn_delegation_profile.as_config_key()
+            )));
         }
         if let Some(report) = delegation_report.as_ref() {
             validate_spawn_delegation_report(report)?;
@@ -67,11 +68,6 @@ impl ToolHandler for Handler {
         let requested_reasoning_effort = args.reasoning_effort.unwrap_or_default();
         let initial_input = parse_collab_input(args.message, args.items)?;
         let prompt = render_input_preview(&initial_input);
-        let input_items = inject_spawn_delegation_report_context(
-            initial_input,
-            delegation_report.as_ref(),
-            spawn_delegation_profile,
-        )?;
         let session_source = turn.session_source.clone();
         let child_depth = next_thread_spawn_depth(&session_source);
         let max_depth = turn.config.agent_max_depth;
@@ -80,6 +76,15 @@ impl ToolHandler for Handler {
                 "Agent depth limit reached. Solve the task yourself.".to_string(),
             ));
         }
+        let context_block = build_spawn_delegation_context_block(
+            &session,
+            &turn,
+            &prompt,
+            delegation_report.as_ref(),
+            spawn_delegation_profile,
+        )
+        .await?;
+        let input_items = inject_spawn_delegation_context_block(initial_input, context_block);
         session
             .send_event(
                 &turn,

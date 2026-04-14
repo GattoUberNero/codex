@@ -10,6 +10,8 @@ members = [
     "app-server-test-client",
     "debug-client",
     "apply-patch",
+    "nero-apply-patch",
+    "nero-file-reader",
     "arg0",
     "feedback",
     "features",
@@ -100,12 +102,14 @@ codex-ansi-escape = { path = "ansi-escape" }
 codex-analytics = { path = "analytics" }
 codex-api = { path = "codex-api" }
 codex-code-mode = { path = "code-mode" }
-codex-app-server = { path = "app-server" }
-codex-app-server-client = { path = "app-server-client" }
-codex-app-server-protocol = { path = "app-server-protocol" }
-codex-app-server-test-client = { path = "app-server-test-client" }
-codex-apply-patch = { path = "apply-patch" }
-codex-arg0 = { path = "arg0" }
+    codex-app-server = { path = "app-server" }
+    codex-app-server-client = { path = "app-server-client" }
+    codex-app-server-protocol = { path = "app-server-protocol" }
+    codex-app-server-test-client = { path = "app-server-test-client" }
+    codex-apply-patch = { path = "apply-patch" }
+    codex-nero-apply-patch = { path = "nero-apply-patch" }
+    codex-nero-file-reader = { path = "nero-file-reader" }
+    codex-arg0 = { path = "arg0" }
 codex-async-utils = { path = "async-utils" }
 codex-backend-client = { path = "backend-client" }
 codex-chatgpt = { path = "chatgpt" }

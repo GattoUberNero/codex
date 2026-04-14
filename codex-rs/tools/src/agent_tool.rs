@@ -10,7 +10,12 @@ use std::collections::BTreeMap;
 pub struct SpawnAgentToolOptions<'a> {
     pub available_models: &'a [ModelPreset],
     pub agent_type_description: String,
-    pub require_delegation_report: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SpawnAgentToolRequirements {
+    pub delegation_report_required: bool,
+    pub delegation_orchestration_context_required: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,10 +26,22 @@ pub struct WaitAgentTimeoutOptions {
 }
 
 pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions<'_>) -> ToolSpec {
+    create_spawn_agent_tool_v1_with_requirements(options, SpawnAgentToolRequirements::default())
+}
+
+pub fn create_spawn_agent_tool_v1_with_requirements(
+    options: SpawnAgentToolOptions<'_>,
+    requirements: SpawnAgentToolRequirements,
+) -> ToolSpec {
     let available_models_description = spawn_agent_models_description(options.available_models);
     let return_value_description =
         "Returns the spawned agent id plus the user-facing nickname when available.";
-    let properties = spawn_agent_common_properties(&options.agent_type_description);
+    let properties = spawn_agent_common_properties(
+        &options.agent_type_description,
+        requirements.delegation_orchestration_context_required,
+    );
+    let delegation_report_required = requirements.delegation_report_required
+        || requirements.delegation_orchestration_context_required;
 
     ToolSpec::Function(ResponsesApiTool {
         name: "spawn_agent".to_string(),
@@ -36,9 +53,7 @@ pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions<'_>) -> ToolSpe
         defer_loading: None,
         parameters: JsonSchema::Object {
             properties,
-            required: options
-                .require_delegation_report
-                .then(|| vec!["delegation_report".to_string()]),
+            required: delegation_report_required.then(|| vec!["delegation_report".to_string()]),
             additional_properties: Some(false.into()),
         },
         output_schema: Some(spawn_agent_output_schema_v1()),
@@ -46,9 +61,21 @@ pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions<'_>) -> ToolSpe
 }
 
 pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions<'_>) -> ToolSpec {
+    create_spawn_agent_tool_v2_with_requirements(options, SpawnAgentToolRequirements::default())
+}
+
+pub fn create_spawn_agent_tool_v2_with_requirements(
+    options: SpawnAgentToolOptions<'_>,
+    requirements: SpawnAgentToolRequirements,
+) -> ToolSpec {
     let available_models_description = spawn_agent_models_description(options.available_models);
     let return_value_description = "Returns the canonical task name for the spawned agent, plus the user-facing nickname when available.";
-    let mut properties = spawn_agent_common_properties(&options.agent_type_description);
+    let mut properties = spawn_agent_common_properties(
+        &options.agent_type_description,
+        requirements.delegation_orchestration_context_required,
+    );
+    let delegation_report_required = requirements.delegation_report_required
+        || requirements.delegation_orchestration_context_required;
     properties.insert(
         "task_name".to_string(),
         JsonSchema::String {
@@ -70,7 +97,7 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions<'_>) -> ToolSpe
         defer_loading: None,
         parameters: JsonSchema::Object {
             properties,
-            required: Some(if options.require_delegation_report {
+            required: Some(if delegation_report_required {
                 vec!["task_name".to_string(), "delegation_report".to_string()]
             } else {
                 vec!["task_name".to_string()]
@@ -649,23 +676,106 @@ fn delegation_report_properties() -> BTreeMap<String, JsonSchema> {
                 description: Some("Known risks or open questions (non-empty).".to_string()),
             },
         ),
+        (
+            "orchestration_context".to_string(),
+            JsonSchema::Object {
+                properties: BTreeMap::from([
+                    (
+                        "action_type".to_string(),
+                        JsonSchema::String {
+                            enum_values: None,
+                            description: Some(
+                                "Optional action type label for orchestration metadata (non-empty when provided)."
+                                    .to_string(),
+                            ),
+                        },
+                    ),
+                    (
+                        "production_type".to_string(),
+                        JsonSchema::String {
+                            enum_values: None,
+                            description: Some(
+                                "Optional production type label for orchestration metadata (non-empty when provided)."
+                                    .to_string(),
+                            ),
+                        },
+                    ),
+                    (
+                        "campaign_id".to_string(),
+                        JsonSchema::String {
+                            enum_values: None,
+                            description: Some(
+                                "Optional campaign id (`^[A-Z]+$`) for orchestration metadata."
+                                    .to_string(),
+                            ),
+                        },
+                    ),
+                    (
+                        "phase_id".to_string(),
+                        JsonSchema::String {
+                            enum_values: None,
+                            description: Some(
+                                "Optional phase id (`^\\\\d{2,}$`) for orchestration metadata."
+                                    .to_string(),
+                            ),
+                        },
+                    ),
+                    (
+                        "round_id".to_string(),
+                        JsonSchema::String {
+                            enum_values: None,
+                            description: Some(
+                                "Optional round id (`^[A-Za-z0-9._:-]{1,64}$`) for orchestration metadata."
+                                    .to_string(),
+                            ),
+                        },
+                    ),
+                    (
+                        "step_id".to_string(),
+                        JsonSchema::String {
+                            enum_values: None,
+                            description: Some(
+                                "Optional step id (`^[A-Za-z0-9._:-]{1,64}$`) for orchestration metadata."
+                                    .to_string(),
+                            ),
+                        },
+                    ),
+                    (
+                        "execution_lane".to_string(),
+                        JsonSchema::String {
+                            enum_values: None,
+                            description: Some(
+                                "Optional execution lane label for orchestration metadata (non-empty when provided)."
+                                    .to_string(),
+                            ),
+                        },
+                    ),
+                ]),
+                required: None,
+                additional_properties: Some(false.into()),
+            },
+        ),
     ])
 }
 
-fn delegation_report_input_schema() -> JsonSchema {
+fn delegation_report_input_schema(orchestration_context_required: bool) -> JsonSchema {
+    let mut required = vec![
+        "general_task_type".to_string(),
+        "task_difficulty_1_10".to_string(),
+        "brief_completeness_1_10".to_string(),
+        "task_self_sufficiency_1_10".to_string(),
+        "expected_duration_minutes".to_string(),
+        "why_this_agent".to_string(),
+        "expected_output_shape".to_string(),
+        "files_or_scope".to_string(),
+        "risks_or_unknowns".to_string(),
+    ];
+    if orchestration_context_required {
+        required.push("orchestration_context".to_string());
+    }
     JsonSchema::Object {
         properties: delegation_report_properties(),
-        required: Some(vec![
-            "general_task_type".to_string(),
-            "task_difficulty_1_10".to_string(),
-            "brief_completeness_1_10".to_string(),
-            "task_self_sufficiency_1_10".to_string(),
-            "expected_duration_minutes".to_string(),
-            "why_this_agent".to_string(),
-            "expected_output_shape".to_string(),
-            "files_or_scope".to_string(),
-            "risks_or_unknowns".to_string(),
-        ]),
+        required: Some(required),
         additional_properties: Some(false.into()),
     }
 }
@@ -717,6 +827,42 @@ fn delegation_report_output_schema() -> Value {
             "risks_or_unknowns": {
                 "type": "string",
                 "description": "Known risks or open questions."
+            },
+            "orchestration_context": {
+                "type": ["object", "null"],
+                "description": "Optional orchestration metadata block.",
+                "properties": {
+                    "action_type": {
+                        "type": ["string", "null"],
+                        "description": "Optional action type label."
+                    },
+                    "production_type": {
+                        "type": ["string", "null"],
+                        "description": "Optional production type label."
+                    },
+                    "campaign_id": {
+                        "type": ["string", "null"],
+                        "description": "Optional campaign id (`^[A-Z]+$`)."
+                    },
+                    "phase_id": {
+                        "type": ["string", "null"],
+                        "description": "Optional phase id (`^\\\\d{2,}$`)."
+                    },
+                    "round_id": {
+                        "type": ["string", "null"],
+                        "description": "Optional round id (`^[A-Za-z0-9._:-]{1,64}$`)."
+                    },
+                    "step_id": {
+                        "type": ["string", "null"],
+                        "description": "Optional step id (`^[A-Za-z0-9._:-]{1,64}$`)."
+                    },
+                    "execution_lane": {
+                        "type": ["string", "null"],
+                        "description": "Optional execution lane label."
+                    }
+                },
+                "required": [],
+                "additionalProperties": false
             }
         },
         "required": [
@@ -784,6 +930,7 @@ fn create_collab_input_items_schema() -> JsonSchema {
             required: None,
             additional_properties: Some(false.into()),
         }),
+        min_items: None,
         description: Some(
             "Structured input items. Use this to pass explicit mentions (for example app:// connector paths)."
                 .to_string(),
@@ -791,7 +938,10 @@ fn create_collab_input_items_schema() -> JsonSchema {
     }
 }
 
-fn spawn_agent_common_properties(agent_type_description: &str) -> BTreeMap<String, JsonSchema> {
+fn spawn_agent_common_properties(
+    agent_type_description: &str,
+    orchestration_context_required: bool,
+) -> BTreeMap<String, JsonSchema> {
     BTreeMap::from([
         (
             "message".to_string(),
@@ -833,7 +983,7 @@ fn spawn_agent_common_properties(agent_type_description: &str) -> BTreeMap<Strin
         ),
         (
             "delegation_report".to_string(),
-            delegation_report_input_schema(),
+            delegation_report_input_schema(orchestration_context_required),
         ),
     ])
 }
@@ -919,6 +1069,7 @@ fn wait_agent_tool_parameters_v1(options: WaitAgentTimeoutOptions) -> JsonSchema
                     enum_values: None,
                     description: None,
                 }),
+                min_items: None,
                 description: Some(
                     "Agent ids to wait on. Pass multiple ids to wait for whichever finishes first."
                         .to_string(),
@@ -950,6 +1101,7 @@ fn wait_agent_tool_parameters_v2(options: WaitAgentTimeoutOptions) -> JsonSchema
             JsonSchema::Array {
                 items: Box::new(JsonSchema::String {
                 enum_values: None, description: None }),
+                min_items: None,
                 description: Some(
                     "Agent ids or canonical task names to wait on. Pass multiple targets to wait for whichever finishes first."
                         .to_string(),

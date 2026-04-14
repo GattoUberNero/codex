@@ -67,6 +67,7 @@ pub static PLAN_TOOL: LazyLock<ToolSpec> = LazyLock::new(|| {
     );
 
     let plan_items_schema = JsonSchema::Array {
+        min_items: None,
         description: Some("The list of steps".to_string()),
         items: Box::new(JsonSchema::Object {
             properties: plan_item_props,

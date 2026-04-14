@@ -442,6 +442,9 @@
             "multi_agent_v2": {
               "type": "boolean"
             },
+            "multi_file_reader": {
+              "type": "boolean"
+            },
             "personality": {
               "type": "boolean"
             },
@@ -1675,9 +1678,30 @@
           "type": "string"
         },
         {
-          "description": "Enable all delegation report channels.\n\n- forward_in_spawn: on - render_in_ui: on - required_in_spawn: on",
+          "description": "Enable all delegation report channels with the default child-context subset.\n\n- forward_in_spawn: on - render_in_ui: on - required_in_spawn: on",
           "enum": [
             "all_on"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Like `all_on`, but also forward `orchestration_context` into child context.\n\n- forward_in_spawn: on - render_in_ui: on - required_in_spawn: on - forward_orchestration_context: on",
+          "enum": [
+            "all_on_with_orchestration"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Like `all_on_with_orchestration`, and also forward `why_this_agent`.\n\n- forward_in_spawn: on - render_in_ui: on - required_in_spawn: on - forward_orchestration_context: on - forward_why_this_agent: on",
+          "enum": [
+            "all_on_full"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Require report + orchestration context, then inject router-generated block into child context.\n\n- forward_in_spawn: on (router-generated block only) - render_in_ui: on - required_in_spawn: on - requires_orchestration_context: on - forward_orchestration_context: off - forward_why_this_agent: off",
+          "enum": [
+            "orchestration_router_block"
           ],
           "type": "string"
         }
@@ -2158,6 +2182,9 @@
         "multi_agent_v2": {
           "type": "boolean"
         },
+        "multi_file_reader": {
+          "type": "boolean"
+        },
         "personality": {
           "type": "boolean"
         },
@@ -2594,7 +2621,7 @@
           "$ref": "#/definitions/SpawnDelegationReportProfile"
         }
       ],
-      "description": "Spawn delegation report policy profile.\n\n- `optional_only_ui`: render only, no forwarding to child prompt context, no ingress requirement. - `all_on`: render + forward + require report object."
+      "description": "Spawn delegation report policy profile.\n\n- `optional_only_ui`: render only, no forwarding to child prompt context, no ingress requirement. - `all_on`: render + forward + require report object (forward excludes `why_this_agent` and `orchestration_context`). - `all_on_with_orchestration`: like `all_on`, but also forwards `orchestration_context`. - `all_on_full`: like `all_on_with_orchestration`, and also forwards `why_this_agent`. - `orchestration_router_block`: require `delegation_report.orchestration_context` and inject router-generated block (instead of direct report JSON forward)."
     },
     "sqlite_home": {
       "allOf": [

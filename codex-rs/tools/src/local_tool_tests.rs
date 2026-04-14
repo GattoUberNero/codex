@@ -38,6 +38,7 @@ Examples of valid command strings:
             JsonSchema::Array {
                 items: Box::new(JsonSchema::String {
                 enum_values: None, description: None }),
+                min_items: None,
                 description: Some("The command to execute".to_string()),
             },
         ),
@@ -83,6 +84,7 @@ Examples of valid command strings:
             JsonSchema::Array {
                 items: Box::new(JsonSchema::String {
                 enum_values: None, description: None }),
+                min_items: None,
                 description: Some(
                     r#"Only specify when sandbox_permissions is `require_escalated`.
                         Suggest a prefix command pattern that will allow you to fulfill similar requests from the user in the future.
@@ -280,6 +282,7 @@ fn shell_tool_with_request_permission_includes_additional_permissions() {
                     enum_values: None,
                     description: None,
                 }),
+                min_items: None,
                 description: Some("The command to execute".to_string()),
             },
         ),

@@ -599,6 +599,67 @@ fn delegation_report_lines(
             risks_or_unknowns.to_owned().into(),
         ]));
     }
+    if let Some(orchestration_context) = &report.orchestration_context {
+        let mut details = Vec::new();
+        if let Some(action_type) = orchestration_context
+            .action_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            details.push(format!("action={action_type}"));
+        }
+        if let Some(production_type) = orchestration_context
+            .production_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            details.push(format!("production={production_type}"));
+        }
+        if let Some(campaign_id) = orchestration_context
+            .campaign_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            details.push(format!("campaign={campaign_id}"));
+        }
+        if let Some(phase_id) = orchestration_context
+            .phase_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            details.push(format!("phase={phase_id}"));
+        }
+        if let Some(round_id) = orchestration_context
+            .round_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            details.push(format!("round={round_id}"));
+        }
+        if let Some(step_id) = orchestration_context
+            .step_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            details.push(format!("step={step_id}"));
+        }
+        if let Some(execution_lane) = orchestration_context
+            .execution_lane
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            details.push(format!("lane={execution_lane}"));
+        }
+        if !details.is_empty() {
+            lines.push(Line::from(vec![
+                "Orchestration: ".dim(),
+                details.join(" | ").into(),
+            ]));
+        }
+    }
 
     lines
 }
@@ -988,6 +1049,7 @@ mod tests {
                     expected_output_shape: "Patch + short note".to_string(),
                     files_or_scope: "codex-rs/tui/src/multi_agents.rs".to_string(),
                     risks_or_unknowns: "Snapshot text may change".to_string(),
+                    orchestration_context: None,
                 }),
                 status: AgentStatus::PendingInit,
             },
@@ -995,6 +1057,66 @@ mod tests {
         );
 
         assert_snapshot!("collab_spawn_end_replay", cell_to_text(&cell));
+    }
+
+    #[test]
+    fn collab_spawn_end_renders_orchestration_context_details() {
+        let sender_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000041")
+            .expect("valid sender thread id");
+        let spawned_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000042")
+            .expect("valid spawned thread id");
+
+        let cell = spawn_end(
+            CollabAgentSpawnEndEvent {
+                call_id: "call-spawn-orchestration".to_string(),
+                sender_thread_id,
+                new_thread_id: Some(spawned_thread_id),
+                new_agent_nickname: Some("Ampere".to_string()),
+                new_agent_role: Some("worker".to_string()),
+                prompt: "Inspect and summarize".to_string(),
+                requested_model: "gpt-5".to_string(),
+                requested_reasoning_effort: ReasoningEffortConfig::High,
+                model: "gpt-5-mini".to_string(),
+                reasoning_effort: ReasoningEffortConfig::Medium,
+                context_inheritance_requested: Some(SpawnContextInheritanceMode::Bounded),
+                context_inheritance_effective: Some(
+                    SpawnContextInheritanceEffectiveMode::BoundedTrimmed,
+                ),
+                context_inheritance_telemetry: None,
+                delegation_report: Some(codex_protocol::protocol::DelegationReport {
+                    general_task_type: "analysis".to_string(),
+                    task_difficulty_1_10: 5,
+                    brief_completeness_1_10: 8,
+                    task_self_sufficiency_1_10: 8,
+                    expected_duration_minutes: 12,
+                    why_this_agent: "Fast executor".to_string(),
+                    expected_output_shape: "Short summary".to_string(),
+                    files_or_scope: "repo root".to_string(),
+                    risks_or_unknowns: "none".to_string(),
+                    orchestration_context: Some(
+                        codex_protocol::protocol::DelegationOrchestrationContext {
+                            action_type: Some("review".to_string()),
+                            production_type: Some("ops".to_string()),
+                            campaign_id: Some("NERO".to_string()),
+                            phase_id: Some("12".to_string()),
+                            round_id: Some("r1".to_string()),
+                            step_id: Some("s2".to_string()),
+                            execution_lane: Some("analysis".to_string()),
+                        },
+                    ),
+                }),
+                status: AgentStatus::PendingInit,
+            },
+            /*requested_spawn_request*/ None,
+        );
+
+        let rendered = cell_to_text(&cell);
+        assert!(
+            rendered.contains(
+                "Orchestration: action=review | production=ops | campaign=NERO | phase=12 | round=r1 | step=s2 | lane=analysis"
+            ),
+            "expected orchestration context line in spawn-end rendering, got: {rendered}"
+        );
     }
 
     #[test]

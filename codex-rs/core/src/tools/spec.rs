@@ -41,6 +41,7 @@ use codex_tools::DiscoverableTool;
 use codex_tools::DiscoverableToolType;
 use codex_tools::ShellToolOptions;
 use codex_tools::SpawnAgentToolOptions;
+use codex_tools::SpawnAgentToolRequirements;
 use codex_tools::ToolSearchAppInfo;
 use codex_tools::ToolSuggestEntry;
 use codex_tools::ViewImageToolOptions;
@@ -57,6 +58,7 @@ use codex_tools::create_list_agents_tool;
 use codex_tools::create_list_dir_tool;
 use codex_tools::create_list_mcp_resource_templates_tool;
 use codex_tools::create_list_mcp_resources_tool;
+use codex_tools::create_multi_file_reader_tool;
 use codex_tools::create_read_mcp_resource_tool;
 use codex_tools::create_report_agent_job_result_tool;
 use codex_tools::create_request_permissions_tool;
@@ -66,8 +68,8 @@ use codex_tools::create_send_input_tool_v1;
 use codex_tools::create_send_message_tool;
 use codex_tools::create_shell_command_tool;
 use codex_tools::create_shell_tool;
-use codex_tools::create_spawn_agent_tool_v1;
-use codex_tools::create_spawn_agent_tool_v2;
+use codex_tools::create_spawn_agent_tool_v1_with_requirements;
+use codex_tools::create_spawn_agent_tool_v2_with_requirements;
 use codex_tools::create_spawn_agents_on_csv_tool;
 use codex_tools::create_test_sync_tool;
 use codex_tools::create_tool_search_tool;
@@ -168,10 +170,12 @@ pub(crate) struct ToolsConfig {
     pub multi_agent_v2: bool,
     pub request_user_input: bool,
     pub default_mode_request_user_input: bool,
+    pub multi_file_reader: bool,
     pub experimental_supported_tools: Vec<String>,
     pub agent_jobs_tools: bool,
     pub agent_jobs_worker_tools: bool,
     pub spawn_delegation_report_required: bool,
+    pub spawn_delegation_orchestration_context_required: bool,
 }
 
 pub(crate) struct ToolsConfigParams<'a> {
@@ -220,6 +224,7 @@ impl ToolsConfig {
         let include_request_user_input = !matches!(session_source, SessionSource::SubAgent(_));
         let include_default_mode_request_user_input =
             include_request_user_input && features.enabled(Feature::DefaultModeRequestUserInput);
+        let include_multi_file_reader = features.enabled(Feature::MultiFileReader);
         let include_search_tool =
             model_info.supports_search_tool && features.enabled(Feature::ToolSearch);
         let include_tool_suggest = features.enabled(Feature::ToolSuggest)
@@ -303,10 +308,12 @@ impl ToolsConfig {
             multi_agent_v2: include_multi_agent_v2,
             request_user_input: include_request_user_input,
             default_mode_request_user_input: include_default_mode_request_user_input,
+            multi_file_reader: include_multi_file_reader,
             experimental_supported_tools: model_info.experimental_supported_tools.clone(),
             agent_jobs_tools: include_agent_jobs,
             agent_jobs_worker_tools,
             spawn_delegation_report_required: false,
+            spawn_delegation_orchestration_context_required: false,
         }
     }
 
@@ -353,6 +360,15 @@ impl ToolsConfig {
         spawn_delegation_report_required: bool,
     ) -> Self {
         self.spawn_delegation_report_required = spawn_delegation_report_required;
+        self
+    }
+
+    pub fn with_spawn_delegation_orchestration_context_required(
+        mut self,
+        spawn_delegation_orchestration_context_required: bool,
+    ) -> Self {
+        self.spawn_delegation_orchestration_context_required =
+            spawn_delegation_orchestration_context_required;
         self
     }
 
@@ -425,6 +441,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
     use crate::tools::handlers::ListDirHandler;
     use crate::tools::handlers::McpHandler;
     use crate::tools::handlers::McpResourceHandler;
+    use crate::tools::handlers::MultiFileReaderHandler;
     use crate::tools::handlers::PlanHandler;
     use crate::tools::handlers::RequestPermissionsHandler;
     use crate::tools::handlers::RequestUserInputHandler;
@@ -708,6 +725,17 @@ pub(crate) fn build_specs_with_discoverable_tools(
         builder.register_handler("list_dir", list_dir_handler);
     }
 
+    if config.multi_file_reader {
+        let multi_file_reader_handler = Arc::new(MultiFileReaderHandler);
+        push_tool_spec(
+            &mut builder,
+            create_multi_file_reader_tool(),
+            /*supports_parallel_tool_calls*/ true,
+            config.code_mode_enabled,
+        );
+        builder.register_handler("multi_file_reader", multi_file_reader_handler);
+    }
+
     if config
         .experimental_supported_tools
         .contains(&"test_sync_tool".to_string())
@@ -787,13 +815,19 @@ pub(crate) fn build_specs_with_discoverable_tools(
         if config.multi_agent_v2 {
             push_tool_spec(
                 &mut builder,
-                create_spawn_agent_tool_v2(SpawnAgentToolOptions {
-                    available_models: &config.available_models,
-                    agent_type_description: crate::agent::role::spawn_tool_spec::build(
-                        &config.agent_roles,
-                    ),
-                    require_delegation_report: config.spawn_delegation_report_required,
-                }),
+                create_spawn_agent_tool_v2_with_requirements(
+                    SpawnAgentToolOptions {
+                        available_models: &config.available_models,
+                        agent_type_description: crate::agent::role::spawn_tool_spec::build(
+                            &config.agent_roles,
+                        ),
+                    },
+                    SpawnAgentToolRequirements {
+                        delegation_report_required: config.spawn_delegation_report_required,
+                        delegation_orchestration_context_required: config
+                            .spawn_delegation_orchestration_context_required,
+                    },
+                ),
                 /*supports_parallel_tool_calls*/ false,
                 config.code_mode_enabled,
             );
@@ -840,13 +874,19 @@ pub(crate) fn build_specs_with_discoverable_tools(
         } else {
             push_tool_spec(
                 &mut builder,
-                create_spawn_agent_tool_v1(SpawnAgentToolOptions {
-                    available_models: &config.available_models,
-                    agent_type_description: crate::agent::role::spawn_tool_spec::build(
-                        &config.agent_roles,
-                    ),
-                    require_delegation_report: config.spawn_delegation_report_required,
-                }),
+                create_spawn_agent_tool_v1_with_requirements(
+                    SpawnAgentToolOptions {
+                        available_models: &config.available_models,
+                        agent_type_description: crate::agent::role::spawn_tool_spec::build(
+                            &config.agent_roles,
+                        ),
+                    },
+                    SpawnAgentToolRequirements {
+                        delegation_report_required: config.spawn_delegation_report_required,
+                        delegation_orchestration_context_required: config
+                            .spawn_delegation_orchestration_context_required,
+                    },
+                ),
                 /*supports_parallel_tool_calls*/ false,
                 config.code_mode_enabled,
             );

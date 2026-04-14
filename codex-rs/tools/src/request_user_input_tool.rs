@@ -24,6 +24,7 @@ pub fn create_request_user_input_tool(description: String) -> ToolSpec {
     ]);
 
     let options_schema = JsonSchema::Array {
+        min_items: None,
         description: Some(
             "Provide 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with \"(Recommended)\". Do not include an \"Other\" option in this list; the client will add a free-form \"Other\" option automatically."
                 .to_string(),
@@ -65,6 +66,7 @@ pub fn create_request_user_input_tool(description: String) -> ToolSpec {
     ]);
 
     let questions_schema = JsonSchema::Array {
+        min_items: None,
         description: Some("Questions to show the user. Prefer 1 and do not exceed 3".to_string()),
         items: Box::new(JsonSchema::Object {
             properties: question_props,
