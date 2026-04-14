@@ -1,0 +1,11 @@
+---
+source: tui/src/multi_agents.rs
+expression: cell_to_text(&cell)
+---
+• Sent input to Ampere [worker]
+  └ Continue the fix and report completion.
+    Delegation: follow-up task | difficulty 3/10 | brief 9/10 | self 8/10 | ~5 min
+    Why this agent: Already owns the worker context
+    Deliverable: output: Short completion note | scope: worker thread
+    Risks: none known
+    Orchestration: action=follow_up | production=implementation | campaign=NERO | phase=12 | round=r2 | step=s4 | lane=worker

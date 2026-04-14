@@ -692,7 +692,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_requested: None,
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
-            delegation_report: None,
+            delegation_report: payload.delegation_report.clone(),
             agents_states: HashMap::new(),
         };
         self.upsert_item_in_current_turn(item);
@@ -724,7 +724,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_requested: None,
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
-            delegation_report: None,
+            delegation_report: payload.delegation_report.clone(),
             agents_states: [(receiver_id, received_status)].into_iter().collect(),
         });
     }
@@ -1236,14 +1236,14 @@ fn upsert_turn_item(items: &mut Vec<ThreadItem>, mut item: ThreadItem) {
         .iter_mut()
         .find(|existing_item| existing_item.id() == item.id())
     {
-        merge_collab_spawn_item(existing_item, &mut item);
+        merge_collab_tool_call_item(existing_item, &mut item);
         *existing_item = item;
         return;
     }
     items.push(item);
 }
 
-fn merge_collab_spawn_item(existing_item: &ThreadItem, item: &mut ThreadItem) {
+fn merge_collab_tool_call_item(existing_item: &ThreadItem, item: &mut ThreadItem) {
     let (
         ThreadItem::CollabAgentToolCall {
             tool: existing_tool,
@@ -1266,12 +1266,16 @@ fn merge_collab_spawn_item(existing_item: &ThreadItem, item: &mut ThreadItem) {
         return;
     };
 
-    if *existing_tool != CollabAgentTool::SpawnAgent || *tool != CollabAgentTool::SpawnAgent {
+    if existing_tool != tool {
         return;
     }
 
     if delegation_report.is_none() {
         *delegation_report = existing_delegation_report.clone();
+    }
+
+    if *tool != CollabAgentTool::SpawnAgent {
+        return;
     }
 
     if requested_model.is_none() {
@@ -3013,6 +3017,18 @@ mod tests {
             .expect("valid sender thread id");
         let receiver = ThreadId::try_from("00000000-0000-0000-0000-000000000002")
             .expect("valid receiver thread id");
+        let delegation_report = codex_protocol::protocol::DelegationReport {
+            general_task_type: "follow-up task".into(),
+            task_difficulty_1_10: 3,
+            brief_completeness_1_10: 8,
+            task_self_sufficiency_1_10: 8,
+            expected_duration_minutes: 5,
+            why_this_agent: "Already owns the context".into(),
+            expected_output_shape: "Short completion note".into(),
+            files_or_scope: "worker thread".into(),
+            risks_or_unknowns: "none known".into(),
+            orchestration_context: None,
+        };
         let events = vec![
             EventMsg::UserMessage(UserMessageEvent {
                 message: "redirect".into(),
@@ -3026,6 +3042,7 @@ mod tests {
                     sender_thread_id: sender,
                     receiver_thread_id: receiver,
                     prompt: "new task".into(),
+                    delegation_report: Some(delegation_report.clone()),
                 },
             ),
             EventMsg::CollabAgentInteractionEnd(
@@ -3036,6 +3053,7 @@ mod tests {
                     receiver_agent_nickname: None,
                     receiver_agent_role: None,
                     prompt: "new task".into(),
+                    delegation_report: None,
                     status: AgentStatus::Interrupted,
                 },
             ),
@@ -3066,7 +3084,7 @@ mod tests {
                 context_inheritance_requested: None,
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
-                delegation_report: None,
+                delegation_report: Some(delegation_report),
                 agents_states: [(
                     receiver.to_string(),
                     CollabAgentState {

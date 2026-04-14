@@ -280,6 +280,7 @@ pub(crate) fn interaction_end(ev: CollabAgentInteractionEndEvent) -> PlainHistor
         receiver_agent_nickname,
         receiver_agent_role,
         prompt,
+        delegation_report,
         status: _,
     } = ev;
 
@@ -297,6 +298,10 @@ pub(crate) fn interaction_end(ev: CollabAgentInteractionEndEvent) -> PlainHistor
     if let Some(line) = prompt_line(&prompt) {
         details.push(line);
     }
+    details.extend(delegation_report_lines(
+        delegation_report.as_ref(),
+        /*show_not_provided_when_missing*/ false,
+    ));
     collab_event(title, details)
 }
 
@@ -958,6 +963,7 @@ mod tests {
             receiver_agent_nickname: Some("Robie".to_string()),
             receiver_agent_role: Some("explorer".to_string()),
             prompt: "Please continue and return the answer only.".to_string(),
+            delegation_report: None,
             status: AgentStatus::Running,
         });
 
@@ -1116,6 +1122,51 @@ mod tests {
                 "Orchestration: action=review | production=ops | campaign=NERO | phase=12 | round=r1 | step=s2 | lane=analysis"
             ),
             "expected orchestration context line in spawn-end rendering, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn collab_interaction_end_renders_delegation_report_details() {
+        let sender_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000051")
+            .expect("valid sender thread id");
+        let receiver_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000052")
+            .expect("valid receiver thread id");
+
+        let cell = interaction_end(CollabAgentInteractionEndEvent {
+            call_id: "call-send-report".to_string(),
+            sender_thread_id,
+            receiver_thread_id,
+            receiver_agent_nickname: Some("Ampere".to_string()),
+            receiver_agent_role: Some("worker".to_string()),
+            prompt: "Continue the fix and report completion.".to_string(),
+            delegation_report: Some(codex_protocol::protocol::DelegationReport {
+                general_task_type: "follow-up task".to_string(),
+                task_difficulty_1_10: 3,
+                brief_completeness_1_10: 9,
+                task_self_sufficiency_1_10: 8,
+                expected_duration_minutes: 5,
+                why_this_agent: "Already owns the worker context".to_string(),
+                expected_output_shape: "Short completion note".to_string(),
+                files_or_scope: "worker thread".to_string(),
+                risks_or_unknowns: "none known".to_string(),
+                orchestration_context: Some(
+                    codex_protocol::protocol::DelegationOrchestrationContext {
+                        action_type: Some("follow_up".to_string()),
+                        production_type: Some("implementation".to_string()),
+                        campaign_id: Some("NERO".to_string()),
+                        phase_id: Some("12".to_string()),
+                        round_id: Some("r2".to_string()),
+                        step_id: Some("s4".to_string()),
+                        execution_lane: Some("worker".to_string()),
+                    },
+                ),
+            }),
+            status: AgentStatus::Running,
+        });
+
+        assert_snapshot!(
+            "collab_interaction_end_with_delegation_report",
+            cell_to_text(&cell)
         );
     }
 

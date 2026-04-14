@@ -1,5 +1,6 @@
 use super::*;
 use crate::agent::control::render_input_preview;
+use codex_protocol::protocol::DelegationReport;
 
 pub(crate) struct Handler;
 
@@ -24,16 +25,36 @@ impl ToolHandler for Handler {
             ..
         } = invocation;
         let arguments = function_arguments(payload)?;
-        let args: SendInputArgs = parse_arguments(&arguments)?;
-        let receiver_thread_id = parse_agent_id_target(&args.target)?;
-        let input_items = parse_collab_input(args.message, args.items)?;
+        let SendInputArgs {
+            target,
+            message,
+            items,
+            delegation_report,
+            interrupt,
+        } = parse_arguments(&arguments)?;
+        let receiver_thread_id = parse_agent_id_target(&target)?;
+        if let Some(report) = delegation_report.as_ref() {
+            validate_delegation_report(report)?;
+        }
+        let input_items = parse_collab_input(message, items)?;
         let prompt = render_input_preview(&input_items);
+        let delegation_report_for_ui = turn
+            .config
+            .spawn_delegation_report_profile
+            .render_in_ui()
+            .then(|| delegation_report.clone())
+            .flatten();
+        let context_block = build_follow_up_delegation_context_block(
+            delegation_report.as_ref(),
+            turn.config.spawn_delegation_report_profile,
+        )?;
+        let input_items = inject_spawn_delegation_context_block(input_items, context_block);
         let receiver_agent = session
             .services
             .agent_control
             .get_agent_metadata(receiver_thread_id)
             .unwrap_or_default();
-        if args.interrupt {
+        if interrupt {
             session
                 .services
                 .agent_control
@@ -49,6 +70,7 @@ impl ToolHandler for Handler {
                     sender_thread_id: session.conversation_id,
                     receiver_thread_id,
                     prompt: prompt.clone(),
+                    delegation_report: delegation_report_for_ui.clone(),
                 }
                 .into(),
             )
@@ -73,6 +95,7 @@ impl ToolHandler for Handler {
                     receiver_agent_nickname: receiver_agent.agent_nickname,
                     receiver_agent_role: receiver_agent.agent_role,
                     prompt,
+                    delegation_report: delegation_report_for_ui,
                     status,
                 }
                 .into(),
@@ -89,6 +112,7 @@ struct SendInputArgs {
     target: String,
     message: Option<String>,
     items: Option<Vec<UserInput>>,
+    delegation_report: Option<DelegationReport>,
     #[serde(default)]
     interrupt: bool,
 }

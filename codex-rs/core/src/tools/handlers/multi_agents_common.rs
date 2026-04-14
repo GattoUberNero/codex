@@ -223,7 +223,7 @@ pub(crate) fn parse_collab_input(
     }
 }
 
-pub(crate) fn validate_spawn_delegation_report(
+pub(crate) fn validate_delegation_report(
     report: &DelegationReport,
 ) -> Result<(), FunctionCallError> {
     for (field_name, value) in [
@@ -264,6 +264,12 @@ pub(crate) fn validate_spawn_delegation_report(
     }
 
     Ok(())
+}
+
+pub(crate) fn validate_spawn_delegation_report(
+    report: &DelegationReport,
+) -> Result<(), FunctionCallError> {
+    validate_delegation_report(report)
 }
 
 fn validate_delegation_orchestration_context(
@@ -760,6 +766,19 @@ pub(crate) async fn build_spawn_delegation_context_block(
     format_spawn_delegation_context_block(report, profile).map(Some)
 }
 
+pub(crate) fn build_follow_up_delegation_context_block(
+    delegation_report: Option<&DelegationReport>,
+    profile: SpawnDelegationReportProfile,
+) -> Result<Option<String>, FunctionCallError> {
+    if !profile.forward_in_spawn() {
+        return Ok(None);
+    }
+    let Some(report) = delegation_report else {
+        return Ok(None);
+    };
+    format_spawn_delegation_context_block(report, profile).map(Some)
+}
+
 pub(crate) fn inject_spawn_delegation_context_block(
     input: Op,
     context_block: Option<String>,
@@ -782,6 +801,16 @@ pub(crate) fn inject_spawn_delegation_context_block(
             }
         }
         other => other,
+    }
+}
+
+pub(crate) fn append_delegation_context_block_to_text(
+    content: String,
+    context_block: Option<String>,
+) -> String {
+    match context_block {
+        Some(context_block) => format!("{content}{context_block}"),
+        None => content,
     }
 }
 

@@ -1,11 +1,11 @@
-# Delegation Report for Spawned Subagents
+# Delegation Report for Spawned and Follow-up Subagent Calls
 
 Status: draft under review
 
 Scope:
 
 - `codex-rs/protocol`
-- `codex-rs/core` spawn handlers
+- `codex-rs/core` spawn and follow-up handlers
 - `codex-rs/app-server-protocol` thread-history bridge
 - `codex-rs/app-server` bespoke event mapping
 - `codex-rs/tui` collaboration transcript rendering
@@ -26,7 +26,8 @@ audytowalnym krokiem.
 
 ### Request
 
-`delegation_report` jest obiektem dolaczanym do requestu spawnu.
+`delegation_report` jest obiektem dolaczanym do requestu spawnu albo follow-up calla do istniejacego
+subagenta.
 
 ```json
 {
@@ -50,11 +51,15 @@ obecne. Profil spawnu steruje tylko tym, czy ten blok trafi do promptu dziecka o
 ### Output
 
 Na sciezce protocol/UI zachowywany jest ten sam, znormalizowany rekord raportu, a TUI renderuje go
-jako czesc istniejacego collab spawn bloku.
+jako czesc istniejacego collab bloku spawnu albo follow-up.
 
-Do promptu dziecka nie musi trafic identyczny obiekt. Forward do subagenta jest profile-dependent:
-moze byc wylaczony, moze uzyc przefiltrowanej projekcji raportu albo moze zostac zastapiony przez
-router-generated bridge block.
+Do promptu dziecka nie musi trafic identyczny obiekt. Forward do subagenta jest profile-dependent.
+W MVP:
+
+- spawn moze byc wylaczony, moze uzyc przefiltrowanej projekcji raportu albo moze zostac
+  zastapiony przez router-generated bridge block;
+- follow-up moze byc wylaczony albo moze uzyc tej samej przefiltrowanej projekcji raportu;
+- follow-up nie ma jeszcze osobnego router-generated bridge block ani osobnego profilu requiredness.
 
 Kolejnosc pol musi byc stabilna i zgodna z requestem:
 
@@ -151,13 +156,13 @@ Suggested summary line:
 
 ## Current Implementation Shape
 
-1. Dodac `delegation_report` jako opcjonalne spawn metadata na istniejacej collab spawn begin path.
-2. Przepchnac je przez obecny thread-history bridge i TUI spawn summary bez tworzenia nowej
-   rodziny eventow.
-3. Uzyc obecnego `spawn_begin` / `spawn_end` path i istniejacego layoutu detali.
-4. Zostawic shape end-eventu bez zmian, chyba ze replay bedzie potrzebowal opaque echo do
-   odtwarzania.
-5. Nie dotykac pozostalych reporting lanes.
+1. `spawn_agent` moze przyjac `delegation_report` jako opcjonalne metadata na istniejacej collab
+   spawn begin path.
+2. `send_input`, `send_message` i `assign_task` moga przyjac `delegation_report` jako opcjonalne
+   metadata na follow-up path.
+3. Replay/app-server/TUI zachowuja ten sam rekord raportu bez tworzenia nowej lane telemetrycznej.
+4. Spawn i follow-up uzywaja tej samej projekcji child-context block z tym samym tagged blockiem.
+5. Router-generated block pozostaje na razie tylko funkcja sciezki spawn.
 
 ## Current Success Criteria
 

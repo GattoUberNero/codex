@@ -4404,6 +4404,7 @@ impl ChatWidget {
                                 .as_ref()
                                 .and_then(|metadata| metadata.agent_role.clone()),
                             prompt: prompt.unwrap_or_default(),
+                            delegation_report,
                             status: receiver_thread_ids
                                 .iter()
                                 .find_map(|thread_id| agents_states.get(thread_id))

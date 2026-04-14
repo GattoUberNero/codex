@@ -129,6 +129,10 @@ pub fn create_send_input_tool_v1() -> ToolSpec {
         ),
         ("items".to_string(), create_collab_input_items_schema()),
         (
+            "delegation_report".to_string(),
+            delegation_report_input_schema(/*orchestration_context_required*/ false),
+        ),
+        (
             "interrupt".to_string(),
             JsonSchema::Boolean {
                 description: Some(
@@ -167,6 +171,10 @@ pub fn create_send_message_tool() -> ToolSpec {
         ),
         ("items".to_string(), create_collab_input_items_schema()),
         (
+            "delegation_report".to_string(),
+            delegation_report_input_schema(/*orchestration_context_required*/ false),
+        ),
+        (
             "interrupt".to_string(),
             JsonSchema::Boolean {
                 description: Some(
@@ -204,6 +212,10 @@ pub fn create_assign_task_tool() -> ToolSpec {
             },
         ),
         ("items".to_string(), create_collab_input_items_schema()),
+        (
+            "delegation_report".to_string(),
+            delegation_report_input_schema(/*orchestration_context_required*/ false),
+        ),
         (
             "interrupt".to_string(),
             JsonSchema::Boolean {

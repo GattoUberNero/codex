@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::agent::control::render_input_preview;
+use codex_protocol::protocol::DelegationReport;
 use codex_protocol::protocol::InterAgentCommunication;
 
 #[derive(Clone, Copy)]
@@ -42,6 +43,7 @@ impl MessageDeliveryMode {
 pub(crate) struct MessageToolArgs {
     pub(crate) target: String,
     pub(crate) items: Vec<UserInput>,
+    pub(crate) delegation_report: Option<DelegationReport>,
     #[serde(default)]
     pub(crate) interrupt: bool,
 }
@@ -105,8 +107,21 @@ pub(crate) async fn handle_message_tool(
     } = invocation;
     let arguments = function_arguments(payload)?;
     let args: MessageToolArgs = parse_arguments(&arguments)?;
+    if let Some(report) = args.delegation_report.as_ref() {
+        validate_delegation_report(report)?;
+    }
     let receiver_thread_id = resolve_agent_target(&session, &turn, &args.target).await?;
     let prompt = text_content(&args.items, mode)?;
+    let delegation_report_for_ui = turn
+        .config
+        .spawn_delegation_report_profile
+        .render_in_ui()
+        .then(|| args.delegation_report.clone())
+        .flatten();
+    let context_block = build_follow_up_delegation_context_block(
+        args.delegation_report.as_ref(),
+        turn.config.spawn_delegation_report_profile,
+    )?;
     let receiver_agent = session
         .services
         .agent_control
@@ -128,6 +143,7 @@ pub(crate) async fn handle_message_tool(
                 sender_thread_id: session.conversation_id,
                 receiver_thread_id,
                 prompt: prompt.clone(),
+                delegation_report: delegation_report_for_ui.clone(),
             }
             .into(),
         )
@@ -141,7 +157,7 @@ pub(crate) async fn handle_message_tool(
             .unwrap_or_else(AgentPath::root),
         receiver_agent_path,
         Vec::new(),
-        prompt.clone(),
+        append_delegation_context_block_to_text(prompt.clone(), context_block),
         /*trigger_turn*/ true,
     );
     let result = session
@@ -165,6 +181,7 @@ pub(crate) async fn handle_message_tool(
                 receiver_agent_nickname: receiver_agent.agent_nickname,
                 receiver_agent_role: receiver_agent.agent_role,
                 prompt,
+                delegation_report: delegation_report_for_ui,
                 status,
             }
             .into(),

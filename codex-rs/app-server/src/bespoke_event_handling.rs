@@ -1061,26 +1061,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .await;
         }
         EventMsg::CollabAgentInteractionBegin(begin_event) => {
-            let receiver_thread_ids = vec![begin_event.receiver_thread_id.to_string()];
-            let item = ThreadItem::CollabAgentToolCall {
-                id: begin_event.call_id,
-                tool: CollabAgentTool::SendInput,
-                status: V2CollabToolCallStatus::InProgress,
-                sender_thread_id: begin_event.sender_thread_id.to_string(),
-                receiver_thread_ids,
-                prompt: Some(begin_event.prompt),
-                requested_model: None,
-                requested_reasoning_effort: None,
-                model: None,
-                reasoning_effort: None,
-                effective_model: None,
-                effective_reasoning_effort: None,
-                context_inheritance_requested: None,
-                context_inheritance_effective: None,
-                context_inheritance_telemetry: None,
-                delegation_report: None,
-                agents_states: HashMap::new(),
-            };
+            let item = collab_interaction_begin_item(begin_event);
             let notification = ItemStartedNotification {
                 thread_id: conversation_id.to_string(),
                 turn_id: event_turn_id.clone(),
@@ -1091,32 +1072,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .await;
         }
         EventMsg::CollabAgentInteractionEnd(end_event) => {
-            let status = match &end_event.status {
-                codex_protocol::protocol::AgentStatus::Errored(_)
-                | codex_protocol::protocol::AgentStatus::NotFound => V2CollabToolCallStatus::Failed,
-                _ => V2CollabToolCallStatus::Completed,
-            };
-            let receiver_id = end_event.receiver_thread_id.to_string();
-            let received_status = V2CollabAgentStatus::from(end_event.status);
-            let item = ThreadItem::CollabAgentToolCall {
-                id: end_event.call_id,
-                tool: CollabAgentTool::SendInput,
-                status,
-                sender_thread_id: end_event.sender_thread_id.to_string(),
-                receiver_thread_ids: vec![receiver_id.clone()],
-                prompt: Some(end_event.prompt),
-                requested_model: None,
-                requested_reasoning_effort: None,
-                model: None,
-                reasoning_effort: None,
-                effective_model: None,
-                effective_reasoning_effort: None,
-                context_inheritance_requested: None,
-                context_inheritance_effective: None,
-                context_inheritance_telemetry: None,
-                delegation_report: None,
-                agents_states: [(receiver_id, received_status)].into_iter().collect(),
-            };
+            let item = collab_interaction_end_item(end_event);
             let notification = ItemCompletedNotification {
                 thread_id: conversation_id.to_string(),
                 turn_id: event_turn_id.clone(),
@@ -2859,6 +2815,61 @@ fn collab_spawn_end_item(
     }
 }
 
+fn collab_interaction_begin_item(
+    begin_event: codex_protocol::protocol::CollabAgentInteractionBeginEvent,
+) -> ThreadItem {
+    ThreadItem::CollabAgentToolCall {
+        id: begin_event.call_id,
+        tool: CollabAgentTool::SendInput,
+        status: V2CollabToolCallStatus::InProgress,
+        sender_thread_id: begin_event.sender_thread_id.to_string(),
+        receiver_thread_ids: vec![begin_event.receiver_thread_id.to_string()],
+        prompt: Some(begin_event.prompt),
+        requested_model: None,
+        requested_reasoning_effort: None,
+        model: None,
+        reasoning_effort: None,
+        effective_model: None,
+        effective_reasoning_effort: None,
+        context_inheritance_requested: None,
+        context_inheritance_effective: None,
+        context_inheritance_telemetry: None,
+        delegation_report: begin_event.delegation_report,
+        agents_states: HashMap::new(),
+    }
+}
+
+fn collab_interaction_end_item(
+    end_event: codex_protocol::protocol::CollabAgentInteractionEndEvent,
+) -> ThreadItem {
+    let status = match &end_event.status {
+        codex_protocol::protocol::AgentStatus::Errored(_)
+        | codex_protocol::protocol::AgentStatus::NotFound => V2CollabToolCallStatus::Failed,
+        _ => V2CollabToolCallStatus::Completed,
+    };
+    let receiver_id = end_event.receiver_thread_id.to_string();
+    let received_status = V2CollabAgentStatus::from(end_event.status);
+    ThreadItem::CollabAgentToolCall {
+        id: end_event.call_id,
+        tool: CollabAgentTool::SendInput,
+        status,
+        sender_thread_id: end_event.sender_thread_id.to_string(),
+        receiver_thread_ids: vec![receiver_id.clone()],
+        prompt: Some(end_event.prompt),
+        requested_model: None,
+        requested_reasoning_effort: None,
+        model: None,
+        reasoning_effort: None,
+        effective_model: None,
+        effective_reasoning_effort: None,
+        context_inheritance_requested: None,
+        context_inheritance_effective: None,
+        context_inheritance_telemetry: None,
+        delegation_report: end_event.delegation_report,
+        agents_states: [(receiver_id, received_status)].into_iter().collect(),
+    }
+}
+
 fn collab_resume_end_item(end_event: codex_protocol::protocol::CollabResumeEndEvent) -> ThreadItem {
     let status = match &end_event.status {
         codex_protocol::protocol::AgentStatus::Errored(_)
@@ -3372,6 +3383,104 @@ mod tests {
             .collect(),
         };
         assert_eq!(item, expected);
+    }
+
+    #[test]
+    fn collab_interaction_begin_maps_delegation_report() {
+        let report = codex_protocol::protocol::DelegationReport {
+            general_task_type: "follow-up task".to_string(),
+            task_difficulty_1_10: 3,
+            brief_completeness_1_10: 8,
+            task_self_sufficiency_1_10: 8,
+            expected_duration_minutes: 5,
+            why_this_agent: "Already owns the context".to_string(),
+            expected_output_shape: "Short completion note".to_string(),
+            files_or_scope: "worker thread".to_string(),
+            risks_or_unknowns: "none known".to_string(),
+            orchestration_context: None,
+        };
+        let event = codex_protocol::protocol::CollabAgentInteractionBeginEvent {
+            call_id: "call-send-begin".to_string(),
+            sender_thread_id: ThreadId::new(),
+            receiver_thread_id: ThreadId::new(),
+            prompt: "continue".to_string(),
+            delegation_report: Some(report.clone()),
+        };
+
+        let expected = ThreadItem::CollabAgentToolCall {
+            id: event.call_id.clone(),
+            tool: CollabAgentTool::SendInput,
+            status: V2CollabToolCallStatus::InProgress,
+            sender_thread_id: event.sender_thread_id.to_string(),
+            receiver_thread_ids: vec![event.receiver_thread_id.to_string()],
+            prompt: Some(event.prompt.clone()),
+            requested_model: None,
+            requested_reasoning_effort: None,
+            model: None,
+            reasoning_effort: None,
+            effective_model: None,
+            effective_reasoning_effort: None,
+            context_inheritance_requested: None,
+            context_inheritance_effective: None,
+            context_inheritance_telemetry: None,
+            delegation_report: Some(report),
+            agents_states: HashMap::new(),
+        };
+
+        assert_eq!(collab_interaction_begin_item(event), expected);
+    }
+
+    #[test]
+    fn collab_interaction_end_maps_delegation_report() {
+        let report = codex_protocol::protocol::DelegationReport {
+            general_task_type: "follow-up task".to_string(),
+            task_difficulty_1_10: 3,
+            brief_completeness_1_10: 8,
+            task_self_sufficiency_1_10: 8,
+            expected_duration_minutes: 5,
+            why_this_agent: "Already owns the context".to_string(),
+            expected_output_shape: "Short completion note".to_string(),
+            files_or_scope: "worker thread".to_string(),
+            risks_or_unknowns: "none known".to_string(),
+            orchestration_context: None,
+        };
+        let event = codex_protocol::protocol::CollabAgentInteractionEndEvent {
+            call_id: "call-send-end".to_string(),
+            sender_thread_id: ThreadId::new(),
+            receiver_thread_id: ThreadId::new(),
+            receiver_agent_nickname: Some("Worker".to_string()),
+            receiver_agent_role: Some("worker".to_string()),
+            prompt: "continue".to_string(),
+            delegation_report: Some(report.clone()),
+            status: codex_protocol::protocol::AgentStatus::Running,
+        };
+        let receiver_id = event.receiver_thread_id.to_string();
+        let expected = ThreadItem::CollabAgentToolCall {
+            id: event.call_id.clone(),
+            tool: CollabAgentTool::SendInput,
+            status: V2CollabToolCallStatus::Completed,
+            sender_thread_id: event.sender_thread_id.to_string(),
+            receiver_thread_ids: vec![receiver_id.clone()],
+            prompt: Some(event.prompt.clone()),
+            requested_model: None,
+            requested_reasoning_effort: None,
+            model: None,
+            reasoning_effort: None,
+            effective_model: None,
+            effective_reasoning_effort: None,
+            context_inheritance_requested: None,
+            context_inheritance_effective: None,
+            context_inheritance_telemetry: None,
+            delegation_report: Some(report),
+            agents_states: [(
+                receiver_id,
+                V2CollabAgentStatus::from(codex_protocol::protocol::AgentStatus::Running),
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        assert_eq!(collab_interaction_end_item(event), expected);
     }
 
     #[test]

@@ -359,6 +359,26 @@ fn spawn_agent_tool_v1_can_require_delegation_orchestration_context() {
 }
 
 #[test]
+fn send_input_tool_includes_optional_delegation_report() {
+    let ToolSpec::Function(ResponsesApiTool { parameters, .. }) = create_send_input_tool_v1()
+    else {
+        panic!("send_input should be a function tool");
+    };
+    let JsonSchema::Object {
+        properties,
+        required,
+        ..
+    } = parameters
+    else {
+        panic!("send_input should use object params");
+    };
+
+    assert!(properties.contains_key("target"));
+    assert!(properties.contains_key("delegation_report"));
+    assert_eq!(required, Some(vec!["target".to_string()]));
+}
+
+#[test]
 fn send_message_tool_requires_items_and_uses_submission_output() {
     let ToolSpec::Function(ResponsesApiTool {
         parameters,
@@ -378,6 +398,7 @@ fn send_message_tool_requires_items_and_uses_submission_output() {
     };
     assert!(properties.contains_key("target"));
     assert!(properties.contains_key("items"));
+    assert!(properties.contains_key("delegation_report"));
     assert!(!properties.contains_key("message"));
     assert_eq!(
         required,
@@ -386,6 +407,27 @@ fn send_message_tool_requires_items_and_uses_submission_output() {
     assert_eq!(
         output_schema.expect("send_message output schema")["required"],
         json!(["submission_id"])
+    );
+}
+
+#[test]
+fn assign_task_tool_includes_optional_delegation_report() {
+    let ToolSpec::Function(ResponsesApiTool { parameters, .. }) = create_assign_task_tool() else {
+        panic!("assign_task should be a function tool");
+    };
+    let JsonSchema::Object {
+        properties,
+        required,
+        ..
+    } = parameters
+    else {
+        panic!("assign_task should use object params");
+    };
+
+    assert!(properties.contains_key("delegation_report"));
+    assert_eq!(
+        required,
+        Some(vec!["target".to_string(), "items".to_string()])
     );
 }
 

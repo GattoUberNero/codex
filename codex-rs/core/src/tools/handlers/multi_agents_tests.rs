@@ -1362,7 +1362,18 @@ async fn multi_agent_v2_send_message_rejects_structured_items() {
             "spawn_agent",
             function_payload(json!({
                 "message": "boot worker",
-                "task_name": "worker"
+                "task_name": "worker",
+                "delegation_report": {
+                    "general_task_type": "worker bootstrap",
+                    "task_difficulty_1_10": 2,
+                    "brief_completeness_1_10": 8,
+                    "task_self_sufficiency_1_10": 8,
+                    "expected_duration_minutes": 3,
+                    "why_this_agent": "Dedicated worker thread for follow-up messaging",
+                    "expected_output_shape": "Worker session ready for subsequent messages",
+                    "files_or_scope": "/root/worker",
+                    "risks_or_unknowns": "none known"
+                }
             })),
         ))
         .await
@@ -1420,7 +1431,18 @@ async fn multi_agent_v2_send_message_interrupts_busy_child_without_triggering_tu
             "spawn_agent",
             function_payload(json!({
                 "message": "boot worker",
-                "task_name": "worker"
+                "task_name": "worker",
+                "delegation_report": {
+                    "general_task_type": "worker bootstrap",
+                    "task_difficulty_1_10": 2,
+                    "brief_completeness_1_10": 8,
+                    "task_self_sufficiency_1_10": 8,
+                    "expected_duration_minutes": 3,
+                    "why_this_agent": "Dedicated worker thread for follow-up messaging",
+                    "expected_output_shape": "Worker session ready for subsequent messages",
+                    "files_or_scope": "/root/worker",
+                    "risks_or_unknowns": "none known"
+                }
             })),
         ))
         .await
@@ -1661,6 +1683,101 @@ async fn multi_agent_v2_assign_task_interrupts_busy_child_without_losing_message
         .submit(Op::Shutdown {})
         .await
         .expect("shutdown should submit");
+}
+
+#[tokio::test]
+async fn multi_agent_v2_send_message_appends_delegation_report_block() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.conversation_id = root.thread_id;
+    let mut config = turn.config.as_ref().clone();
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    config.spawn_delegation_report_profile = SpawnDelegationReportProfile::AllOn;
+    turn.config = Arc::new(config);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    SpawnAgentHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "boot worker",
+                "task_name": "worker",
+                "delegation_report": {
+                    "general_task_type": "worker bootstrap",
+                    "task_difficulty_1_10": 2,
+                    "brief_completeness_1_10": 8,
+                    "task_self_sufficiency_1_10": 8,
+                    "expected_duration_minutes": 3,
+                    "why_this_agent": "Dedicated worker thread for follow-up messaging",
+                    "expected_output_shape": "Worker session ready for subsequent messages",
+                    "files_or_scope": "/root/worker",
+                    "risks_or_unknowns": "none known"
+                }
+            })),
+        ))
+        .await
+        .expect("spawn worker");
+    let agent_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.conversation_id, &turn.session_source, "worker")
+        .await
+        .expect("worker should resolve");
+
+    SendMessageHandlerV2
+        .handle(invocation(
+            session,
+            turn,
+            "send_message",
+            function_payload(json!({
+                "target": agent_id.to_string(),
+                "items": [{"type": "text", "text": "continue"}],
+                "delegation_report": {
+                    "general_task_type": "follow-up task",
+                    "task_difficulty_1_10": 2,
+                    "brief_completeness_1_10": 9,
+                    "task_self_sufficiency_1_10": 9,
+                    "expected_duration_minutes": 3,
+                    "why_this_agent": "Already holds the worker context",
+                    "expected_output_shape": "Short text reply",
+                    "files_or_scope": "/root/worker",
+                    "risks_or_unknowns": "none known"
+                }
+            })),
+        ))
+        .await
+        .expect("send_message should succeed");
+
+    let delegation_context = manager
+        .captured_ops()
+        .into_iter()
+        .rev()
+        .find_map(|(id, op)| match op {
+            Op::InterAgentCommunication { communication } if id == agent_id => {
+                Some(communication.content)
+            }
+            _ => None,
+        })
+        .expect("send_message should enqueue inter-agent communication");
+    assert!(delegation_context.starts_with("continue"));
+    assert!(delegation_context.contains("<spawn_delegation_report_json>"));
+    let delegation_context_json = extract_spawn_delegation_context_json(&delegation_context);
+    let delegation_context_object = delegation_context_json
+        .as_object()
+        .expect("delegation context should be a JSON object");
+    assert_eq!(
+        delegation_context_object.get("expected_output_shape"),
+        Some(&json!("Short text reply"))
+    );
+    assert_eq!(delegation_context_object.get("why_this_agent"), None);
 }
 
 #[tokio::test]
@@ -2887,6 +3004,80 @@ async fn send_input_accepts_structured_items() {
         .into_iter()
         .find(|(id, op)| *id == agent_id && *op == expected);
     assert_eq!(captured, Some((agent_id, expected)));
+
+    let _ = thread
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+}
+
+#[tokio::test]
+async fn send_input_forwards_delegation_report_block_when_profile_all_on() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let mut config = turn.config.as_ref().clone();
+    config.spawn_delegation_report_profile = SpawnDelegationReportProfile::AllOn;
+    turn.config = Arc::new(config);
+    let config = turn.config.as_ref().clone();
+    let thread = manager.start_thread(config).await.expect("start thread");
+    let agent_id = thread.thread_id;
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "send_input",
+        function_payload(json!({
+            "target": agent_id.to_string(),
+            "message": "continue",
+            "delegation_report": {
+                "general_task_type": "follow-up task",
+                "task_difficulty_1_10": 3,
+                "brief_completeness_1_10": 9,
+                "task_self_sufficiency_1_10": 8,
+                "expected_duration_minutes": 5,
+                "why_this_agent": "Already owns the implementation context",
+                "expected_output_shape": "Short completion note",
+                "files_or_scope": "codex-rs/core/src/tools/handlers/multi_agents/send_input.rs",
+                "risks_or_unknowns": "none known"
+            }
+        })),
+    );
+    SendInputHandler
+        .handle(invocation)
+        .await
+        .expect("send_input should succeed");
+
+    let delegation_context = manager
+        .captured_ops()
+        .into_iter()
+        .find_map(|(id, op)| {
+            if id != agent_id {
+                return None;
+            }
+            match op {
+                Op::UserInput { items, .. } => items.into_iter().find_map(|item| match item {
+                    UserInput::Text { text, .. }
+                        if text.contains("<spawn_delegation_report_json>") =>
+                    {
+                        Some(text)
+                    }
+                    _ => None,
+                }),
+                _ => None,
+            }
+        })
+        .expect("delegation context block should be forwarded");
+    let delegation_context_json = extract_spawn_delegation_context_json(&delegation_context);
+    let delegation_context_object = delegation_context_json
+        .as_object()
+        .expect("delegation context should be a JSON object");
+    assert_eq!(
+        delegation_context_object.get("general_task_type"),
+        Some(&json!("follow-up task"))
+    );
+    assert_eq!(delegation_context_object.get("why_this_agent"), None);
+    assert_eq!(delegation_context_object.get("orchestration_context"), None);
 
     let _ = thread
         .thread

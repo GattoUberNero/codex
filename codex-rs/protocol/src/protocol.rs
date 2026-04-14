@@ -3659,6 +3659,9 @@ pub struct CollabAgentInteractionBeginEvent {
     /// Prompt sent from the sender to the receiver. Can be empty to prevent CoT
     /// leaking at the beginning.
     pub prompt: String,
+    /// Optional delegation report used by TUI rendering and follow-up payload enrichment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_report: Option<DelegationReport>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
@@ -3678,6 +3681,9 @@ pub struct CollabAgentInteractionEndEvent {
     /// Prompt sent from the sender to the receiver. Can be empty to prevent CoT
     /// leaking at the beginning.
     pub prompt: String,
+    /// Optional delegation report used by TUI rendering and follow-up payload enrichment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_report: Option<DelegationReport>,
     /// Last known status of the receiver agent reported to the sender agent.
     pub status: AgentStatus,
 }
