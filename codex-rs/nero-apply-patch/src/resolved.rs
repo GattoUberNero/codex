@@ -94,6 +94,8 @@ pub(crate) fn resolve_base_dir(
     relative_or_absolute: &Path,
 ) -> Result<PathBuf, ApplyPatchError> {
     validate_absolute_base_dir(base_dir)?;
+    let candidate = candidate_base_dir(relative_or_absolute, base_dir);
+    validate_existing_base_dir(candidate.as_path())?;
     normalize_path_against_base(relative_or_absolute, base_dir)
 }
 
@@ -105,6 +107,14 @@ fn resolve_path(path: &Path, base_dir: &Path) -> Result<ResolvedPath, ApplyPatch
         absolute,
         base_dir: base_dir.to_path_buf(),
     })
+}
+
+fn candidate_base_dir(path: &Path, base_dir: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    }
 }
 
 fn validate_absolute_base_dir(base_dir: &Path) -> Result<(), ApplyPatchError> {
@@ -122,6 +132,29 @@ fn validate_absolute_base_dir(base_dir: &Path) -> Result<(), ApplyPatchError> {
             "base_dir must be absolute",
         ),
     )))
+}
+
+fn validate_existing_base_dir(base_dir: &Path) -> Result<(), ApplyPatchError> {
+    match std::fs::metadata(base_dir) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(ApplyPatchError::IoError(IoError::new(
+            format!(
+                "apply_patch workdir is not a directory: {}",
+                base_dir.display()
+            ),
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "apply_patch workdir must be a directory",
+            ),
+        ))),
+        Err(err) => Err(ApplyPatchError::IoError(IoError::new(
+            format!(
+                "apply_patch workdir is not accessible: {}",
+                base_dir.display()
+            ),
+            err,
+        ))),
+    }
 }
 
 fn normalize_path_against_base(path: &Path, base_dir: &Path) -> Result<PathBuf, ApplyPatchError> {
@@ -289,6 +322,46 @@ mod tests {
                     base_dir: dir.path().to_path_buf(),
                 },
             }]
+        );
+    }
+
+    #[test]
+    fn resolve_base_dir_rejects_missing_directory() {
+        let dir = tempdir().expect("tempdir");
+        let error = resolve_base_dir(dir.path(), Path::new("missing")).expect_err("must fail");
+        assert!(matches!(error, ApplyPatchError::IoError(_)));
+        assert!(error.to_string().contains(&format!(
+            "apply_patch workdir is not accessible: {}",
+            dir.path().join("missing").display()
+        )));
+    }
+
+    #[test]
+    fn resolve_base_dir_rejects_missing_parent_before_normalization() {
+        let dir = tempdir().expect("tempdir");
+        let error = resolve_base_dir(dir.path(), Path::new("missing/..")).expect_err("must fail");
+
+        assert!(matches!(error, ApplyPatchError::IoError(_)));
+        assert!(error.to_string().contains(&format!(
+            "apply_patch workdir is not accessible: {}",
+            dir.path().join("missing/..").display()
+        )));
+    }
+
+    #[test]
+    fn resolve_base_dir_rejects_file_path() {
+        let dir = tempdir().expect("tempdir");
+        let file_path = dir.path().join("not-a-dir");
+        std::fs::write(&file_path, "content").expect("write test file");
+
+        let error = resolve_base_dir(dir.path(), Path::new("not-a-dir")).expect_err("must fail");
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "apply_patch workdir is not a directory: {}: apply_patch workdir must be a directory",
+                file_path.display()
+            )
         );
     }
 }

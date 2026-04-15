@@ -817,6 +817,101 @@ fn collab_spawn_begin_and_end_emit_item_events() {
 }
 
 #[test]
+fn collab_follow_up_tools_emit_distinct_item_events() {
+    let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
+
+    let send_message = processor.collect_thread_events(ServerNotification::ItemStarted(
+        ItemStartedNotification {
+            item: ThreadItem::CollabAgentToolCall {
+                id: "collab-send-message".to_string(),
+                tool: CollabAgentTool::SendMessage,
+                status: ApiCollabAgentToolCallStatus::InProgress,
+                sender_thread_id: "thread-parent".to_string(),
+                receiver_thread_ids: vec!["thread-child".to_string()],
+                prompt: Some("ping".to_string()),
+                requested_model: None,
+                requested_reasoning_effort: None,
+                model: None,
+                reasoning_effort: None,
+                effective_model: None,
+                effective_reasoning_effort: None,
+                context_inheritance_requested: None,
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
+                delegation_report: None,
+                agents_states: std::collections::HashMap::new(),
+            },
+            thread_id: "thread-parent".to_string(),
+            turn_id: "turn-1".to_string(),
+        },
+    ));
+    let assign_task = processor.collect_thread_events(ServerNotification::ItemStarted(
+        ItemStartedNotification {
+            item: ThreadItem::CollabAgentToolCall {
+                id: "collab-assign-task".to_string(),
+                tool: CollabAgentTool::AssignTask,
+                status: ApiCollabAgentToolCallStatus::InProgress,
+                sender_thread_id: "thread-parent".to_string(),
+                receiver_thread_ids: vec!["thread-child".to_string()],
+                prompt: Some("do work".to_string()),
+                requested_model: None,
+                requested_reasoning_effort: None,
+                model: None,
+                reasoning_effort: None,
+                effective_model: None,
+                effective_reasoning_effort: None,
+                context_inheritance_requested: None,
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
+                delegation_report: None,
+                agents_states: std::collections::HashMap::new(),
+            },
+            thread_id: "thread-parent".to_string(),
+            turn_id: "turn-1".to_string(),
+        },
+    ));
+
+    assert_eq!(
+        send_message,
+        CollectedThreadEvents {
+            events: vec![ThreadEvent::ItemStarted(ItemStartedEvent {
+                item: ExecThreadItem {
+                    id: "item_0".to_string(),
+                    details: ThreadItemDetails::CollabToolCall(CollabToolCallItem {
+                        tool: CollabTool::SendMessage,
+                        sender_thread_id: "thread-parent".to_string(),
+                        receiver_thread_ids: vec!["thread-child".to_string()],
+                        prompt: Some("ping".to_string()),
+                        agents_states: std::collections::HashMap::new(),
+                        status: CollabToolCallStatus::InProgress,
+                    }),
+                },
+            })],
+            status: CodexStatus::Running,
+        }
+    );
+    assert_eq!(
+        assign_task,
+        CollectedThreadEvents {
+            events: vec![ThreadEvent::ItemStarted(ItemStartedEvent {
+                item: ExecThreadItem {
+                    id: "item_1".to_string(),
+                    details: ThreadItemDetails::CollabToolCall(CollabToolCallItem {
+                        tool: CollabTool::AssignTask,
+                        sender_thread_id: "thread-parent".to_string(),
+                        receiver_thread_ids: vec!["thread-child".to_string()],
+                        prompt: Some("do work".to_string()),
+                        agents_states: std::collections::HashMap::new(),
+                        status: CollabToolCallStatus::InProgress,
+                    }),
+                },
+            })],
+            status: CodexStatus::Running,
+        }
+    );
+}
+
+#[test]
 fn file_change_completion_maps_change_kinds() {
     let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
 

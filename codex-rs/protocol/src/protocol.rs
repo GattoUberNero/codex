@@ -3649,9 +3649,19 @@ impl<'de> Deserialize<'de> for CollabAgentSpawnEndEvent {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum CollabAgentInteractionTool {
+    SendInput,
+    SendMessage,
+    AssignTask,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
 pub struct CollabAgentInteractionBeginEvent {
     /// Identifier for the collab tool call.
     pub call_id: String,
+    /// Interaction tool that produced this follow-up event.
+    pub tool: CollabAgentInteractionTool,
     /// Thread ID of the sender.
     pub sender_thread_id: ThreadId,
     /// Thread ID of the receiver.
@@ -3668,6 +3678,8 @@ pub struct CollabAgentInteractionBeginEvent {
 pub struct CollabAgentInteractionEndEvent {
     /// Identifier for the collab tool call.
     pub call_id: String,
+    /// Interaction tool that produced this follow-up event.
+    pub tool: CollabAgentInteractionTool,
     /// Thread ID of the sender.
     pub sender_thread_id: ThreadId,
     /// Thread ID of the receiver.

@@ -275,6 +275,7 @@ pub(crate) fn spawn_end(
 pub(crate) fn interaction_end(ev: CollabAgentInteractionEndEvent) -> PlainHistoryCell {
     let CollabAgentInteractionEndEvent {
         call_id: _,
+        tool,
         sender_thread_id: _,
         receiver_thread_id,
         receiver_agent_nickname,
@@ -285,7 +286,13 @@ pub(crate) fn interaction_end(ev: CollabAgentInteractionEndEvent) -> PlainHistor
     } = ev;
 
     let title = title_with_agent(
-        "Sent input to",
+        match tool {
+            codex_protocol::protocol::CollabAgentInteractionTool::SendInput => "Sent input to",
+            codex_protocol::protocol::CollabAgentInteractionTool::SendMessage => {
+                "Sent message to"
+            }
+            codex_protocol::protocol::CollabAgentInteractionTool::AssignTask => "Assigned task to",
+        },
         AgentLabel {
             thread_id: Some(receiver_thread_id),
             nickname: receiver_agent_nickname.as_deref(),
@@ -958,6 +965,7 @@ mod tests {
 
         let send = interaction_end(CollabAgentInteractionEndEvent {
             call_id: "call-send".to_string(),
+            tool: codex_protocol::protocol::CollabAgentInteractionTool::SendInput,
             sender_thread_id,
             receiver_thread_id: robie_id,
             receiver_agent_nickname: Some("Robie".to_string()),
@@ -1134,6 +1142,7 @@ mod tests {
 
         let cell = interaction_end(CollabAgentInteractionEndEvent {
             call_id: "call-send-report".to_string(),
+            tool: codex_protocol::protocol::CollabAgentInteractionTool::SendInput,
             sender_thread_id,
             receiver_thread_id,
             receiver_agent_nickname: Some("Ampere".to_string()),
@@ -1167,6 +1176,56 @@ mod tests {
         assert_snapshot!(
             "collab_interaction_end_with_delegation_report",
             cell_to_text(&cell)
+        );
+    }
+
+    #[test]
+    fn collab_interaction_end_renders_send_message_title() {
+        let sender_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000061")
+            .expect("valid sender thread id");
+        let receiver_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000062")
+            .expect("valid receiver thread id");
+
+        let rendered = cell_to_text(&interaction_end(CollabAgentInteractionEndEvent {
+            call_id: "call-send-message".to_string(),
+            tool: codex_protocol::protocol::CollabAgentInteractionTool::SendMessage,
+            sender_thread_id,
+            receiver_thread_id,
+            receiver_agent_nickname: Some("Ampere".to_string()),
+            receiver_agent_role: Some("worker".to_string()),
+            prompt: "Queue this note for later.".to_string(),
+            delegation_report: None,
+            status: AgentStatus::Running,
+        }));
+
+        assert!(
+            rendered.starts_with("• Sent message to Ampere [worker]"),
+            "expected send_message title, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn collab_interaction_end_renders_assign_task_title() {
+        let sender_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000071")
+            .expect("valid sender thread id");
+        let receiver_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000072")
+            .expect("valid receiver thread id");
+
+        let rendered = cell_to_text(&interaction_end(CollabAgentInteractionEndEvent {
+            call_id: "call-assign-task".to_string(),
+            tool: codex_protocol::protocol::CollabAgentInteractionTool::AssignTask,
+            sender_thread_id,
+            receiver_thread_id,
+            receiver_agent_nickname: Some("Ampere".to_string()),
+            receiver_agent_role: Some("worker".to_string()),
+            prompt: "Handle this now.".to_string(),
+            delegation_report: None,
+            status: AgentStatus::Running,
+        }));
+
+        assert!(
+            rendered.starts_with("• Assigned task to Ampere [worker]"),
+            "expected assign_task title, got: {rendered}"
         );
     }
 

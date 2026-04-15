@@ -380,6 +380,35 @@ mod tests {
         assert_eq!(contents, "line2\n");
     }
 
+    #[test]
+    fn test_update_file_hunk_can_move_file_without_content_change() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        let dest = dir.path().join("dst.txt");
+        fs::write(&src, "line\n").unwrap();
+        let patch = wrap_patch(&format!(
+            r#"*** Update File: {}
+*** Move to: {}"#,
+            src.display(),
+            dest.display()
+        ));
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        apply_patch(&patch, &mut stdout, &mut stderr).unwrap();
+
+        let stdout_str = String::from_utf8(stdout).unwrap();
+        let stderr_str = String::from_utf8(stderr).unwrap();
+        let expected_out = format!(
+            "Success. Updated the following files:\nM {}\n",
+            dest.display()
+        );
+        assert_eq!(stdout_str, expected_out);
+        assert_eq!(stderr_str, "");
+        assert!(!src.exists());
+        let contents = fs::read_to_string(&dest).unwrap();
+        assert_eq!(contents, "line\n");
+    }
+
     /// Verify that a single `Update File` hunk with multiple change chunks can update different
     /// parts of a file and that the file is listed only once in the summary.
     #[test]

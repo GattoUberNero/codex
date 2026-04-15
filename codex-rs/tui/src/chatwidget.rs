@@ -4388,13 +4388,30 @@ impl ChatWidget {
                     ));
                 }
             }
-            CollabAgentTool::SendInput => {
+            CollabAgentTool::SendInput
+            | CollabAgentTool::SendMessage
+            | CollabAgentTool::AssignTask => {
                 if let Some(receiver_thread_id) = first_receiver
                     && !matches!(status, CollabAgentToolCallStatus::InProgress)
                 {
                     self.on_collab_event(multi_agents::interaction_end(
                         codex_protocol::protocol::CollabAgentInteractionEndEvent {
                             call_id: id,
+                            tool: match tool {
+                                CollabAgentTool::SendInput => {
+                                    codex_protocol::protocol::CollabAgentInteractionTool::SendInput
+                                }
+                                CollabAgentTool::SendMessage => {
+                                    codex_protocol::protocol::CollabAgentInteractionTool::SendMessage
+                                }
+                                CollabAgentTool::AssignTask => {
+                                    codex_protocol::protocol::CollabAgentInteractionTool::AssignTask
+                                }
+                                CollabAgentTool::SpawnAgent
+                                | CollabAgentTool::ResumeAgent
+                                | CollabAgentTool::Wait
+                                | CollabAgentTool::CloseAgent => unreachable!(),
+                            },
                             sender_thread_id,
                             receiver_thread_id,
                             receiver_agent_nickname: first_receiver_metadata

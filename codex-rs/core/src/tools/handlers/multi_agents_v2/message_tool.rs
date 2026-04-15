@@ -15,6 +15,13 @@ pub(crate) enum MessageDeliveryMode {
 }
 
 impl MessageDeliveryMode {
+    fn interaction_tool(self) -> codex_protocol::protocol::CollabAgentInteractionTool {
+        match self {
+            Self::QueueOnly => codex_protocol::protocol::CollabAgentInteractionTool::SendMessage,
+            Self::TriggerTurn => codex_protocol::protocol::CollabAgentInteractionTool::AssignTask,
+        }
+    }
+
     /// Returns the model-visible error message for non-text inputs.
     fn unsupported_items_error(self) -> &'static str {
         match self {
@@ -140,6 +147,7 @@ pub(crate) async fn handle_message_tool(
             &turn,
             CollabAgentInteractionBeginEvent {
                 call_id: call_id.clone(),
+                tool: mode.interaction_tool(),
                 sender_thread_id: session.conversation_id,
                 receiver_thread_id,
                 prompt: prompt.clone(),
@@ -176,6 +184,7 @@ pub(crate) async fn handle_message_tool(
             &turn,
             CollabAgentInteractionEndEvent {
                 call_id,
+                tool: mode.interaction_tool(),
                 sender_thread_id: session.conversation_id,
                 receiver_thread_id,
                 receiver_agent_nickname: receiver_agent.agent_nickname,

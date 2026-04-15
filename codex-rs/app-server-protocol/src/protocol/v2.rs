@@ -45,6 +45,7 @@ use codex_protocol::plan_tool::PlanItemArg as CorePlanItemArg;
 use codex_protocol::plan_tool::StepStatus as CorePlanStepStatus;
 use codex_protocol::protocol::AgentStatus as CoreAgentStatus;
 use codex_protocol::protocol::AskForApproval as CoreAskForApproval;
+use codex_protocol::protocol::CollabAgentInteractionTool as CoreCollabAgentInteractionTool;
 use codex_protocol::protocol::CodexErrorInfo as CoreCodexErrorInfo;
 use codex_protocol::protocol::CreditsSnapshot as CoreCreditsSnapshot;
 use codex_protocol::protocol::DelegationReport;
@@ -4936,12 +4937,22 @@ v2_enum_from_core! {
     }
 }
 
+v2_enum_from_core! {
+    pub enum CollabAgentInteractionTool from CoreCollabAgentInteractionTool {
+        SendInput,
+        SendMessage,
+        AssignTask,
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub enum CollabAgentTool {
     SpawnAgent,
     SendInput,
+    SendMessage,
+    AssignTask,
     ResumeAgent,
     Wait,
     CloseAgent,

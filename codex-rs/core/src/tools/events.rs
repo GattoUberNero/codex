@@ -327,6 +327,11 @@ impl ToolEmitter {
                 let result = Err(FunctionCallError::RespondToModel(response));
                 (event, result)
             }
+            Err(ToolError::Message(message)) => {
+                let event = ToolEventStage::Failure(ToolEventFailure::Message(message.clone()));
+                let result = Err(FunctionCallError::RespondToModel(message));
+                (event, result)
+            }
             Err(ToolError::Codex(err)) => {
                 let message = format!("execution error: {err:?}");
                 let event = ToolEventStage::Failure(ToolEventFailure::Message(message.clone()));
@@ -528,5 +533,105 @@ async fn emit_patch_end(
                 .send_event(ctx.turn, EventMsg::TurnDiff(TurnDiffEvent { unified_diff }))
                 .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codex::make_session_and_context_with_rx;
+    use pretty_assertions::assert_eq;
+    use tokio::time::Duration;
+
+    #[tokio::test]
+    async fn apply_patch_message_failure_emits_failed_patch_event() {
+        let (session, turn, rx) = make_session_and_context_with_rx().await;
+        let file_path = turn.cwd.as_path().join("apply-patch.txt");
+        let changes = HashMap::from([(
+            file_path.clone(),
+            FileChange::Add {
+                content: "hello".to_string(),
+            },
+        )]);
+        let emitter = ToolEmitter::apply_patch(changes.clone(), /*auto_approved*/ false);
+
+        let result = emitter
+            .finish(
+                ToolEventCtx::new(session.as_ref(), turn.as_ref(), "call-1", None),
+                Err(ToolError::Message("apply_patch launch failed".to_string())),
+            )
+            .await;
+
+        assert_eq!(
+            result,
+            Err(FunctionCallError::RespondToModel(
+                "apply_patch launch failed".to_string()
+            ))
+        );
+
+        let event = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = rx.recv().await.expect("event");
+                if let EventMsg::PatchApplyEnd(end) = event.msg {
+                    break end;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for patch end");
+
+        assert_eq!(event.call_id, "call-1");
+        assert_eq!(event.turn_id, turn.sub_id);
+        assert_eq!(event.stdout, "");
+        assert_eq!(event.stderr, "apply_patch launch failed");
+        assert!(!event.success);
+        assert_eq!(event.status, PatchApplyStatus::Failed);
+        assert_eq!(event.changes, changes);
+    }
+
+    #[tokio::test]
+    async fn apply_patch_rejected_by_user_emits_declined_patch_event() {
+        let (session, turn, rx) = make_session_and_context_with_rx().await;
+        let file_path = turn.cwd.as_path().join("apply-patch.txt");
+        let changes = HashMap::from([(
+            file_path,
+            FileChange::Add {
+                content: "hello".to_string(),
+            },
+        )]);
+        let emitter = ToolEmitter::apply_patch(changes.clone(), /*auto_approved*/ false);
+
+        let result = emitter
+            .finish(
+                ToolEventCtx::new(session.as_ref(), turn.as_ref(), "call-2", None),
+                Err(ToolError::Rejected("rejected by user".to_string())),
+            )
+            .await;
+
+        assert_eq!(
+            result,
+            Err(FunctionCallError::RespondToModel(
+                "patch rejected by user".to_string()
+            ))
+        );
+
+        let event = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = rx.recv().await.expect("event");
+                if let EventMsg::PatchApplyEnd(end) = event.msg {
+                    break end;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for patch end");
+
+        assert_eq!(event.call_id, "call-2");
+        assert_eq!(event.turn_id, turn.sub_id);
+        assert_eq!(event.stdout, "");
+        assert_eq!(event.stderr, "patch rejected by user");
+        assert!(!event.success);
+        assert_eq!(event.status, PatchApplyStatus::Declined);
+        assert_eq!(event.changes, changes);
     }
 }

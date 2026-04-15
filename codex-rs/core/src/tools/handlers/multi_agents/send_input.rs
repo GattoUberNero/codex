@@ -67,6 +67,7 @@ impl ToolHandler for Handler {
                 &turn,
                 CollabAgentInteractionBeginEvent {
                     call_id: call_id.clone(),
+                    tool: codex_protocol::protocol::CollabAgentInteractionTool::SendInput,
                     sender_thread_id: session.conversation_id,
                     receiver_thread_id,
                     prompt: prompt.clone(),
@@ -90,6 +91,7 @@ impl ToolHandler for Handler {
                 &turn,
                 CollabAgentInteractionEndEvent {
                     call_id,
+                    tool: codex_protocol::protocol::CollabAgentInteractionTool::SendInput,
                     sender_thread_id: session.conversation_id,
                     receiver_thread_id,
                     receiver_agent_nickname: receiver_agent.agent_nickname,

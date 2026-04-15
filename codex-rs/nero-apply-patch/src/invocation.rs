@@ -784,6 +784,87 @@ PATCH"#,
     }
 
     #[test]
+    fn test_apply_patch_verified_supports_move_without_content_change() {
+        let session_dir = tempdir().unwrap();
+        let source_path = session_dir.path().join("old.txt");
+        let dest_path = session_dir.path().join("renamed.txt");
+        fs::write(&source_path, "before\n").unwrap();
+
+        let patch = wrap_patch(
+            "*** Update File: old.txt
+*** Move to: renamed.txt",
+        );
+        let argv = vec!["apply_patch".to_string(), patch];
+
+        let result = maybe_parse_apply_patch_verified(&argv, session_dir.path());
+        let action = match result {
+            MaybeApplyPatchVerified::Body(action) => action,
+            other => panic!("expected verified body, got {other:?}"),
+        };
+
+        assert_eq!(action.cwd, session_dir.path());
+        assert_eq!(action.changes().len(), 1);
+        let change = action
+            .changes()
+            .get(&source_path)
+            .expect("move-only change present");
+
+        match change {
+            ApplyPatchFileChange::Update {
+                unified_diff,
+                move_path,
+                new_content,
+            } => {
+                assert_eq!(unified_diff, "");
+                assert_eq!(move_path.as_ref(), Some(&dest_path));
+                assert_eq!(new_content, "before\n");
+            }
+            other => panic!("expected move-only update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_patch_verified_supports_move_without_content_change_with_blank_line() {
+        let session_dir = tempdir().unwrap();
+        let source_path = session_dir.path().join("old.txt");
+        let dest_path = session_dir.path().join("renamed.txt");
+        fs::write(&source_path, "before\n").unwrap();
+
+        let patch = wrap_patch(
+            "*** Update File: old.txt
+
+*** Move to: renamed.txt",
+        );
+        let argv = vec!["apply_patch".to_string(), patch];
+
+        let result = maybe_parse_apply_patch_verified(&argv, session_dir.path());
+        let action = match result {
+            MaybeApplyPatchVerified::Body(action) => action,
+            other => panic!("expected verified body, got {other:?}"),
+        };
+
+        assert_eq!(action.cwd, session_dir.path());
+        assert_eq!(action.changes().len(), 1);
+        let change = action
+            .changes()
+            .get(&source_path)
+            .expect("move-only change present");
+
+        match change {
+            ApplyPatchFileChange::Update {
+                unified_diff,
+                move_path,
+                new_content,
+            } => {
+                assert_eq!(unified_diff, "");
+                assert_eq!(move_path.as_ref(), Some(&dest_path));
+                assert_eq!(new_content, "before\n");
+            }
+            other => panic!("expected move-only update, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_apply_patch_verified_merges_multiple_updates_for_same_file() {
         let session_dir = tempdir().unwrap();
         let target_path = session_dir.path().join("multi-update.txt");
@@ -1103,6 +1184,68 @@ omega
                 worktree_dir.display(),
                 worktree_dir.join("modify.txt").display()
             ))
+        );
+    }
+
+    #[test]
+    fn test_apply_patch_verified_rejects_missing_effective_workdir() {
+        let session_dir = tempdir().unwrap();
+        let patch = wrap_patch("*** Add File: hello.txt\n+hello");
+        let shell_script = format!("cd missing && apply_patch <<'PATCH'\n{patch}\nPATCH");
+        let argv = vec!["bash".into(), "-lc".into(), shell_script];
+
+        let result = maybe_parse_apply_patch_verified(&argv, session_dir.path());
+        let error = match result {
+            MaybeApplyPatchVerified::CorrectnessError(error) => error,
+            other => panic!("expected correctness error, got {other:?}"),
+        };
+        assert!(matches!(error, ApplyPatchError::IoError(_)));
+        assert!(error.to_string().contains(&format!(
+            "apply_patch workdir is not accessible: {}",
+            session_dir.path().join("missing").display()
+        )));
+    }
+
+    #[test]
+    fn test_apply_patch_verified_rejects_missing_parent_before_normalization() {
+        let session_dir = tempdir().unwrap();
+        let patch = wrap_patch("*** Add File: hello.txt\n+hello");
+        let shell_script = format!("cd missing/.. && apply_patch <<'PATCH'\n{patch}\nPATCH");
+        let argv = vec!["bash".into(), "-lc".into(), shell_script];
+
+        let result = maybe_parse_apply_patch_verified(&argv, session_dir.path());
+        let error = match result {
+            MaybeApplyPatchVerified::CorrectnessError(error) => error,
+            other => panic!("expected correctness error, got {other:?}"),
+        };
+
+        assert!(matches!(error, ApplyPatchError::IoError(_)));
+        assert!(error.to_string().contains(&format!(
+            "apply_patch workdir is not accessible: {}",
+            session_dir.path().join("missing/..").display()
+        )));
+    }
+
+    #[test]
+    fn test_apply_patch_verified_allows_existing_parent_before_normalization() {
+        let session_dir = tempdir().unwrap();
+        std::fs::create_dir(session_dir.path().join("existing")).unwrap();
+        let patch = wrap_patch("*** Add File: hello.txt\n+hello");
+        let shell_script = format!("cd existing/.. && apply_patch <<'PATCH'\n{patch}\nPATCH");
+        let argv = vec!["bash".into(), "-lc".into(), shell_script];
+
+        let result = maybe_parse_apply_patch_verified(&argv, session_dir.path());
+        let action = match result {
+            MaybeApplyPatchVerified::Body(action) => action,
+            other => panic!("expected verified body, got {other:?}"),
+        };
+
+        assert_eq!(action.cwd, session_dir.path());
+        assert_eq!(
+            action.changes().get(&session_dir.path().join("hello.txt")),
+            Some(&crate::ApplyPatchFileChange::Add {
+                content: "hello\n".to_string(),
+            })
         );
     }
 

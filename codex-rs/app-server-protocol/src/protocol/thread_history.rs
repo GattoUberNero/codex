@@ -678,7 +678,17 @@ impl ThreadHistoryBuilder {
     ) {
         let item = ThreadItem::CollabAgentToolCall {
             id: payload.call_id.clone(),
-            tool: CollabAgentTool::SendInput,
+            tool: match payload.tool {
+                codex_protocol::protocol::CollabAgentInteractionTool::SendInput => {
+                    CollabAgentTool::SendInput
+                }
+                codex_protocol::protocol::CollabAgentInteractionTool::SendMessage => {
+                    CollabAgentTool::SendMessage
+                }
+                codex_protocol::protocol::CollabAgentInteractionTool::AssignTask => {
+                    CollabAgentTool::AssignTask
+                }
+            },
             status: CollabAgentToolCallStatus::InProgress,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![payload.receiver_thread_id.to_string()],
@@ -710,7 +720,17 @@ impl ThreadHistoryBuilder {
         let received_status = CollabAgentState::from(payload.status.clone());
         self.upsert_item_in_current_turn(ThreadItem::CollabAgentToolCall {
             id: payload.call_id.clone(),
-            tool: CollabAgentTool::SendInput,
+            tool: match payload.tool {
+                codex_protocol::protocol::CollabAgentInteractionTool::SendInput => {
+                    CollabAgentTool::SendInput
+                }
+                codex_protocol::protocol::CollabAgentInteractionTool::SendMessage => {
+                    CollabAgentTool::SendMessage
+                }
+                codex_protocol::protocol::CollabAgentInteractionTool::AssignTask => {
+                    CollabAgentTool::AssignTask
+                }
+            },
             status,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![receiver_id.clone()],
@@ -3039,6 +3059,7 @@ mod tests {
             EventMsg::CollabAgentInteractionBegin(
                 codex_protocol::protocol::CollabAgentInteractionBeginEvent {
                     call_id: "send-1".into(),
+                    tool: codex_protocol::protocol::CollabAgentInteractionTool::SendMessage,
                     sender_thread_id: sender,
                     receiver_thread_id: receiver,
                     prompt: "new task".into(),
@@ -3048,6 +3069,7 @@ mod tests {
             EventMsg::CollabAgentInteractionEnd(
                 codex_protocol::protocol::CollabAgentInteractionEndEvent {
                     call_id: "send-1".into(),
+                    tool: codex_protocol::protocol::CollabAgentInteractionTool::SendMessage,
                     sender_thread_id: sender,
                     receiver_thread_id: receiver,
                     receiver_agent_nickname: None,
@@ -3070,7 +3092,7 @@ mod tests {
             turns[0].items[1],
             ThreadItem::CollabAgentToolCall {
                 id: "send-1".into(),
-                tool: CollabAgentTool::SendInput,
+                tool: CollabAgentTool::SendMessage,
                 status: CollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender.to_string(),
                 receiver_thread_ids: vec![receiver.to_string()],

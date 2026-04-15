@@ -281,12 +281,23 @@ fn parse_one_hunk(lines: &[&str], line_number: usize) -> Result<(Hunk, usize), P
         let mut remaining_lines = &lines[1..];
         let mut parsed_lines = 1;
 
+        while !remaining_lines.is_empty() && remaining_lines[0].trim().is_empty() {
+            parsed_lines += 1;
+            remaining_lines = &remaining_lines[1..];
+        }
+
         // Optional: move file line
         let move_path = remaining_lines
             .first()
             .and_then(|x| x.strip_prefix(MOVE_TO_MARKER));
 
-        if move_path.is_some() {
+        if let Some(move_path) = move_path {
+            if move_path.trim().is_empty() {
+                return Err(InvalidHunkError {
+                    message: format!("Move to path for update '{path}' is empty"),
+                    line_number: line_number + parsed_lines,
+                });
+            }
             remaining_lines = &remaining_lines[1..];
             parsed_lines += 1;
         }
@@ -315,7 +326,7 @@ fn parse_one_hunk(lines: &[&str], line_number: usize) -> Result<(Hunk, usize), P
             remaining_lines = &remaining_lines[chunk_lines..]
         }
 
-        if chunks.is_empty() {
+        if chunks.is_empty() && move_path.is_none() {
             return Err(InvalidHunkError {
                 message: format!("Update file hunk for path '{path}' is empty"),
                 line_number,
@@ -476,6 +487,65 @@ fn test_parse_patch() {
         Err(InvalidHunkError {
             message: "Update file hunk for path 'test.py' is empty".to_string(),
             line_number: 2,
+        })
+    );
+    assert_eq!(
+        parse_patch_text(
+            "*** Begin Patch\n\
+             *** Update File: old.py\n\
+             *** Move to: new.py\n\
+             *** End Patch",
+            ParseMode::Strict
+        )
+        .unwrap()
+        .hunks,
+        vec![UpdateFile {
+            path: PathBuf::from("old.py"),
+            move_path: Some(PathBuf::from("new.py")),
+            chunks: vec![],
+        }]
+    );
+    assert_eq!(
+        parse_patch_text(
+            "*** Begin Patch\n\
+             *** Update File: old.py\n\
+             \n\
+             *** Move to: new.py\n\
+             *** End Patch",
+            ParseMode::Strict
+        )
+        .unwrap()
+        .hunks,
+        vec![UpdateFile {
+            path: PathBuf::from("old.py"),
+            move_path: Some(PathBuf::from("new.py")),
+            chunks: vec![],
+        }]
+    );
+    assert_eq!(
+        parse_patch_text(
+            "*** Begin Patch\n\
+             *** Update File: old.py\n\
+             *** Move to: \n\
+             *** End Patch",
+            ParseMode::Strict
+        ),
+        Err(InvalidHunkError {
+            message: "Move to path for update 'old.py' is empty".to_string(),
+            line_number: 3,
+        })
+    );
+    assert_eq!(
+        parse_patch_text(
+            "*** Begin Patch\n\
+             *** Update File: old.py\n\
+             *** Move to:    \n\
+             *** End Patch",
+            ParseMode::Strict
+        ),
+        Err(InvalidHunkError {
+            message: "Move to path for update 'old.py' is empty".to_string(),
+            line_number: 3,
         })
     );
     assert_eq!(

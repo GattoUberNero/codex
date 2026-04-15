@@ -2820,7 +2820,17 @@ fn collab_interaction_begin_item(
 ) -> ThreadItem {
     ThreadItem::CollabAgentToolCall {
         id: begin_event.call_id,
-        tool: CollabAgentTool::SendInput,
+        tool: match begin_event.tool {
+            codex_protocol::protocol::CollabAgentInteractionTool::SendInput => {
+                CollabAgentTool::SendInput
+            }
+            codex_protocol::protocol::CollabAgentInteractionTool::SendMessage => {
+                CollabAgentTool::SendMessage
+            }
+            codex_protocol::protocol::CollabAgentInteractionTool::AssignTask => {
+                CollabAgentTool::AssignTask
+            }
+        },
         status: V2CollabToolCallStatus::InProgress,
         sender_thread_id: begin_event.sender_thread_id.to_string(),
         receiver_thread_ids: vec![begin_event.receiver_thread_id.to_string()],
@@ -2851,7 +2861,17 @@ fn collab_interaction_end_item(
     let received_status = V2CollabAgentStatus::from(end_event.status);
     ThreadItem::CollabAgentToolCall {
         id: end_event.call_id,
-        tool: CollabAgentTool::SendInput,
+        tool: match end_event.tool {
+            codex_protocol::protocol::CollabAgentInteractionTool::SendInput => {
+                CollabAgentTool::SendInput
+            }
+            codex_protocol::protocol::CollabAgentInteractionTool::SendMessage => {
+                CollabAgentTool::SendMessage
+            }
+            codex_protocol::protocol::CollabAgentInteractionTool::AssignTask => {
+                CollabAgentTool::AssignTask
+            }
+        },
         status,
         sender_thread_id: end_event.sender_thread_id.to_string(),
         receiver_thread_ids: vec![receiver_id.clone()],
@@ -3401,6 +3421,7 @@ mod tests {
         };
         let event = codex_protocol::protocol::CollabAgentInteractionBeginEvent {
             call_id: "call-send-begin".to_string(),
+            tool: codex_protocol::protocol::CollabAgentInteractionTool::SendMessage,
             sender_thread_id: ThreadId::new(),
             receiver_thread_id: ThreadId::new(),
             prompt: "continue".to_string(),
@@ -3409,7 +3430,7 @@ mod tests {
 
         let expected = ThreadItem::CollabAgentToolCall {
             id: event.call_id.clone(),
-            tool: CollabAgentTool::SendInput,
+            tool: CollabAgentTool::SendMessage,
             status: V2CollabToolCallStatus::InProgress,
             sender_thread_id: event.sender_thread_id.to_string(),
             receiver_thread_ids: vec![event.receiver_thread_id.to_string()],
@@ -3446,6 +3467,7 @@ mod tests {
         };
         let event = codex_protocol::protocol::CollabAgentInteractionEndEvent {
             call_id: "call-send-end".to_string(),
+            tool: codex_protocol::protocol::CollabAgentInteractionTool::AssignTask,
             sender_thread_id: ThreadId::new(),
             receiver_thread_id: ThreadId::new(),
             receiver_agent_nickname: Some("Worker".to_string()),
@@ -3457,7 +3479,7 @@ mod tests {
         let receiver_id = event.receiver_thread_id.to_string();
         let expected = ThreadItem::CollabAgentToolCall {
             id: event.call_id.clone(),
-            tool: CollabAgentTool::SendInput,
+            tool: CollabAgentTool::AssignTask,
             status: V2CollabToolCallStatus::Completed,
             sender_thread_id: event.sender_thread_id.to_string(),
             receiver_thread_ids: vec![receiver_id.clone()],

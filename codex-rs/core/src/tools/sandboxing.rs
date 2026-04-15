@@ -300,6 +300,7 @@ pub(crate) struct ToolCtx {
 
 #[derive(Debug)]
 pub(crate) enum ToolError {
+    Message(String),
     Rejected(String),
     Codex(CodexErr),
 }
