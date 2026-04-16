@@ -5053,6 +5053,135 @@ async fn live_app_server_command_execution_strips_shell_wrapper() {
     );
 }
 
+#[tokio::test]
+async fn live_app_server_multi_file_reader_item_completed_renders_history_cell() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let project_path = test_project_path();
+
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::MultiFileReaderCall {
+                id: "reader-1".to_string(),
+                summary: codex_app_server_protocol::MultiFileReaderSummary {
+                    total_requests: 2,
+                    success_count: 2,
+                    error_count: 0,
+                    total_lines: 19,
+                },
+                entries: vec![
+                    codex_app_server_protocol::MultiFileReaderEntry {
+                        path: project_path.join("AGENTS.md").display().to_string(),
+                        mode: "lines".to_string(),
+                        start_line: Some(1),
+                        end_line: Some(10),
+                        line_count: Some(10),
+                        status: codex_app_server_protocol::MultiFileReaderItemStatus::Success,
+                        error_code: None,
+                    },
+                    codex_app_server_protocol::MultiFileReaderEntry {
+                        path: project_path.join("README.md").display().to_string(),
+                        mode: "full".to_string(),
+                        start_line: None,
+                        end_line: None,
+                        line_count: Some(9),
+                        status: codex_app_server_protocol::MultiFileReaderItemStatus::Success,
+                        error_code: None,
+                    },
+                ],
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(
+        cells.len(),
+        1,
+        "expected one multi_file_reader history cell"
+    );
+    let blob = lines_to_single_string(cells.first().expect("multi_file_reader cell"));
+    assert_snapshot!(
+        "live_app_server_multi_file_reader_item_completed_renders_history_cell",
+        normalize_snapshot_paths(blob)
+    );
+}
+
+#[tokio::test]
+async fn replayed_multi_file_reader_item_renders_history_cell() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let project_path = test_project_path();
+
+    chat.handle_codex_event(Event {
+        id: "configured".into(),
+        msg: EventMsg::SessionConfigured(session_configured_event! {
+            session_id: ThreadId::new(),
+            forked_from_id: None,
+            thread_name: None,
+            model: "test-model".to_string(),
+            model_provider_id: "test-provider".to_string(),
+            service_tier: None,
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: ApprovalsReviewer::User,
+            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            cwd: project_path.clone(),
+            reasoning_effort: None,
+            history_log_id: 0,
+            history_entry_count: 0,
+            initial_messages: None,
+            network_proxy: None,
+            rollout_path: None,
+        }),
+    });
+    let _ = drain_insert_history(&mut rx);
+
+    chat.replay_thread_item(
+        AppServerThreadItem::MultiFileReaderCall {
+            id: "reader-2".to_string(),
+            summary: codex_app_server_protocol::MultiFileReaderSummary {
+                total_requests: 2,
+                success_count: 1,
+                error_count: 1,
+                total_lines: 12,
+            },
+            entries: vec![
+                codex_app_server_protocol::MultiFileReaderEntry {
+                    path: project_path.join("AGENTS.md").display().to_string(),
+                    mode: "full".to_string(),
+                    start_line: None,
+                    end_line: None,
+                    line_count: Some(9),
+                    status: codex_app_server_protocol::MultiFileReaderItemStatus::Success,
+                    error_code: None,
+                },
+                codex_app_server_protocol::MultiFileReaderEntry {
+                    path: project_path.join("missing.txt").display().to_string(),
+                    mode: "invalid".to_string(),
+                    start_line: Some(1),
+                    end_line: Some(4),
+                    line_count: Some(3),
+                    status: codex_app_server_protocol::MultiFileReaderItemStatus::Error,
+                    error_code: Some("file_not_found".to_string()),
+                },
+            ],
+        },
+        "turn-1".to_string(),
+        ReplayKind::ThreadSnapshotTurns,
+    );
+
+    let rendered = match rx.try_recv() {
+        Ok(AppEvent::InsertHistoryCell(cell)) => {
+            normalize_snapshot_paths(lines_to_single_string(&cell.transcript_lines(/*width*/ 90)))
+        }
+        other => panic!("expected InsertHistoryCell, got {other:?}"),
+    };
+    assert_snapshot!(
+        "replayed_multi_file_reader_item_renders_history_cell",
+        rendered
+    );
+}
+
 #[test]
 fn app_server_patch_changes_to_core_preserves_diffs() {
     let changes = app_server_patch_changes_to_core(vec![FileUpdateChange {

@@ -1,0 +1,8 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: rendered
+---
+• Read with multi_file_reader
+  └ Requests: 2 total | 1 success | 1 error | 12 lines
+    AGENTS.md (full) [9 lines]
+    missing.txt (invalid) [3 lines] - error: file_not_found

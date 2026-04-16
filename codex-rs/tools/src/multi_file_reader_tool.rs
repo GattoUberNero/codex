@@ -10,8 +10,15 @@ pub fn create_multi_file_reader_tool() -> ToolSpec {
         .unwrap_or_else(|error| panic!("multi_file_reader input schema must be valid: {error}"));
     ToolSpec::Function(ResponsesApiTool {
         name: TOOL_NAME.to_string(),
-        description: "Reads multiple files or line ranges in one call. Relative paths are resolved against the current turn cwd."
-            .to_string(),
+        description: concat!(
+            "Primary tool for reading file contents when available. Batch related file reads in ",
+            "one call instead of splitting them across repeated shell commands. Use `full` when ",
+            "you need most of a file and expect the batch to stay within the output budget; use ",
+            "`lines` for large files or targeted sections. Avoid reading the same file in many ",
+            "small chunks unless there is a clear reason. Relative paths are resolved against ",
+            "the current turn cwd."
+        )
+        .to_string(),
         strict: false,
         defer_loading: None,
         parameters,

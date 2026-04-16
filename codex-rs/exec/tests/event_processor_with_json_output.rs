@@ -820,8 +820,8 @@ fn collab_spawn_begin_and_end_emit_item_events() {
 fn collab_follow_up_tools_emit_distinct_item_events() {
     let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
 
-    let send_message = processor.collect_thread_events(ServerNotification::ItemStarted(
-        ItemStartedNotification {
+    let send_message =
+        processor.collect_thread_events(ServerNotification::ItemStarted(ItemStartedNotification {
             item: ThreadItem::CollabAgentToolCall {
                 id: "collab-send-message".to_string(),
                 tool: CollabAgentTool::SendMessage,
@@ -843,10 +843,9 @@ fn collab_follow_up_tools_emit_distinct_item_events() {
             },
             thread_id: "thread-parent".to_string(),
             turn_id: "turn-1".to_string(),
-        },
-    ));
-    let assign_task = processor.collect_thread_events(ServerNotification::ItemStarted(
-        ItemStartedNotification {
+        }));
+    let assign_task =
+        processor.collect_thread_events(ServerNotification::ItemStarted(ItemStartedNotification {
             item: ThreadItem::CollabAgentToolCall {
                 id: "collab-assign-task".to_string(),
                 tool: CollabAgentTool::AssignTask,
@@ -868,8 +867,7 @@ fn collab_follow_up_tools_emit_distinct_item_events() {
             },
             thread_id: "thread-parent".to_string(),
             turn_id: "turn-1".to_string(),
-        },
-    ));
+        }));
 
     assert_eq!(
         send_message,

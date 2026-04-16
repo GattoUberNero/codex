@@ -45,8 +45,8 @@ use codex_protocol::plan_tool::PlanItemArg as CorePlanItemArg;
 use codex_protocol::plan_tool::StepStatus as CorePlanStepStatus;
 use codex_protocol::protocol::AgentStatus as CoreAgentStatus;
 use codex_protocol::protocol::AskForApproval as CoreAskForApproval;
-use codex_protocol::protocol::CollabAgentInteractionTool as CoreCollabAgentInteractionTool;
 use codex_protocol::protocol::CodexErrorInfo as CoreCodexErrorInfo;
+use codex_protocol::protocol::CollabAgentInteractionTool as CoreCollabAgentInteractionTool;
 use codex_protocol::protocol::CreditsSnapshot as CoreCreditsSnapshot;
 use codex_protocol::protocol::DelegationReport;
 use codex_protocol::protocol::ExecCommandSource as CoreExecCommandSource;
@@ -4649,6 +4649,13 @@ pub enum ThreadItem {
     },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
+    MultiFileReaderCall {
+        id: String,
+        summary: MultiFileReaderSummary,
+        entries: Vec<MultiFileReaderEntry>,
+    },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
     CollabAgentToolCall {
         /// Unique identifier for this collab tool call.
         id: String,
@@ -4738,6 +4745,7 @@ impl ThreadItem {
             | ThreadItem::FileChange { id, .. }
             | ThreadItem::McpToolCall { id, .. }
             | ThreadItem::DynamicToolCall { id, .. }
+            | ThreadItem::MultiFileReaderCall { id, .. }
             | ThreadItem::CollabAgentToolCall { id, .. }
             | ThreadItem::WebSearch { id, .. }
             | ThreadItem::ImageView { id, .. }
@@ -4747,6 +4755,37 @@ impl ThreadItem {
             | ThreadItem::ContextCompaction { id, .. } => id,
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MultiFileReaderSummary {
+    pub total_requests: usize,
+    pub success_count: usize,
+    pub error_count: usize,
+    pub total_lines: usize,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MultiFileReaderEntry {
+    pub path: String,
+    pub mode: String,
+    pub start_line: Option<usize>,
+    pub end_line: Option<usize>,
+    pub line_count: Option<usize>,
+    pub status: MultiFileReaderItemStatus,
+    pub error_code: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "v2/")]
+pub enum MultiFileReaderItemStatus {
+    Success,
+    Error,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]

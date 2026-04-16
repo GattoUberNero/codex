@@ -1,0 +1,9 @@
+---
+source: tui/src/history_cell.rs
+expression: rendered
+---
+• Read with multi_file_reader
+  └ Requests: 3 total | 2 success | 1 error | 143 lines
+    AGENTS.md (full) [120 lines]
+    contracts/model-catalog.v1.json:10-32 [23 lines]
+    missing.txt (invalid_mode) - error: file_not_found

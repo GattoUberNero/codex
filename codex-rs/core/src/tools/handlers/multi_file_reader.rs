@@ -4,12 +4,18 @@ use codex_nero_file_reader::MultiFileReaderFs;
 use codex_nero_file_reader::MultiFileReaderResponse;
 use codex_nero_file_reader::ReaderConfig;
 use codex_nero_file_reader::ReaderFileMetadata;
+use codex_nero_file_reader::ResponseItem;
 use codex_nero_file_reader::build_text_output;
 use codex_nero_file_reader::execute_multi_file_reader_json;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseInputItem;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::MultiFileReaderEntry;
+use codex_protocol::protocol::MultiFileReaderItemStatus;
+use codex_protocol::protocol::MultiFileReaderSummary;
+use codex_protocol::protocol::MultiFileReaderToolCallEvent;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Value as JsonValue;
 use std::io;
@@ -34,7 +40,13 @@ impl ToolHandler for MultiFileReaderHandler {
     }
 
     async fn handle(&self, invocation: ToolInvocation) -> Result<Self::Output, FunctionCallError> {
-        let ToolInvocation { turn, payload, .. } = invocation;
+        let ToolInvocation {
+            session,
+            turn,
+            call_id,
+            payload,
+            ..
+        } = invocation;
         let arguments = match payload {
             ToolPayload::Function { arguments } => arguments,
             _ => {
@@ -54,6 +66,29 @@ impl ToolHandler for MultiFileReaderHandler {
             &fs,
         )
         .await;
+        session
+            .send_event(
+                turn.as_ref(),
+                EventMsg::MultiFileReaderToolCall(MultiFileReaderToolCallEvent {
+                    call_id,
+                    summary: MultiFileReaderSummary {
+                        total_requests: response.summary.total_requests,
+                        success_count: response.summary.success_count,
+                        error_count: response.summary.error_count,
+                        total_lines: response
+                            .results
+                            .iter()
+                            .filter_map(|item| item.line_count)
+                            .sum(),
+                    },
+                    entries: response
+                        .results
+                        .iter()
+                        .map(response_item_to_event_entry)
+                        .collect(),
+                }),
+            )
+            .await;
         Ok(MultiFileReaderToolOutput { response })
     }
 }
@@ -85,6 +120,21 @@ fn absolute_path(path: &Path) -> io::Result<AbsolutePathBuf> {
             format!("path must be absolute, got `{}`: {error}", path.display()),
         )
     })
+}
+
+fn response_item_to_event_entry(item: &ResponseItem) -> MultiFileReaderEntry {
+    MultiFileReaderEntry {
+        path: item.path.clone(),
+        mode: item.mode.clone(),
+        start_line: item.start_line,
+        end_line: item.end_line,
+        line_count: item.line_count,
+        status: match item.status {
+            codex_nero_file_reader::ItemStatus::Success => MultiFileReaderItemStatus::Success,
+            codex_nero_file_reader::ItemStatus::Error => MultiFileReaderItemStatus::Error,
+        },
+        error_code: item.error_code.clone(),
+    }
 }
 
 pub struct MultiFileReaderToolOutput {

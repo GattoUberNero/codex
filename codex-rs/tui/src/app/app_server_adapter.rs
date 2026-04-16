@@ -867,6 +867,7 @@ fn thread_item_to_core(item: &ThreadItem) -> Option<TurnItem> {
         | ThreadItem::FileChange { .. }
         | ThreadItem::McpToolCall { .. }
         | ThreadItem::DynamicToolCall { .. }
+        | ThreadItem::MultiFileReaderCall { .. }
         | ThreadItem::CollabAgentToolCall { .. }
         | ThreadItem::HookPrompt { .. }
         | ThreadItem::ImageView { .. }

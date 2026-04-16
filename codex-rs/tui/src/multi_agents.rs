@@ -288,9 +288,7 @@ pub(crate) fn interaction_end(ev: CollabAgentInteractionEndEvent) -> PlainHistor
     let title = title_with_agent(
         match tool {
             codex_protocol::protocol::CollabAgentInteractionTool::SendInput => "Sent input to",
-            codex_protocol::protocol::CollabAgentInteractionTool::SendMessage => {
-                "Sent message to"
-            }
+            codex_protocol::protocol::CollabAgentInteractionTool::SendMessage => "Sent message to",
             codex_protocol::protocol::CollabAgentInteractionTool::AssignTask => "Assigned task to",
         },
         AgentLabel {

@@ -1,0 +1,8 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: normalize_snapshot_paths(blob)
+---
+• Read with multi_file_reader
+  └ Requests: 2 total | 2 success | 0 error | 19 lines
+    AGENTS.md:1-10 [10 lines]
+    README.md (full) [9 lines]

@@ -37,6 +37,7 @@ use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
 use codex_protocol::protocol::McpToolCallBeginEvent;
 use codex_protocol::protocol::McpToolCallEndEvent;
+use codex_protocol::protocol::MultiFileReaderToolCallEvent;
 use codex_protocol::protocol::PatchApplyBeginEvent;
 use codex_protocol::protocol::PatchApplyEndEvent;
 use codex_protocol::protocol::ReviewOutputEvent;
@@ -163,6 +164,9 @@ impl ThreadHistoryBuilder {
             EventMsg::McpToolCallBegin(payload) => self.handle_mcp_tool_call_begin(payload),
             EventMsg::McpToolCallEnd(payload) => self.handle_mcp_tool_call_end(payload),
             EventMsg::ViewImageToolCall(payload) => self.handle_view_image_tool_call(payload),
+            EventMsg::MultiFileReaderToolCall(payload) => {
+                self.handle_multi_file_reader_tool_call(payload)
+            }
             EventMsg::ImageGenerationBegin(payload) => self.handle_image_generation_begin(payload),
             EventMsg::ImageGenerationEnd(payload) => self.handle_image_generation_end(payload),
             EventMsg::CollabAgentSpawnBegin(payload) => {
@@ -578,6 +582,39 @@ impl ThreadHistoryBuilder {
         let item = ThreadItem::ImageView {
             id: payload.call_id.clone(),
             path: payload.path.to_string_lossy().into_owned(),
+        };
+        self.upsert_item_in_current_turn(item);
+    }
+
+    fn handle_multi_file_reader_tool_call(&mut self, payload: &MultiFileReaderToolCallEvent) {
+        let item = ThreadItem::MultiFileReaderCall {
+            id: payload.call_id.clone(),
+            summary: crate::protocol::v2::MultiFileReaderSummary {
+                total_requests: payload.summary.total_requests,
+                success_count: payload.summary.success_count,
+                error_count: payload.summary.error_count,
+                total_lines: payload.summary.total_lines,
+            },
+            entries: payload
+                .entries
+                .iter()
+                .map(|entry| crate::protocol::v2::MultiFileReaderEntry {
+                    path: entry.path.clone(),
+                    mode: entry.mode.clone(),
+                    start_line: entry.start_line,
+                    end_line: entry.end_line,
+                    line_count: entry.line_count,
+                    status: match entry.status {
+                        codex_protocol::protocol::MultiFileReaderItemStatus::Success => {
+                            crate::protocol::v2::MultiFileReaderItemStatus::Success
+                        }
+                        codex_protocol::protocol::MultiFileReaderItemStatus::Error => {
+                            crate::protocol::v2::MultiFileReaderItemStatus::Error
+                        }
+                    },
+                    error_code: entry.error_code.clone(),
+                })
+                .collect(),
         };
         self.upsert_item_in_current_turn(item);
     }
@@ -2104,6 +2141,92 @@ mod tests {
                 }]),
                 success: Some(true),
                 duration_ms: Some(42),
+            }
+        );
+    }
+
+    #[test]
+    fn reconstructs_multi_file_reader_item_from_event() {
+        let events = vec![
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-1".into(),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            }),
+            EventMsg::UserMessage(UserMessageEvent {
+                message: "read files".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            }),
+            EventMsg::MultiFileReaderToolCall(MultiFileReaderToolCallEvent {
+                call_id: "mfr-1".into(),
+                summary: codex_protocol::protocol::MultiFileReaderSummary {
+                    total_requests: 2,
+                    success_count: 1,
+                    error_count: 1,
+                    total_lines: 42,
+                },
+                entries: vec![
+                    codex_protocol::protocol::MultiFileReaderEntry {
+                        path: "/workspace/purrnet/AGENTS.md".into(),
+                        mode: "full".into(),
+                        start_line: None,
+                        end_line: None,
+                        line_count: Some(40),
+                        status: codex_protocol::protocol::MultiFileReaderItemStatus::Success,
+                        error_code: None,
+                    },
+                    codex_protocol::protocol::MultiFileReaderEntry {
+                        path: "/workspace/purrnet/missing.txt".into(),
+                        mode: "invalid".into(),
+                        start_line: Some(1),
+                        end_line: Some(5),
+                        line_count: Some(2),
+                        status: codex_protocol::protocol::MultiFileReaderItemStatus::Error,
+                        error_code: Some("file_not_found".into()),
+                    },
+                ],
+            }),
+        ];
+
+        let items = events
+            .into_iter()
+            .map(RolloutItem::EventMsg)
+            .collect::<Vec<_>>();
+        let turns = build_turns_from_rollout_items(&items);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].items.len(), 2);
+        assert_eq!(
+            turns[0].items[1],
+            ThreadItem::MultiFileReaderCall {
+                id: "mfr-1".into(),
+                summary: crate::protocol::v2::MultiFileReaderSummary {
+                    total_requests: 2,
+                    success_count: 1,
+                    error_count: 1,
+                    total_lines: 42,
+                },
+                entries: vec![
+                    crate::protocol::v2::MultiFileReaderEntry {
+                        path: "/workspace/purrnet/AGENTS.md".into(),
+                        mode: "full".into(),
+                        start_line: None,
+                        end_line: None,
+                        line_count: Some(40),
+                        status: crate::protocol::v2::MultiFileReaderItemStatus::Success,
+                        error_code: None,
+                    },
+                    crate::protocol::v2::MultiFileReaderEntry {
+                        path: "/workspace/purrnet/missing.txt".into(),
+                        mode: "invalid".into(),
+                        start_line: Some(1),
+                        end_line: Some(5),
+                        line_count: Some(2),
+                        status: crate::protocol::v2::MultiFileReaderItemStatus::Error,
+                        error_code: Some("file_not_found".into()),
+                    },
+                ],
             }
         );
     }

@@ -123,6 +123,7 @@ fn event_msg_persistence_mode(ev: &EventMsg) -> Option<EventPersistenceMode> {
         | EventMsg::PatchApplyEnd(_)
         | EventMsg::McpToolCallEnd(_)
         | EventMsg::ViewImageToolCall(_)
+        | EventMsg::MultiFileReaderToolCall(_)
         | EventMsg::CollabAgentSpawnEnd(_)
         | EventMsg::CollabAgentInteractionEnd(_)
         | EventMsg::CollabWaitingEnd(_)
@@ -188,6 +189,8 @@ mod tests {
     use super::should_persist_event_msg;
     use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::ImageGenerationEndEvent;
+    use codex_protocol::protocol::MultiFileReaderSummary;
+    use codex_protocol::protocol::MultiFileReaderToolCallEvent;
 
     #[test]
     fn persists_image_generation_end_events_in_limited_mode() {
@@ -202,6 +205,25 @@ mod tests {
         assert!(should_persist_event_msg(
             &event,
             EventPersistenceMode::Limited
+        ));
+    }
+
+    #[test]
+    fn persists_multi_file_reader_tool_call_events_in_extended_mode() {
+        let event = EventMsg::MultiFileReaderToolCall(MultiFileReaderToolCallEvent {
+            call_id: "mfr_123".into(),
+            summary: MultiFileReaderSummary {
+                total_requests: 1,
+                success_count: 1,
+                error_count: 0,
+                total_lines: 42,
+            },
+            entries: Vec::new(),
+        });
+
+        assert!(should_persist_event_msg(
+            &event,
+            EventPersistenceMode::Extended
         ));
     }
 }

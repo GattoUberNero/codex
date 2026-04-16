@@ -185,6 +185,7 @@ use codex_protocol::protocol::McpStartupStatus;
 use codex_protocol::protocol::McpStartupUpdateEvent;
 use codex_protocol::protocol::McpToolCallBeginEvent;
 use codex_protocol::protocol::McpToolCallEndEvent;
+use codex_protocol::protocol::MultiFileReaderToolCallEvent;
 use codex_protocol::protocol::NeroAutoRuntimeConfig;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::PatchApplyBeginEvent;
@@ -4086,6 +4087,17 @@ impl ChatWidget {
         self.defer_or_handle(|q| q.push_mcp_end(ev), |s| s.handle_mcp_end_now(ev2));
     }
 
+    fn on_multi_file_reader_tool_call(&mut self, ev: MultiFileReaderToolCallEvent) {
+        self.flush_answer_stream_with_separator();
+        self.flush_active_cell();
+        self.add_to_history(history_cell::new_multi_file_reader_call(
+            ev,
+            &self.config.cwd,
+        ));
+        self.had_work_activity = true;
+        self.request_redraw();
+    }
+
     fn on_web_search_begin(&mut self, ev: WebSearchBeginEvent) {
         self.flush_answer_stream_with_separator();
         self.flush_active_cell();
@@ -6959,6 +6971,40 @@ impl ChatWidget {
                     },
                 });
             }
+            ThreadItem::MultiFileReaderCall {
+                id,
+                summary,
+                entries,
+            } => {
+                self.on_multi_file_reader_tool_call(MultiFileReaderToolCallEvent {
+                    call_id: id,
+                    summary: codex_protocol::protocol::MultiFileReaderSummary {
+                        total_requests: summary.total_requests,
+                        success_count: summary.success_count,
+                        error_count: summary.error_count,
+                        total_lines: summary.total_lines,
+                    },
+                    entries: entries
+                        .into_iter()
+                        .map(|entry| codex_protocol::protocol::MultiFileReaderEntry {
+                            path: entry.path,
+                            mode: entry.mode,
+                            start_line: entry.start_line,
+                            end_line: entry.end_line,
+                            line_count: entry.line_count,
+                            status: match entry.status {
+                                codex_app_server_protocol::MultiFileReaderItemStatus::Success => {
+                                    codex_protocol::protocol::MultiFileReaderItemStatus::Success
+                                }
+                                codex_app_server_protocol::MultiFileReaderItemStatus::Error => {
+                                    codex_protocol::protocol::MultiFileReaderItemStatus::Error
+                                }
+                            },
+                            error_code: entry.error_code,
+                        })
+                        .collect(),
+                });
+            }
             ThreadItem::WebSearch { id, query, action } => {
                 self.on_web_search_begin(WebSearchBeginEvent {
                     call_id: id.clone(),
@@ -7937,6 +7983,9 @@ impl ChatWidget {
             | EventMsg::ReasoningRawContentDelta(_)
             | EventMsg::DynamicToolCallRequest(_)
             | EventMsg::DynamicToolCallResponse(_) => {}
+            EventMsg::MultiFileReaderToolCall(ev) => {
+                self.on_multi_file_reader_tool_call(ev);
+            }
             EventMsg::HookStarted(event) => self.on_hook_started(event),
             EventMsg::HookCompleted(event) => self.on_hook_completed(event, replay_kind),
             EventMsg::RealtimeConversationStarted(ev) => {

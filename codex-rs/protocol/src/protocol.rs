@@ -1323,6 +1323,9 @@ pub enum EventMsg {
     /// Notification that the agent attached a local image via the view_image tool.
     ViewImageToolCall(ViewImageToolCallEvent),
 
+    /// Notification that the agent completed a multi_file_reader batch.
+    MultiFileReaderToolCall(MultiFileReaderToolCallEvent),
+
     ExecApprovalRequest(ExecApprovalRequestEvent),
 
     RequestPermissions(RequestPermissionsEvent),
@@ -2895,6 +2898,44 @@ pub struct ViewImageToolCallEvent {
     pub call_id: String,
     /// Local filesystem path provided to the tool.
     pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MultiFileReaderItemStatus {
+    Success,
+    Error,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct MultiFileReaderEntry {
+    pub path: String,
+    pub mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_count: Option<usize>,
+    pub status: MultiFileReaderItemStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct MultiFileReaderSummary {
+    pub total_requests: usize,
+    pub success_count: usize,
+    pub error_count: usize,
+    pub total_lines: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct MultiFileReaderToolCallEvent {
+    /// Identifier for the originating tool call.
+    pub call_id: String,
+    pub summary: MultiFileReaderSummary,
+    pub entries: Vec<MultiFileReaderEntry>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]

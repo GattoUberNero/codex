@@ -1431,6 +1431,24 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .send_server_notification(ServerNotification::ItemCompleted(completed))
                 .await;
         }
+        EventMsg::MultiFileReaderToolCall(tool_call_event) => {
+            let started = construct_multi_file_reader_tool_call_started_notification(
+                tool_call_event.clone(),
+                conversation_id.to_string(),
+                event_turn_id.clone(),
+            );
+            outgoing
+                .send_server_notification(ServerNotification::ItemStarted(started))
+                .await;
+            let completed = construct_multi_file_reader_tool_call_completed_notification(
+                tool_call_event,
+                conversation_id.to_string(),
+                event_turn_id.clone(),
+            );
+            outgoing
+                .send_server_notification(ServerNotification::ItemCompleted(completed))
+                .await;
+        }
         EventMsg::EnteredReviewMode(review_request) => {
             let review = review_request
                 .user_facing_hint
@@ -2993,6 +3011,66 @@ async fn construct_mcp_tool_call_end_notification(
     }
 }
 
+fn multi_file_reader_tool_call_item(
+    tool_call_event: codex_protocol::protocol::MultiFileReaderToolCallEvent,
+) -> ThreadItem {
+    ThreadItem::MultiFileReaderCall {
+        id: tool_call_event.call_id,
+        summary: codex_app_server_protocol::MultiFileReaderSummary {
+            total_requests: tool_call_event.summary.total_requests,
+            success_count: tool_call_event.summary.success_count,
+            error_count: tool_call_event.summary.error_count,
+            total_lines: tool_call_event.summary.total_lines,
+        },
+        entries: tool_call_event
+            .entries
+            .into_iter()
+            .map(|entry| codex_app_server_protocol::MultiFileReaderEntry {
+                path: entry.path,
+                mode: entry.mode,
+                start_line: entry.start_line,
+                end_line: entry.end_line,
+                line_count: entry.line_count,
+                status: match entry.status {
+                    codex_protocol::protocol::MultiFileReaderItemStatus::Success => {
+                        codex_app_server_protocol::MultiFileReaderItemStatus::Success
+                    }
+                    codex_protocol::protocol::MultiFileReaderItemStatus::Error => {
+                        codex_app_server_protocol::MultiFileReaderItemStatus::Error
+                    }
+                },
+                error_code: entry.error_code,
+            })
+            .collect(),
+    }
+}
+
+fn construct_multi_file_reader_tool_call_started_notification(
+    tool_call_event: codex_protocol::protocol::MultiFileReaderToolCallEvent,
+    thread_id: String,
+    turn_id: String,
+) -> ItemStartedNotification {
+    let item = multi_file_reader_tool_call_item(tool_call_event);
+    ItemStartedNotification {
+        thread_id,
+        turn_id,
+        item,
+    }
+}
+
+fn construct_multi_file_reader_tool_call_completed_notification(
+    tool_call_event: codex_protocol::protocol::MultiFileReaderToolCallEvent,
+    thread_id: String,
+    turn_id: String,
+) -> ItemCompletedNotification {
+    let item = multi_file_reader_tool_call_item(tool_call_event);
+    ItemCompletedNotification {
+        thread_id,
+        turn_id,
+        item,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3020,6 +3098,10 @@ mod tests {
     use codex_protocol::protocol::CollabResumeEndEvent;
     use codex_protocol::protocol::CreditsSnapshot;
     use codex_protocol::protocol::McpInvocation;
+    use codex_protocol::protocol::MultiFileReaderEntry as ProtocolMultiFileReaderEntry;
+    use codex_protocol::protocol::MultiFileReaderItemStatus as ProtocolMultiFileReaderItemStatus;
+    use codex_protocol::protocol::MultiFileReaderSummary as ProtocolMultiFileReaderSummary;
+    use codex_protocol::protocol::MultiFileReaderToolCallEvent;
     use codex_protocol::protocol::RateLimitSnapshot;
     use codex_protocol::protocol::RateLimitWindow;
     use codex_protocol::protocol::SpawnContextInheritanceEffectiveMode;
@@ -4207,6 +4289,100 @@ mod tests {
         };
 
         assert_eq!(notification, expected);
+    }
+
+    #[test]
+    fn test_construct_multi_file_reader_tool_call_notifications() {
+        let event = MultiFileReaderToolCallEvent {
+            call_id: "mfr-1".to_string(),
+            summary: ProtocolMultiFileReaderSummary {
+                total_requests: 2,
+                success_count: 1,
+                error_count: 1,
+                total_lines: 12,
+            },
+            entries: vec![
+                ProtocolMultiFileReaderEntry {
+                    path: "/workspace/purrnet/AGENTS.md".to_string(),
+                    mode: "full".to_string(),
+                    start_line: None,
+                    end_line: None,
+                    line_count: Some(9),
+                    status: ProtocolMultiFileReaderItemStatus::Success,
+                    error_code: None,
+                },
+                ProtocolMultiFileReaderEntry {
+                    path: "/workspace/purrnet/missing.txt".to_string(),
+                    mode: "invalid".to_string(),
+                    start_line: Some(1),
+                    end_line: Some(4),
+                    line_count: None,
+                    status: ProtocolMultiFileReaderItemStatus::Error,
+                    error_code: Some("file_not_found".to_string()),
+                },
+            ],
+        };
+
+        let thread_id = ThreadId::new().to_string();
+        let turn_id = "turn_4".to_string();
+
+        let started = construct_multi_file_reader_tool_call_started_notification(
+            event.clone(),
+            thread_id.clone(),
+            turn_id.clone(),
+        );
+        let completed = construct_multi_file_reader_tool_call_completed_notification(
+            event,
+            thread_id.clone(),
+            turn_id.clone(),
+        );
+
+        let expected_item = ThreadItem::MultiFileReaderCall {
+            id: "mfr-1".to_string(),
+            summary: codex_app_server_protocol::MultiFileReaderSummary {
+                total_requests: 2,
+                success_count: 1,
+                error_count: 1,
+                total_lines: 12,
+            },
+            entries: vec![
+                codex_app_server_protocol::MultiFileReaderEntry {
+                    path: "/workspace/purrnet/AGENTS.md".to_string(),
+                    mode: "full".to_string(),
+                    start_line: None,
+                    end_line: None,
+                    line_count: Some(9),
+                    status: codex_app_server_protocol::MultiFileReaderItemStatus::Success,
+                    error_code: None,
+                },
+                codex_app_server_protocol::MultiFileReaderEntry {
+                    path: "/workspace/purrnet/missing.txt".to_string(),
+                    mode: "invalid".to_string(),
+                    start_line: Some(1),
+                    end_line: Some(4),
+                    line_count: None,
+                    status: codex_app_server_protocol::MultiFileReaderItemStatus::Error,
+                    error_code: Some("file_not_found".to_string()),
+                },
+            ],
+        };
+
+        assert_eq!(
+            started,
+            ItemStartedNotification {
+                thread_id: thread_id.clone(),
+                turn_id: turn_id.clone(),
+                item: expected_item.clone(),
+            }
+        );
+        assert_eq!(
+            completed,
+            ItemCompletedNotification {
+                thread_id,
+                turn_id,
+                item: expected_item,
+            }
+        );
     }
 
     #[tokio::test]

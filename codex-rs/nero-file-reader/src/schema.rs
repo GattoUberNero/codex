@@ -11,6 +11,7 @@ pub fn input_schema_json() -> Value {
         "requests": {
           "type": "array",
           "minItems": 1,
+          "description": "Batch related file reads in one call. Prefer fewer, larger reads over repeated small reads when the total output stays relevant.",
           "items": {
             "type": "object",
             "properties": {
@@ -20,22 +21,22 @@ pub fn input_schema_json() -> Value {
               },
               "path": {
                 "type": "string",
-                "description": "Absolute path or relative path (resolved against current turn cwd)."
+                "description": "Absolute path or relative path (resolved against current turn cwd). Prefer grouping paths that are needed for the same reasoning step into one request batch."
               },
               "mode": {
                 "type": "string",
                 "enum": ["full", "lines"],
-                "description": "Read mode: `full` reads the entire file, `lines` reads an inclusive line range."
+                "description": "Read mode: use `full` when you need most of a file and expect the batch to stay within the output budget; use `lines` for large files or precise sections. `lines` reads an inclusive line range."
               },
               "start_line": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Required for `mode: lines`."
+                "description": "Required for `mode: lines`. Choose ranges large enough to preserve surrounding context."
               },
               "end_line": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Required for `mode: lines`; must be >= start_line."
+                "description": "Required for `mode: lines`; must be >= start_line. Avoid splitting one nearby area into many small ranges without a clear reason."
               }
             },
             "required": ["path", "mode"],

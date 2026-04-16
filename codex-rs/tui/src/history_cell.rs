@@ -65,6 +65,9 @@ use codex_protocol::plan_tool::UpdatePlanArgs;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::McpAuthStatus;
 use codex_protocol::protocol::McpInvocation;
+use codex_protocol::protocol::MultiFileReaderEntry;
+use codex_protocol::protocol::MultiFileReaderItemStatus;
+use codex_protocol::protocol::MultiFileReaderToolCallEvent;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::request_user_input::RequestUserInputAnswer;
 use codex_protocol::request_user_input::RequestUserInputQuestion;
@@ -1686,6 +1689,108 @@ pub(crate) fn new_web_search_call(
     );
     cell.complete();
     cell
+}
+
+#[derive(Debug)]
+pub(crate) struct MultiFileReaderCell {
+    event: MultiFileReaderToolCallEvent,
+    cwd: PathBuf,
+}
+
+impl MultiFileReaderCell {
+    pub(crate) fn new(event: MultiFileReaderToolCallEvent, cwd: PathBuf) -> Self {
+        Self { event, cwd }
+    }
+}
+
+impl HistoryCell for MultiFileReaderCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let bullet = if self.event.summary.error_count == 0 {
+            "•".dim()
+        } else if self.event.summary.success_count == 0 {
+            "•".red().bold()
+        } else {
+            "•".yellow().bold()
+        };
+        let header = Line::from(vec![
+            bullet,
+            " ".into(),
+            "Read with multi_file_reader".bold(),
+        ]);
+
+        let mut detail_lines = vec![Line::from(
+            format!(
+                "Requests: {} total | {} success | {} error | {} lines",
+                self.event.summary.total_requests,
+                self.event.summary.success_count,
+                self.event.summary.error_count,
+                self.event.summary.total_lines
+            )
+            .dim(),
+        )];
+        detail_lines.extend(
+            self.event
+                .entries
+                .iter()
+                .map(|entry| render_multi_file_reader_entry(entry, &self.cwd))
+                .map(|line| Line::from(line.dim())),
+        );
+
+        let wrapped_detail_lines = detail_lines
+            .into_iter()
+            .flat_map(|line| {
+                adaptive_wrap_line(
+                    &line,
+                    RtOptions::new((width as usize).saturating_sub(4).max(1))
+                        .initial_indent("".into())
+                        .subsequent_indent("    ".into()),
+                )
+                .into_iter()
+                .map(|wrapped| line_to_static(&wrapped))
+                .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        let mut lines = vec![header];
+        lines.extend(prefix_lines(
+            wrapped_detail_lines,
+            "  └ ".dim(),
+            "    ".into(),
+        ));
+        lines
+    }
+}
+
+pub(crate) fn new_multi_file_reader_call(
+    event: MultiFileReaderToolCallEvent,
+    cwd: &Path,
+) -> MultiFileReaderCell {
+    MultiFileReaderCell::new(event, cwd.to_path_buf())
+}
+
+fn render_multi_file_reader_entry(entry: &MultiFileReaderEntry, cwd: &Path) -> String {
+    let display_path = display_path_for(Path::new(&entry.path), cwd);
+    let location = match entry.mode.as_str() {
+        "full" => format!("{display_path} (full)"),
+        "lines" => match (entry.start_line, entry.end_line) {
+            (Some(start_line), Some(end_line)) => format!("{display_path}:{start_line}-{end_line}"),
+            _ => format!("{display_path} (lines)"),
+        },
+        mode => format!("{display_path} ({mode})"),
+    };
+
+    let mut detail = location;
+    if let Some(line_count) = entry.line_count {
+        detail.push_str(&format!(" [{line_count} lines]"));
+    }
+    if matches!(entry.status, MultiFileReaderItemStatus::Error) {
+        if let Some(error_code) = &entry.error_code {
+            detail.push_str(&format!(" - error: {error_code}"));
+        } else {
+            detail.push_str(" - error");
+        }
+    }
+    detail
 }
 
 /// Returns an additional history cell if an MCP tool result includes a decodable image.
@@ -4046,6 +4151,93 @@ plugins = true
         );
 
         let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
+
+        insta::assert_snapshot!(rendered);
+    }
+
+    #[test]
+    fn multi_file_reader_call_snapshot() {
+        let cell = new_multi_file_reader_call(
+            MultiFileReaderToolCallEvent {
+                call_id: "mfr-1".into(),
+                summary: codex_protocol::protocol::MultiFileReaderSummary {
+                    total_requests: 3,
+                    success_count: 2,
+                    error_count: 1,
+                    total_lines: 143,
+                },
+                entries: vec![
+                    MultiFileReaderEntry {
+                        path: "/workspace/purrnet/AGENTS.md".into(),
+                        mode: "full".into(),
+                        start_line: None,
+                        end_line: None,
+                        line_count: Some(120),
+                        status: MultiFileReaderItemStatus::Success,
+                        error_code: None,
+                    },
+                    MultiFileReaderEntry {
+                        path: "/workspace/purrnet/contracts/model-catalog.v1.json".into(),
+                        mode: "lines".into(),
+                        start_line: Some(10),
+                        end_line: Some(32),
+                        line_count: Some(23),
+                        status: MultiFileReaderItemStatus::Success,
+                        error_code: None,
+                    },
+                    MultiFileReaderEntry {
+                        path: "/workspace/purrnet/missing.txt".into(),
+                        mode: "invalid_mode".into(),
+                        start_line: Some(1),
+                        end_line: Some(20),
+                        line_count: None,
+                        status: MultiFileReaderItemStatus::Error,
+                        error_code: Some("file_not_found".into()),
+                    },
+                ],
+            },
+            Path::new("/workspace/purrnet"),
+        );
+        let rendered = render_lines(&cell.display_lines(/*width*/ 90)).join("\n");
+
+        insta::assert_snapshot!(rendered);
+    }
+
+    #[test]
+    fn multi_file_reader_call_all_fail_snapshot() {
+        let cell = new_multi_file_reader_call(
+            MultiFileReaderToolCallEvent {
+                call_id: "mfr-2".into(),
+                summary: codex_protocol::protocol::MultiFileReaderSummary {
+                    total_requests: 2,
+                    success_count: 0,
+                    error_count: 2,
+                    total_lines: 0,
+                },
+                entries: vec![
+                    MultiFileReaderEntry {
+                        path: "/workspace/purrnet/missing-a.txt".into(),
+                        mode: "full".into(),
+                        start_line: None,
+                        end_line: None,
+                        line_count: None,
+                        status: MultiFileReaderItemStatus::Error,
+                        error_code: Some("file_not_found".into()),
+                    },
+                    MultiFileReaderEntry {
+                        path: "/workspace/purrnet/missing-b.txt".into(),
+                        mode: "lines".into(),
+                        start_line: Some(1),
+                        end_line: Some(3),
+                        line_count: None,
+                        status: MultiFileReaderItemStatus::Error,
+                        error_code: Some("permission_denied".into()),
+                    },
+                ],
+            },
+            Path::new("/workspace/purrnet"),
+        );
+        let rendered = render_lines(&cell.display_lines(/*width*/ 90)).join("\n");
 
         insta::assert_snapshot!(rendered);
     }
