@@ -787,6 +787,31 @@ impl AgentControl {
         thread.agent_status().await
     }
 
+    pub(crate) async fn first_active_agent_in_tree(
+        &self,
+        root_thread_id: ThreadId,
+    ) -> CodexResult<Option<(ThreadId, AgentStatus)>> {
+        let root_status = self.get_status(root_thread_id).await;
+        if matches!(
+            root_status,
+            AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::Interrupted
+        ) {
+            return Ok(Some((root_thread_id, root_status)));
+        }
+
+        for descendant_id in self.live_thread_spawn_descendants(root_thread_id).await? {
+            let status = self.get_status(descendant_id).await;
+            if matches!(
+                status,
+                AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::Interrupted
+            ) {
+                return Ok(Some((descendant_id, status)));
+            }
+        }
+
+        Ok(None)
+    }
+
     pub(crate) fn register_session_root(
         &self,
         current_thread_id: ThreadId,

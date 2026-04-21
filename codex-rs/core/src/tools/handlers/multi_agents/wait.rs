@@ -1,6 +1,7 @@
 use super::*;
 use crate::agent::status::is_final;
 use crate::error::CodexErr;
+use codex_protocol::protocol::CollabWaitOutcome;
 use futures::FutureExt;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -60,15 +61,8 @@ impl ToolHandler for Handler {
             });
         }
 
-        let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
-        let timeout_ms = match timeout_ms {
-            ms if ms <= 0 => {
-                return Err(FunctionCallError::RespondToModel(
-                    "timeout_ms must be greater than zero".to_owned(),
-                ));
-            }
-            ms => ms.clamp(MIN_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS),
-        };
+        let timeout_ms =
+            effective_wait_timeout_ms(args.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS))?;
 
         session
             .send_event(
@@ -106,6 +100,7 @@ impl ToolHandler for Handler {
                             CollabWaitingEndEvent {
                                 sender_thread_id: session.conversation_id,
                                 call_id: call_id.clone(),
+                                wait_outcome: None,
                                 agent_statuses: build_wait_agent_statuses(
                                     &statuses,
                                     &receiver_agents,
@@ -153,8 +148,20 @@ impl ToolHandler for Handler {
         };
 
         let timed_out = statuses.is_empty();
-        let statuses_by_id = statuses.clone().into_iter().collect::<HashMap<_, _>>();
+        let observed_statuses_by_id = statuses.clone().into_iter().collect::<HashMap<_, _>>();
+        let current_statuses = current_wait_agent_statuses(&session, &receiver_thread_ids).await;
+        let statuses_by_id = if timed_out {
+            current_statuses.clone()
+        } else {
+            observed_statuses_by_id
+        };
+        let wait_outcome = if timed_out {
+            CollabWaitOutcome::ListenWindowEnded
+        } else {
+            CollabWaitOutcome::CompletionObserved
+        };
         let agent_statuses = build_wait_agent_statuses(&statuses_by_id, &receiver_agents);
+        let pending = build_wait_agent_pending(&current_statuses, &receiver_agents);
         let result = WaitAgentResult {
             status: statuses
                 .into_iter()
@@ -165,7 +172,9 @@ impl ToolHandler for Handler {
                         .map(|target| (target, status))
                 })
                 .collect(),
+            pending,
             timed_out,
+            wait_outcome,
         };
 
         session
@@ -174,6 +183,7 @@ impl ToolHandler for Handler {
                 CollabWaitingEndEvent {
                     sender_thread_id: session.conversation_id,
                     call_id,
+                    wait_outcome: Some(wait_outcome),
                     agent_statuses,
                     statuses: statuses_by_id,
                 }
@@ -195,7 +205,9 @@ struct WaitArgs {
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct WaitAgentResult {
     pub(crate) status: HashMap<String, AgentStatus>,
+    pub(crate) pending: Vec<WaitPendingAgent>,
     pub(crate) timed_out: bool,
+    pub(crate) wait_outcome: CollabWaitOutcome,
 }
 
 impl ToolOutput for WaitAgentResult {

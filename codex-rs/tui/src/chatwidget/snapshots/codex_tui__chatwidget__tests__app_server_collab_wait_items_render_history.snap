@@ -2,11 +2,11 @@
 source: tui/src/chatwidget/tests.rs
 expression: combined
 ---
-• Waiting for 2 agents
+• Listening for first completion from 2 agents
   └ Robie [explorer]
     Ada [reviewer]
 
 
-• Finished waiting
+• First completion observed; 1 target still pending
   └ Robie [explorer]: Completed - Done
     Ada [reviewer]: Running

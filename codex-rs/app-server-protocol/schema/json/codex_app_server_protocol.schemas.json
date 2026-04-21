@@ -5933,6 +5933,14 @@
         ],
         "type": "string"
       },
+      "CollabWaitOutcome": {
+        "enum": [
+          "completionObserved",
+          "activityObserved",
+          "listenWindowEnded"
+        ],
+        "type": "string"
+      },
       "CollaborationMode": {
         "description": "Collaboration mode for a Codex session.",
         "properties": {
@@ -9571,6 +9579,93 @@
         ],
         "type": "object"
       },
+      "MultiFileReaderEntry": {
+        "properties": {
+          "endLine": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "errorCode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lineCount": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mode": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "startLine": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/definitions/v2/MultiFileReaderItemStatus"
+          }
+        },
+        "required": [
+          "mode",
+          "path",
+          "status"
+        ],
+        "type": "object"
+      },
+      "MultiFileReaderItemStatus": {
+        "enum": [
+          "success",
+          "error"
+        ],
+        "type": "string"
+      },
+      "MultiFileReaderSummary": {
+        "properties": {
+          "errorCount": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "successCount": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "totalLines": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "totalRequests": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "errorCount",
+          "successCount",
+          "totalLines",
+          "totalRequests"
+        ],
+        "type": "object"
+      },
       "NeroAutoRuntimeConfig": {
         "properties": {
           "autonomy_level": {
@@ -13135,6 +13230,37 @@
           },
           {
             "properties": {
+              "entries": {
+                "items": {
+                  "$ref": "#/definitions/v2/MultiFileReaderEntry"
+                },
+                "type": "array"
+              },
+              "id": {
+                "type": "string"
+              },
+              "summary": {
+                "$ref": "#/definitions/v2/MultiFileReaderSummary"
+              },
+              "type": {
+                "enum": [
+                  "multiFileReaderCall"
+                ],
+                "title": "MultiFileReaderCallThreadItemType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "entries",
+              "id",
+              "summary",
+              "type"
+            ],
+            "title": "MultiFileReaderCallThreadItem",
+            "type": "object"
+          },
+          {
+            "properties": {
               "agentsStates": {
                 "additionalProperties": {
                   "$ref": "#/definitions/v2/CollabAgentState"
@@ -13284,6 +13410,17 @@
                 ],
                 "title": "CollabAgentToolCallThreadItemType",
                 "type": "string"
+              },
+              "waitOutcome": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/v2/CollabWaitOutcome"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Outcome of a wait observation window, when this item represents `wait_agent`."
               }
             },
             "required": [

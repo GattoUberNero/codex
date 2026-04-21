@@ -23,6 +23,10 @@ use crate::state::TaskKind;
 use crate::tasks::SessionTask;
 use crate::tasks::SessionTaskContext;
 use crate::tools::context::ToolOutput;
+use crate::tools::handlers::multi_agents_common::WAIT_TIMEOUT_MULTIPLIER;
+use crate::tools::handlers::multi_agents_common::WaitPendingAgent;
+use crate::tools::handlers::multi_agents_common::effective_wait_timeout_ms;
+use crate::tools::handlers::multi_agents_common::is_active_agent_status;
 use crate::tools::handlers::multi_agents_v2::AssignTaskHandler as AssignTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::CloseAgentHandler as CloseAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
@@ -38,6 +42,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::CollabWaitOutcome;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::RolloutItem;
@@ -3409,8 +3414,10 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait completed.".to_string(),
+            message: "Observed activity.".to_string(),
+            pending: Vec::new(),
             timed_out: false,
+            wait_outcome: CollabWaitOutcome::ActivityObserved,
         }
     );
     assert_eq!(success, None);
@@ -3446,7 +3453,9 @@ async fn wait_agent_returns_not_found_for_missing_agents() {
                 (id_a.to_string(), AgentStatus::NotFound),
                 (id_b.to_string(), AgentStatus::NotFound),
             ]),
-            timed_out: false
+            pending: Vec::new(),
+            timed_out: false,
+            wait_outcome: CollabWaitOutcome::CompletionObserved,
         }
     );
     assert_eq!(success, None);
@@ -3480,7 +3489,12 @@ async fn wait_agent_times_out_when_status_is_not_final() {
         result,
         wait::WaitAgentResult {
             status: HashMap::new(),
-            timed_out: true
+            pending: vec![WaitPendingAgent {
+                id: agent_id.to_string(),
+                state: AgentStatus::PendingInit,
+            }],
+            timed_out: true,
+            wait_outcome: CollabWaitOutcome::ListenWindowEnded,
         }
     );
     assert_eq!(success, None);
@@ -3527,6 +3541,15 @@ async fn wait_agent_clamps_short_timeouts_to_minimum() {
         .expect("shutdown should submit");
 }
 
+#[test]
+fn wait_agent_effective_timeout_multiplies_requested_timeout() {
+    let requested = MIN_WAIT_TIMEOUT_MS + 1;
+    assert_eq!(
+        effective_wait_timeout_ms(requested).expect("positive timeout should be accepted"),
+        requested * WAIT_TIMEOUT_MULTIPLIER
+    );
+}
+
 #[tokio::test]
 async fn wait_agent_returns_final_status_without_timeout() {
     let (mut session, turn) = make_session_and_context().await;
@@ -3570,10 +3593,247 @@ async fn wait_agent_returns_final_status_without_timeout() {
         result,
         wait::WaitAgentResult {
             status: HashMap::from([(agent_id.to_string(), AgentStatus::Shutdown)]),
-            timed_out: false
+            pending: Vec::new(),
+            timed_out: false,
+            wait_outcome: CollabWaitOutcome::CompletionObserved,
         }
     );
     assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn wait_agent_reports_pending_targets_after_first_completion() {
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let config = turn.config.as_ref().clone();
+    let completed_thread = manager
+        .start_thread(config.clone())
+        .await
+        .expect("start completed thread");
+    let active_thread = manager
+        .start_thread(config)
+        .await
+        .expect("start active thread");
+    let completed_agent_id = completed_thread.thread_id;
+    let active_agent_id = active_thread.thread_id;
+    let mut completed_status_rx = manager
+        .agent_control()
+        .subscribe_status(completed_agent_id)
+        .await
+        .expect("subscribe should succeed");
+
+    let _ = completed_thread
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+    let _ = timeout(Duration::from_secs(1), completed_status_rx.changed())
+        .await
+        .expect("shutdown status should arrive");
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "wait_agent",
+        function_payload(json!({
+            "targets": [completed_agent_id.to_string(), active_agent_id.to_string()],
+            "timeout_ms": 1000
+        })),
+    );
+    let output = WaitAgentHandler
+        .handle(invocation)
+        .await
+        .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert_eq!(
+        result,
+        wait::WaitAgentResult {
+            status: HashMap::from([(completed_agent_id.to_string(), AgentStatus::Shutdown)]),
+            pending: vec![WaitPendingAgent {
+                id: active_agent_id.to_string(),
+                state: AgentStatus::PendingInit,
+            }],
+            timed_out: false,
+            wait_outcome: CollabWaitOutcome::CompletionObserved,
+        }
+    );
+    assert_eq!(success, None);
+
+    let _ = active_thread
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_observes_completion_for_task_name_target() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    turn.config = Arc::new(config);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    SpawnAgentHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "boot worker",
+                "task_name": "worker"
+            })),
+        ))
+        .await
+        .expect("spawn worker");
+    let agent_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.conversation_id, &turn.session_source, "worker")
+        .await
+        .expect("worker should resolve");
+    let worker = manager
+        .get_thread(agent_id)
+        .await
+        .expect("worker thread should exist");
+    let mut status_rx = session
+        .services
+        .agent_control
+        .subscribe_status(agent_id)
+        .await
+        .expect("subscribe should succeed");
+
+    let _ = worker
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+    let _ = timeout(Duration::from_secs(1), status_rx.changed())
+        .await
+        .expect("shutdown status should arrive");
+
+    let output = WaitAgentHandlerV2
+        .handle(invocation(
+            session,
+            turn,
+            "wait_agent",
+            function_payload(json!({
+                "targets": ["worker"],
+                "timeout_ms": 1000
+            })),
+        ))
+        .await
+        .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert_eq!(
+        result,
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "Observed completion.".to_string(),
+            pending: Vec::new(),
+            timed_out: false,
+            wait_outcome: CollabWaitOutcome::CompletionObserved,
+        }
+    );
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_reports_pending_targets_after_first_completion() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    turn.config = Arc::new(config);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let completed_thread = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("completed thread should start");
+    let active_thread = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("active thread should start");
+    let completed_agent_id = completed_thread.thread_id;
+    let active_agent_id = active_thread.thread_id;
+    let mut completed_status_rx = session
+        .services
+        .agent_control
+        .subscribe_status(completed_agent_id)
+        .await
+        .expect("subscribe should succeed");
+
+    let _ = completed_thread
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+    let _ = timeout(Duration::from_secs(1), completed_status_rx.changed())
+        .await
+        .expect("shutdown status should arrive");
+
+    let output = WaitAgentHandlerV2
+        .handle(invocation(
+            session,
+            turn,
+            "wait_agent",
+            function_payload(json!({
+                "targets": [
+                    completed_agent_id.to_string(),
+                    active_agent_id.to_string()
+                ],
+                "timeout_ms": 1000
+            })),
+        ))
+        .await
+        .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert_eq!(
+        result,
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "Observed first completion; 1 target remains pending.".to_string(),
+            pending: vec![WaitPendingAgent {
+                id: active_agent_id.to_string(),
+                state: AgentStatus::PendingInit,
+            }],
+            timed_out: false,
+            wait_outcome: CollabWaitOutcome::CompletionObserved,
+        }
+    );
+    assert_eq!(success, None);
+
+    let _ = active_thread
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
 }
 
 #[tokio::test]
@@ -3660,8 +3920,10 @@ async fn multi_agent_v2_wait_agent_returns_summary_for_mailbox_activity() {
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait completed.".to_string(),
+            message: "Observed activity.".to_string(),
+            pending: Vec::new(),
             timed_out: false,
+            wait_outcome: CollabWaitOutcome::ActivityObserved,
         }
     );
     assert_eq!(success, None);
@@ -3759,8 +4021,10 @@ async fn multi_agent_v2_wait_agent_waits_for_new_mail_after_start() {
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait completed.".to_string(),
+            message: "Observed activity.".to_string(),
+            pending: Vec::new(),
             timed_out: false,
+            wait_outcome: CollabWaitOutcome::ActivityObserved,
         }
     );
     assert_eq!(success, None);
@@ -3847,8 +4111,10 @@ async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait completed.".to_string(),
+            message: "Observed activity.".to_string(),
+            pending: Vec::new(),
             timed_out: false,
+            wait_outcome: CollabWaitOutcome::ActivityObserved,
         }
     );
     assert_eq!(success, None);
@@ -3932,8 +4198,10 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait completed.".to_string(),
+            message: "Observed activity.".to_string(),
+            pending: Vec::new(),
             timed_out: false,
+            wait_outcome: CollabWaitOutcome::ActivityObserved,
         }
     );
     assert!(!content.contains("sensitive child output"));
@@ -3984,7 +4252,7 @@ async fn multi_agent_v2_close_agent_accepts_task_name_target() {
             session,
             turn,
             "close_agent",
-            function_payload(json!({"target": "worker"})),
+            function_payload(json!({"target": "worker", "mode": "force_cancel"})),
         ))
         .await
         .expect("close_agent should succeed for v2 task names");
@@ -4048,6 +4316,194 @@ async fn multi_agent_v2_close_agent_rejects_root_target_and_id() {
 }
 
 #[tokio::test]
+async fn close_agent_rejects_active_agent_without_force_cancel() {
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let config = turn.config.as_ref().clone();
+    let thread = manager.start_thread(config).await.expect("start thread");
+    let agent_id = thread.thread_id;
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "close_agent",
+        function_payload(json!({"target": agent_id.to_string()})),
+    );
+    let err = CloseAgentHandler
+        .handle(invocation)
+        .await
+        .expect_err("safe close should reject active agents");
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("expected model-facing safe close error");
+    };
+    assert!(message.contains("agent subtree still has active agent"));
+    let status = manager.agent_control().get_status(agent_id).await;
+    assert!(
+        is_active_agent_status(&status),
+        "safe close should leave the agent active, got {status:?}",
+    );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_close_agent_rejects_active_task_name_without_force_cancel() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    turn.config = Arc::new(config);
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    SpawnAgentHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": "worker"
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed");
+
+    let err = CloseAgentHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "close_agent",
+            function_payload(json!({"target": "worker"})),
+        ))
+        .await
+        .expect_err("safe close should reject active task-name targets");
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("expected model-facing safe close error");
+    };
+    assert!(message.contains("agent subtree still has active agent"));
+
+    let agent_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.conversation_id, &turn.session_source, "worker")
+        .await
+        .expect("worker path should resolve");
+    let status = manager.agent_control().get_status(agent_id).await;
+    assert!(
+        is_active_agent_status(&status),
+        "safe close should leave the agent active, got {status:?}",
+    );
+}
+
+#[tokio::test]
+async fn close_agent_safe_close_rejects_completed_parent_with_active_descendant() {
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let mut config = turn.config.as_ref().clone();
+    config.agent_max_depth = 3;
+    let parent = manager
+        .start_thread(config)
+        .await
+        .expect("parent thread should start");
+    let parent_session = parent.thread.codex.session.clone();
+
+    let child_spawn_output = SpawnAgentHandler
+        .handle(invocation(
+            parent_session.clone(),
+            parent_session.new_default_turn().await,
+            "spawn_agent",
+            function_payload(json!({"message": "hello child"})),
+        ))
+        .await
+        .expect("child spawn should succeed");
+    let (child_content, _) = expect_text_output(child_spawn_output);
+    let child_result: serde_json::Value =
+        serde_json::from_str(&child_content).expect("child spawn result should be json");
+    let child_thread_id = parse_agent_id(
+        child_result
+            .get("agent_id")
+            .and_then(serde_json::Value::as_str)
+            .expect("child spawn result should include agent_id"),
+    );
+
+    let child_thread = manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should exist");
+    let child_session = child_thread.codex.session.clone();
+    let grandchild_spawn_output = SpawnAgentHandler
+        .handle(invocation(
+            child_session.clone(),
+            child_session.new_default_turn().await,
+            "spawn_agent",
+            function_payload(json!({"message": "hello grandchild"})),
+        ))
+        .await
+        .expect("grandchild spawn should succeed");
+    let (grandchild_content, _) = expect_text_output(grandchild_spawn_output);
+    let grandchild_result: serde_json::Value =
+        serde_json::from_str(&grandchild_content).expect("grandchild spawn result should be json");
+    let grandchild_thread_id = parse_agent_id(
+        grandchild_result
+            .get("agent_id")
+            .and_then(serde_json::Value::as_str)
+            .expect("grandchild spawn result should include agent_id"),
+    );
+
+    let child_turn = child_session.new_default_turn().await;
+    child_session
+        .send_event(
+            child_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: child_turn.sub_id.clone(),
+                last_agent_message: Some("child done".to_string()),
+            }),
+        )
+        .await;
+    assert_eq!(
+        manager.agent_control().get_status(child_thread_id).await,
+        AgentStatus::Completed(Some("child done".to_string()))
+    );
+
+    let err = CloseAgentHandler
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "close_agent",
+            function_payload(json!({"target": child_thread_id.to_string()})),
+        ))
+        .await
+        .expect_err("safe close should reject an active descendant");
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("expected model-facing safe close error");
+    };
+    assert!(message.contains("agent subtree still has active agent"));
+    assert!(message.contains(&grandchild_thread_id.to_string()));
+    assert_eq!(
+        manager.agent_control().get_status(child_thread_id).await,
+        AgentStatus::Completed(Some("child done".to_string()))
+    );
+    let grandchild_status = manager
+        .agent_control()
+        .get_status(grandchild_thread_id)
+        .await;
+    assert!(
+        is_active_agent_status(&grandchild_status),
+        "safe close should leave the descendant active, got {grandchild_status:?}",
+    );
+}
+
+#[tokio::test]
 async fn close_agent_submits_shutdown_and_returns_previous_status() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -4061,7 +4517,7 @@ async fn close_agent_submits_shutdown_and_returns_previous_status() {
         Arc::new(session),
         Arc::new(turn),
         "close_agent",
-        function_payload(json!({"target": agent_id.to_string()})),
+        function_payload(json!({"target": agent_id.to_string(), "mode": "force_cancel"})),
     );
     let output = CloseAgentHandler
         .handle(invocation)
@@ -4151,7 +4607,9 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
             parent_session.clone(),
             parent_session.new_default_turn().await,
             "close_agent",
-            function_payload(json!({"target": child_thread_id.to_string()})),
+            function_payload(
+                json!({"target": child_thread_id.to_string(), "mode": "force_cancel"}),
+            ),
         ))
         .await
         .expect("close_agent should close the child subtree");
@@ -4203,7 +4661,9 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
             parent_session.clone(),
             parent_session.new_default_turn().await,
             "close_agent",
-            function_payload(json!({"target": child_thread_id.to_string()})),
+            function_payload(
+                json!({"target": child_thread_id.to_string(), "mode": "force_cancel"}),
+            ),
         ))
         .await
         .expect("close_agent should be repeatable for the child subtree");

@@ -67,13 +67,14 @@ use crate::terminal_title::SetTerminalTitleResult;
 use crate::terminal_title::clear_terminal_title;
 use crate::terminal_title::set_terminal_title;
 use crate::text_formatting::proper_join;
-use crate::version::CODEX_CLI_VERSION;
+use crate::version::codex_cli_display_version;
 use codex_app_server_protocol::AppSummary;
 use codex_app_server_protocol::CodexErrorInfo as AppServerCodexErrorInfo;
 use codex_app_server_protocol::CollabAgentState as AppServerCollabAgentState;
 use codex_app_server_protocol::CollabAgentStatus as AppServerCollabAgentStatus;
 use codex_app_server_protocol::CollabAgentTool;
 use codex_app_server_protocol::CollabAgentToolCallStatus;
+use codex_app_server_protocol::CollabWaitOutcome as AppServerCollabWaitOutcome;
 use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_app_server_protocol::ErrorNotification;
@@ -1761,6 +1762,22 @@ fn app_server_collab_thread_id_to_core(thread_id: &str) -> Option<ThreadId> {
         Err(err) => {
             warn!("ignoring collab tool-call item with invalid thread id {thread_id}: {err}");
             None
+        }
+    }
+}
+
+fn app_server_collab_wait_outcome_to_core(
+    wait_outcome: AppServerCollabWaitOutcome,
+) -> codex_protocol::protocol::CollabWaitOutcome {
+    match wait_outcome {
+        AppServerCollabWaitOutcome::CompletionObserved => {
+            codex_protocol::protocol::CollabWaitOutcome::CompletionObserved
+        }
+        AppServerCollabWaitOutcome::ActivityObserved => {
+            codex_protocol::protocol::CollabWaitOutcome::ActivityObserved
+        }
+        AppServerCollabWaitOutcome::ListenWindowEnded => {
+            codex_protocol::protocol::CollabWaitOutcome::ListenWindowEnded
         }
     }
 }
@@ -4299,6 +4316,7 @@ impl ChatWidget {
             context_inheritance_effective,
             context_inheritance_telemetry,
             delegation_report,
+            wait_outcome,
             agents_states,
         } = item
         else {
@@ -4513,6 +4531,7 @@ impl ChatWidget {
                         codex_protocol::protocol::CollabWaitingEndEvent {
                             sender_thread_id,
                             call_id: id,
+                            wait_outcome: wait_outcome.map(app_server_collab_wait_outcome_to_core),
                             agent_statuses,
                             statuses,
                         },
@@ -7067,6 +7086,7 @@ impl ChatWidget {
                 context_inheritance_effective,
                 context_inheritance_telemetry,
                 delegation_report,
+                wait_outcome,
                 agents_states,
             } => self.on_collab_agent_tool_call(
                 ThreadItem::CollabAgentToolCall {
@@ -7086,6 +7106,7 @@ impl ChatWidget {
                     context_inheritance_effective,
                     context_inheritance_telemetry,
                     delegation_report,
+                    wait_outcome,
                     agents_states,
                 },
                 from_replay,
@@ -7548,6 +7569,7 @@ impl ChatWidget {
                 context_inheritance_effective,
                 context_inheritance_telemetry,
                 delegation_report,
+                wait_outcome,
                 agents_states,
             } => {
                 if replay_kind.is_some()
@@ -7575,6 +7597,7 @@ impl ChatWidget {
                         context_inheritance_effective,
                         context_inheritance_telemetry,
                         delegation_report,
+                        wait_outcome,
                         agents_states,
                     },
                     from_replay,
@@ -10788,7 +10811,7 @@ impl ChatWidget {
             /*reasoning_effort*/ None,
             /*show_fast_status*/ false,
             config.cwd.to_path_buf(),
-            CODEX_CLI_VERSION,
+            codex_cli_display_version(),
         ))
     }
 

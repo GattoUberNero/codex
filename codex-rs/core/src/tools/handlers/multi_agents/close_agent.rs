@@ -24,12 +24,18 @@ impl ToolHandler for Handler {
         } = invocation;
         let arguments = function_arguments(payload)?;
         let args: CloseAgentArgs = parse_arguments(&arguments)?;
+        let mode = args.mode.unwrap_or_default();
         let agent_id = parse_agent_id_target(&args.target)?;
         let receiver_agent = session
             .services
             .agent_control
             .get_agent_metadata(agent_id)
             .unwrap_or_default();
+        if matches!(mode, CloseAgentMode::SafeClose) {
+            validate_safe_close_subtree(&session, agent_id).await?;
+        }
+        let status = session.services.agent_control.get_status(agent_id).await;
+
         session
             .send_event(
                 &turn,
@@ -41,39 +47,26 @@ impl ToolHandler for Handler {
                 .into(),
             )
             .await;
-        let status = match session
-            .services
-            .agent_control
-            .subscribe_status(agent_id)
-            .await
-        {
-            Ok(mut status_rx) => status_rx.borrow_and_update().clone(),
-            Err(err) => {
-                let status = session.services.agent_control.get_status(agent_id).await;
-                session
-                    .send_event(
-                        &turn,
-                        CollabCloseEndEvent {
-                            call_id: call_id.clone(),
-                            sender_thread_id: session.conversation_id,
-                            receiver_thread_id: agent_id,
-                            receiver_agent_nickname: receiver_agent.agent_nickname.clone(),
-                            receiver_agent_role: receiver_agent.agent_role.clone(),
-                            status,
-                        }
-                        .into(),
-                    )
-                    .await;
-                return Err(collab_agent_error(agent_id, err));
-            }
+
+        let close_error = if status == AgentStatus::NotFound {
+            None
+        } else {
+            session
+                .services
+                .agent_control
+                .close_agent(agent_id)
+                .await
+                .err()
+                .map(|err| collab_agent_error(agent_id, err))
         };
-        let result = session
-            .services
-            .agent_control
-            .close_agent(agent_id)
-            .await
-            .map_err(|err| collab_agent_error(agent_id, err))
-            .map(|_| ());
+        let reported_status = match &close_error {
+            Some(FunctionCallError::RespondToModel(message)) => {
+                AgentStatus::Errored(message.clone())
+            }
+            Some(err) => AgentStatus::Errored(err.to_string()),
+            None => status.clone(),
+        };
+
         session
             .send_event(
                 &turn,
@@ -83,12 +76,15 @@ impl ToolHandler for Handler {
                     receiver_thread_id: agent_id,
                     receiver_agent_nickname: receiver_agent.agent_nickname,
                     receiver_agent_role: receiver_agent.agent_role,
-                    status: status.clone(),
+                    status: reported_status,
                 }
                 .into(),
             )
             .await;
-        result?;
+
+        if let Some(err) = close_error {
+            return Err(err);
+        }
 
         Ok(CloseAgentResult {
             previous_status: status,
@@ -122,4 +118,5 @@ impl ToolOutput for CloseAgentResult {
 #[derive(Debug, Deserialize)]
 struct CloseAgentArgs {
     target: String,
+    mode: Option<CloseAgentMode>,
 }

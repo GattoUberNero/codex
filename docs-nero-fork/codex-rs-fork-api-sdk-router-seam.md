@@ -96,8 +96,8 @@ Spawn child-context projection:
 ### Other tools
 
 - `resume_agent`: input `id`, output `status`.
-- `wait_agent`: output `message` + `timed_out`.
-- `close_agent`: output `previous_status`.
+- `wait_agent`: output `message` + `pending[]` + `timed_out` + `wait_outcome`; targeted waits return after first observed completion and `pending[]` lists still-active targets observed at the end of that listen window. App-server replay preserves or derives `waitOutcome` for old wait events.
+- `close_agent`: input `target` + optional `mode` (`safe_close` default, `force_cancel` explicit); output `previous_status`. `safe_close` rejects active targets and active descendants before closing the subtree.
 - `list_agents`: output `agents[]` with `agent_name`, `agent_status`, `last_task_message`.
 
 ### Current schema/runtime mismatch

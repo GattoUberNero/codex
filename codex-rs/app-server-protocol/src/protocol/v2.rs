@@ -4690,6 +4690,8 @@ pub enum ThreadItem {
         context_inheritance_telemetry: Option<SpawnContextInheritanceTelemetry>,
         /// Optional delegation report shown in the TUI.
         delegation_report: Option<DelegationReport>,
+        /// Outcome of a wait observation window, when this item represents `wait_agent`.
+        wait_outcome: Option<CollabWaitOutcome>,
         /// Last known status of the target agents, when available.
         agents_states: HashMap<String, CollabAgentState>,
     },
@@ -5058,6 +5060,31 @@ pub enum DynamicToolCallStatus {
     InProgress,
     Completed,
     Failed,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum CollabWaitOutcome {
+    CompletionObserved,
+    ActivityObserved,
+    ListenWindowEnded,
+}
+
+impl From<codex_protocol::protocol::CollabWaitOutcome> for CollabWaitOutcome {
+    fn from(value: codex_protocol::protocol::CollabWaitOutcome) -> Self {
+        match value {
+            codex_protocol::protocol::CollabWaitOutcome::CompletionObserved => {
+                CollabWaitOutcome::CompletionObserved
+            }
+            codex_protocol::protocol::CollabWaitOutcome::ActivityObserved => {
+                CollabWaitOutcome::ActivityObserved
+            }
+            codex_protocol::protocol::CollabWaitOutcome::ListenWindowEnded => {
+                CollabWaitOutcome::ListenWindowEnded
+            }
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

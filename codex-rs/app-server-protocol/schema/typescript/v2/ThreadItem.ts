@@ -10,6 +10,7 @@ import type { JsonValue } from "../serde_json/JsonValue";
 import type { CollabAgentState } from "./CollabAgentState";
 import type { CollabAgentTool } from "./CollabAgentTool";
 import type { CollabAgentToolCallStatus } from "./CollabAgentToolCallStatus";
+import type { CollabWaitOutcome } from "./CollabWaitOutcome";
 import type { CommandAction } from "./CommandAction";
 import type { CommandExecutionSource } from "./CommandExecutionSource";
 import type { CommandExecutionStatus } from "./CommandExecutionStatus";
@@ -22,114 +23,120 @@ import type { McpToolCallError } from "./McpToolCallError";
 import type { McpToolCallResult } from "./McpToolCallResult";
 import type { McpToolCallStatus } from "./McpToolCallStatus";
 import type { MemoryCitation } from "./MemoryCitation";
+import type { MultiFileReaderEntry } from "./MultiFileReaderEntry";
+import type { MultiFileReaderSummary } from "./MultiFileReaderSummary";
 import type { PatchApplyStatus } from "./PatchApplyStatus";
 import type { UserInput } from "./UserInput";
 import type { WebSearchAction } from "./WebSearchAction";
 
-export type ThreadItem = { "type": "userMessage", id: string, content: Array<UserInput>, } | { "type": "hookPrompt", id: string, fragments: Array<HookPromptFragment>, } | { "type": "agentMessage", id: string, text: string, phase: MessagePhase | null, memoryCitation: MemoryCitation | null, } | { "type": "plan", id: string, text: string, } | { "type": "reasoning", id: string, summary: Array<string>, content: Array<string>, } | { "type": "commandExecution", id: string, 
+export type ThreadItem = { "type": "userMessage", id: string, content: Array<UserInput>, } | { "type": "hookPrompt", id: string, fragments: Array<HookPromptFragment>, } | { "type": "agentMessage", id: string, text: string, phase: MessagePhase | null, memoryCitation: MemoryCitation | null, } | { "type": "plan", id: string, text: string, } | { "type": "reasoning", id: string, summary: Array<string>, content: Array<string>, } | { "type": "commandExecution", id: string,
 /**
  * The command to be executed.
  */
-command: string, 
+command: string,
 /**
  * The command's working directory.
  */
-cwd: string, 
+cwd: string,
 /**
  * Identifier for the underlying PTY process (when available).
  */
-processId: string | null, source: CommandExecutionSource, status: CommandExecutionStatus, 
+processId: string | null, source: CommandExecutionSource, status: CommandExecutionStatus,
 /**
  * A best-effort parsing of the command to understand the action(s) it will perform.
  * This returns a list of CommandAction objects because a single shell command may
  * be composed of many commands piped together.
  */
-commandActions: Array<CommandAction>, 
+commandActions: Array<CommandAction>,
 /**
  * The command's output, aggregated from stdout and stderr.
  */
-aggregatedOutput: string | null, 
+aggregatedOutput: string | null,
 /**
  * The command's exit code.
  */
-exitCode: number | null, 
+exitCode: number | null,
 /**
  * The duration of the command execution in milliseconds.
  */
-durationMs: number | null, } | { "type": "fileChange", id: string, changes: Array<FileUpdateChange>, status: PatchApplyStatus, } | { "type": "mcpToolCall", id: string, server: string, tool: string, status: McpToolCallStatus, arguments: JsonValue, result: McpToolCallResult | null, error: McpToolCallError | null, 
+durationMs: number | null, } | { "type": "fileChange", id: string, changes: Array<FileUpdateChange>, status: PatchApplyStatus, } | { "type": "mcpToolCall", id: string, server: string, tool: string, status: McpToolCallStatus, arguments: JsonValue, result: McpToolCallResult | null, error: McpToolCallError | null,
 /**
  * The duration of the MCP tool call in milliseconds.
  */
-durationMs: number | null, } | { "type": "dynamicToolCall", id: string, tool: string, arguments: JsonValue, status: DynamicToolCallStatus, contentItems: Array<DynamicToolCallOutputContentItem> | null, success: boolean | null, 
+durationMs: number | null, } | { "type": "dynamicToolCall", id: string, tool: string, arguments: JsonValue, status: DynamicToolCallStatus, contentItems: Array<DynamicToolCallOutputContentItem> | null, success: boolean | null,
 /**
  * The duration of the dynamic tool call in milliseconds.
  */
-durationMs: number | null, } | { "type": "collabAgentToolCall", 
+durationMs: number | null, } | { "type": "multiFileReaderCall", id: string, summary: MultiFileReaderSummary, entries: Array<MultiFileReaderEntry>, } | { "type": "collabAgentToolCall",
 /**
  * Unique identifier for this collab tool call.
  */
-id: string, 
+id: string,
 /**
  * Name of the collab tool that was invoked.
  */
-tool: CollabAgentTool, 
+tool: CollabAgentTool,
 /**
  * Current status of the collab tool call.
  */
-status: CollabAgentToolCallStatus, 
+status: CollabAgentToolCallStatus,
 /**
  * Thread ID of the agent issuing the collab request.
  */
-senderThreadId: string, 
+senderThreadId: string,
 /**
  * Thread ID of the receiving agent, when applicable. In case of spawn operation,
  * this corresponds to the newly spawned agent.
  */
-receiverThreadIds: Array<string>, 
+receiverThreadIds: Array<string>,
 /**
  * Prompt text sent as part of the collab tool call, when available.
  */
-prompt: string | null, 
+prompt: string | null,
 /**
  * Model requested for the spawned agent, when applicable.
  */
-requestedModel: string | null, 
+requestedModel: string | null,
 /**
  * Reasoning effort requested for the spawned agent, when applicable.
  */
-requestedReasoningEffort: ReasoningEffort | null, 
+requestedReasoningEffort: ReasoningEffort | null,
 /**
  * Effective model used by the spawned agent after role and runtime overrides.
  */
-model: string | null, 
+model: string | null,
 /**
  * Effective reasoning effort used by the spawned agent after role and runtime overrides.
  */
-reasoningEffort: ReasoningEffort | null, 
+reasoningEffort: ReasoningEffort | null,
 /**
  * Effective model used by the spawned agent after role and runtime overrides.
  */
-effectiveModel: string | null, 
+effectiveModel: string | null,
 /**
  * Effective reasoning effort used by the spawned agent after role and runtime overrides.
  */
-effectiveReasoningEffort: ReasoningEffort | null, 
+effectiveReasoningEffort: ReasoningEffort | null,
 /**
  * Requested parent-context inheritance mode for spawn calls, when available.
  */
-contextInheritanceRequested: SpawnContextInheritanceMode | null, 
+contextInheritanceRequested: SpawnContextInheritanceMode | null,
 /**
  * Effective parent-context inheritance mode after runtime budgeting and validation.
  */
-contextInheritanceEffective: SpawnContextInheritanceEffectiveMode | null, 
+contextInheritanceEffective: SpawnContextInheritanceEffectiveMode | null,
 /**
  * Runtime budgeting telemetry for the effective inheritance decision.
  */
-contextInheritanceTelemetry: SpawnContextInheritanceTelemetry | null, 
+contextInheritanceTelemetry: SpawnContextInheritanceTelemetry | null,
 /**
  * Optional delegation report shown in the TUI.
  */
-delegationReport: DelegationReport | null, 
+delegationReport: DelegationReport | null,
+/**
+ * Outcome of a wait observation window, when this item represents `wait_agent`.
+ */
+waitOutcome: CollabWaitOutcome | null,
 /**
  * Last known status of the target agents, when available.
  */

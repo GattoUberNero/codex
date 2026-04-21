@@ -1791,6 +1791,7 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
             delegation_report: None,
+            wait_outcome: None,
             agents_states: HashMap::new(),
         }
     );
@@ -1827,6 +1828,7 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
         context_inheritance_effective,
         context_inheritance_telemetry,
         delegation_report,
+        wait_outcome,
         agents_states,
     } = spawn_completed
     else {
@@ -1855,6 +1857,7 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
     );
     assert_eq!(context_inheritance_telemetry, None);
     assert_eq!(delegation_report, None);
+    assert_eq!(wait_outcome, None);
     let agent_state = agents_states
         .get(&receiver_thread_id)
         .expect("spawn completion should include child agent state");
@@ -2030,6 +2033,7 @@ config_file = "./custom-role.toml"
         context_inheritance_effective,
         context_inheritance_telemetry,
         delegation_report,
+        wait_outcome,
         agents_states,
     } = spawn_completed
     else {
@@ -2058,6 +2062,7 @@ config_file = "./custom-role.toml"
     );
     assert_eq!(context_inheritance_telemetry, None);
     assert_eq!(delegation_report, None);
+    assert_eq!(wait_outcome, None);
     let agent_state = agents_states
         .get(&receiver_thread_id)
         .expect("spawn completion should include child agent state");
@@ -2258,6 +2263,7 @@ async fn turn_start_spawn_agent_thread_read_replay_matches_live_item_v2() -> Res
         context_inheritance_effective: live_context_inheritance_effective,
         context_inheritance_telemetry: live_context_inheritance_telemetry,
         delegation_report: live_delegation_report,
+        wait_outcome: None,
         agents_states: live_agents_states,
     } = &spawn_completed
     else {
@@ -2281,6 +2287,7 @@ async fn turn_start_spawn_agent_thread_read_replay_matches_live_item_v2() -> Res
         context_inheritance_effective: replay_context_inheritance_effective,
         context_inheritance_telemetry: replay_context_inheritance_telemetry,
         delegation_report: replay_delegation_report,
+        wait_outcome: None,
         agents_states: replay_agents_states,
     } = replay_spawn_item
     else {

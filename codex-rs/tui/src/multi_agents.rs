@@ -17,6 +17,7 @@ use codex_protocol::protocol::CollabAgentStatusEntry;
 use codex_protocol::protocol::CollabCloseEndEvent;
 use codex_protocol::protocol::CollabResumeBeginEvent;
 use codex_protocol::protocol::CollabResumeEndEvent;
+use codex_protocol::protocol::CollabWaitOutcome;
 use codex_protocol::protocol::CollabWaitingBeginEvent;
 use codex_protocol::protocol::CollabWaitingEndEvent;
 use codex_protocol::protocol::DelegationReport;
@@ -321,12 +322,15 @@ pub(crate) fn waiting_begin(ev: CollabWaitingBeginEvent) -> PlainHistoryCell {
 
     let title = match receiver_agents.as_slice() {
         [receiver] => title_with_agent(
-            "Waiting for",
+            "Listening for completion from",
             agent_label_from_ref(receiver),
             /*spawn_request*/ None,
         ),
-        [] => title_text("Waiting for agents"),
-        _ => title_text(format!("Waiting for {} agents", receiver_agents.len())),
+        [] => title_text("Listening for agent activity"),
+        _ => title_text(format!(
+            "Listening for first completion from {} agents",
+            receiver_agents.len()
+        )),
     };
 
     let details = if receiver_agents.len() > 1 {
@@ -345,11 +349,27 @@ pub(crate) fn waiting_end(ev: CollabWaitingEndEvent) -> PlainHistoryCell {
     let CollabWaitingEndEvent {
         call_id: _,
         sender_thread_id: _,
+        wait_outcome,
         agent_statuses,
         statuses,
     } = ev;
-    let details = wait_complete_lines(&statuses, &agent_statuses);
-    collab_event(title_text("Finished waiting"), details)
+    let pending_count = pending_wait_target_count(&statuses, &agent_statuses);
+    let details = wait_complete_lines(wait_outcome, &statuses, &agent_statuses);
+    let title = match wait_outcome {
+        Some(CollabWaitOutcome::CompletionObserved) if pending_count == 0 => {
+            title_text("Observed completion")
+        }
+        Some(CollabWaitOutcome::CompletionObserved) if pending_count == 1 => {
+            title_text("First completion observed; 1 target still pending")
+        }
+        Some(CollabWaitOutcome::CompletionObserved) => title_text(format!(
+            "First completion observed; {pending_count} targets still pending"
+        )),
+        Some(CollabWaitOutcome::ActivityObserved) => title_text("Observed activity"),
+        Some(CollabWaitOutcome::ListenWindowEnded) => title_text("Listen window ended"),
+        None => title_text("Wait result unavailable"),
+    };
+    collab_event(title, details)
 }
 
 pub(crate) fn close_end(ev: CollabCloseEndEvent) -> PlainHistoryCell {
@@ -793,45 +813,24 @@ fn merge_wait_receivers(
 }
 
 fn wait_complete_lines(
+    wait_outcome: Option<CollabWaitOutcome>,
     statuses: &HashMap<ThreadId, AgentStatus>,
     agent_statuses: &[CollabAgentStatusEntry],
 ) -> Vec<Line<'static>> {
     if statuses.is_empty() && agent_statuses.is_empty() {
-        return vec![Line::from(Span::from("No agents completed yet"))];
+        return match wait_outcome {
+            Some(CollabWaitOutcome::ListenWindowEnded) => vec![
+                Line::from("No completion observed yet"),
+                Line::from("Agents may still be running"),
+            ],
+            Some(CollabWaitOutcome::ActivityObserved) => {
+                vec![Line::from("Mailbox activity observed")]
+            }
+            _ => vec![Line::from(Span::from("No agents completed yet"))],
+        };
     }
 
-    let entries = if agent_statuses.is_empty() {
-        let mut entries = statuses
-            .iter()
-            .map(|(thread_id, status)| CollabAgentStatusEntry {
-                thread_id: *thread_id,
-                agent_nickname: None,
-                agent_role: None,
-                status: status.clone(),
-            })
-            .collect::<Vec<_>>();
-        entries.sort_by(|left, right| left.thread_id.to_string().cmp(&right.thread_id.to_string()));
-        entries
-    } else {
-        let mut entries = agent_statuses.to_vec();
-        let seen = entries
-            .iter()
-            .map(|entry| entry.thread_id)
-            .collect::<HashSet<_>>();
-        let mut extras = statuses
-            .iter()
-            .filter(|(thread_id, _)| !seen.contains(thread_id))
-            .map(|(thread_id, status)| CollabAgentStatusEntry {
-                thread_id: *thread_id,
-                agent_nickname: None,
-                agent_role: None,
-                status: status.clone(),
-            })
-            .collect::<Vec<_>>();
-        extras.sort_by(|left, right| left.thread_id.to_string().cmp(&right.thread_id.to_string()));
-        entries.extend(extras);
-        entries
-    };
+    let entries = merged_wait_status_entries(statuses, agent_statuses);
 
     entries
         .into_iter()
@@ -852,6 +851,64 @@ fn wait_complete_lines(
             spans.into()
         })
         .collect()
+}
+
+fn pending_wait_target_count(
+    statuses: &HashMap<ThreadId, AgentStatus>,
+    agent_statuses: &[CollabAgentStatusEntry],
+) -> usize {
+    merged_wait_status_entries(statuses, agent_statuses)
+        .into_iter()
+        .filter(|entry| !is_final_wait_status(&entry.status))
+        .count()
+}
+
+fn merged_wait_status_entries(
+    statuses: &HashMap<ThreadId, AgentStatus>,
+    agent_statuses: &[CollabAgentStatusEntry],
+) -> Vec<CollabAgentStatusEntry> {
+    if agent_statuses.is_empty() {
+        let mut entries = statuses
+            .iter()
+            .map(|(thread_id, status)| CollabAgentStatusEntry {
+                thread_id: *thread_id,
+                agent_nickname: None,
+                agent_role: None,
+                status: status.clone(),
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.thread_id.to_string().cmp(&right.thread_id.to_string()));
+        return entries;
+    }
+
+    let mut entries = agent_statuses.to_vec();
+    let seen = entries
+        .iter()
+        .map(|entry| entry.thread_id)
+        .collect::<HashSet<_>>();
+    let mut extras = statuses
+        .iter()
+        .filter(|(thread_id, _)| !seen.contains(thread_id))
+        .map(|(thread_id, status)| CollabAgentStatusEntry {
+            thread_id: *thread_id,
+            agent_nickname: None,
+            agent_role: None,
+            status: status.clone(),
+        })
+        .collect::<Vec<_>>();
+    extras.sort_by(|left, right| left.thread_id.to_string().cmp(&right.thread_id.to_string()));
+    entries.extend(extras);
+    entries
+}
+
+fn is_final_wait_status(status: &AgentStatus) -> bool {
+    matches!(
+        status,
+        AgentStatus::Completed(_)
+            | AgentStatus::Errored(_)
+            | AgentStatus::Shutdown
+            | AgentStatus::NotFound
+    )
 }
 
 fn status_summary_line(status: &AgentStatus) -> Line<'static> {
@@ -993,6 +1050,7 @@ mod tests {
         let finished = waiting_end(CollabWaitingEndEvent {
             sender_thread_id,
             call_id: "call-wait".to_string(),
+            wait_outcome: Some(CollabWaitOutcome::CompletionObserved),
             agent_statuses: vec![
                 CollabAgentStatusEntry {
                     thread_id: robie_id,

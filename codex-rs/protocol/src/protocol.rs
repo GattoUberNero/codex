@@ -1607,6 +1607,19 @@ impl From<CollabResumeEndEvent> for EventMsg {
     }
 }
 
+/// Outcome of a single `wait_agent` observation window.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum CollabWaitOutcome {
+    /// Observed at least one final completion status during this wait call.
+    CompletionObserved,
+    /// Observed mailbox or coordination activity, but not a final completion status.
+    ActivityObserved,
+    /// The listening window ended before observing completion.
+    ListenWindowEnded,
+}
+
 /// Agent lifecycle status, derived from emitted events.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS, Default)]
 #[serde(rename_all = "snake_case")]
@@ -3760,6 +3773,9 @@ pub struct CollabWaitingEndEvent {
     pub sender_thread_id: ThreadId,
     /// ID of the waiting call.
     pub call_id: String,
+    /// Outcome of this wait observation window. Older persisted events may omit it.
+    #[serde(default)]
+    pub wait_outcome: Option<CollabWaitOutcome>,
     /// Optional receiver metadata paired with final statuses.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_statuses: Vec<CollabAgentStatusEntry>,

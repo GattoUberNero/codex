@@ -1105,6 +1105,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
                 delegation_report: None,
+                wait_outcome: None,
                 agents_states: HashMap::new(),
             };
             let notification = ItemStartedNotification {
@@ -1151,6 +1152,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
                 delegation_report: None,
+                wait_outcome: end_event.wait_outcome.map(Into::into),
                 agents_states,
             };
             let notification = ItemCompletedNotification {
@@ -1180,6 +1182,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
                 delegation_report: None,
+                wait_outcome: None,
                 agents_states: HashMap::new(),
             };
             let notification = ItemStartedNotification {
@@ -1202,8 +1205,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                     .await;
             }
             let status = match &end_event.status {
-                codex_protocol::protocol::AgentStatus::Errored(_)
-                | codex_protocol::protocol::AgentStatus::NotFound => V2CollabToolCallStatus::Failed,
+                codex_protocol::protocol::AgentStatus::Errored(_) => V2CollabToolCallStatus::Failed,
                 _ => V2CollabToolCallStatus::Completed,
             };
             let receiver_id = end_event.receiver_thread_id.to_string();
@@ -1230,6 +1232,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
                 delegation_report: None,
+                wait_outcome: None,
                 agents_states,
             };
             let notification = ItemCompletedNotification {
@@ -2769,6 +2772,7 @@ fn collab_resume_begin_item(
         context_inheritance_effective: None,
         context_inheritance_telemetry: None,
         delegation_report: None,
+        wait_outcome: None,
         agents_states: HashMap::new(),
     }
 }
@@ -2793,6 +2797,7 @@ fn collab_spawn_begin_item(
         context_inheritance_effective: None,
         context_inheritance_telemetry: None,
         delegation_report: begin_event.delegation_report,
+        wait_outcome: None,
         agents_states: HashMap::new(),
     }
 }
@@ -2829,6 +2834,7 @@ fn collab_spawn_end_item(
         context_inheritance_effective: end_event.context_inheritance_effective,
         context_inheritance_telemetry: end_event.context_inheritance_telemetry,
         delegation_report: end_event.delegation_report,
+        wait_outcome: None,
         agents_states,
     }
 }
@@ -2863,6 +2869,7 @@ fn collab_interaction_begin_item(
         context_inheritance_effective: None,
         context_inheritance_telemetry: None,
         delegation_report: begin_event.delegation_report,
+        wait_outcome: None,
         agents_states: HashMap::new(),
     }
 }
@@ -2904,6 +2911,7 @@ fn collab_interaction_end_item(
         context_inheritance_effective: None,
         context_inheritance_telemetry: None,
         delegation_report: end_event.delegation_report,
+        wait_outcome: None,
         agents_states: [(receiver_id, received_status)].into_iter().collect(),
     }
 }
@@ -2938,6 +2946,7 @@ fn collab_resume_end_item(end_event: codex_protocol::protocol::CollabResumeEndEv
         context_inheritance_effective: None,
         context_inheritance_telemetry: None,
         delegation_report: None,
+        wait_outcome: None,
         agents_states,
     }
 }
@@ -3442,6 +3451,7 @@ mod tests {
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
             delegation_report: None,
+            wait_outcome: None,
             agents_states: HashMap::new(),
         };
         assert_eq!(item, expected);
@@ -3477,6 +3487,7 @@ mod tests {
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
             delegation_report: None,
+            wait_outcome: None,
             agents_states: [(
                 receiver_id,
                 V2CollabAgentStatus::from(codex_protocol::protocol::AgentStatus::NotFound),
@@ -3527,6 +3538,7 @@ mod tests {
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
             delegation_report: Some(report),
+            wait_outcome: None,
             agents_states: HashMap::new(),
         };
 
@@ -3576,6 +3588,7 @@ mod tests {
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
             delegation_report: Some(report),
+            wait_outcome: None,
             agents_states: [(
                 receiver_id,
                 V2CollabAgentStatus::from(codex_protocol::protocol::AgentStatus::Running),
@@ -3619,6 +3632,7 @@ mod tests {
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
             delegation_report: None,
+            wait_outcome: None,
             agents_states: HashMap::new(),
         };
         assert_eq!(item, expected);
@@ -3684,6 +3698,7 @@ mod tests {
                 suppression_reason: Some(SpawnContextInheritanceSuppressionReason::BudgetExceeded),
             }),
             delegation_report: None,
+            wait_outcome: None,
             agents_states: [(
                 receiver_id,
                 V2CollabAgentStatus::from(codex_protocol::protocol::AgentStatus::PendingInit),

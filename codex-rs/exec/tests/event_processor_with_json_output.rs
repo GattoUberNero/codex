@@ -733,6 +733,7 @@ fn collab_spawn_begin_and_end_emit_item_events() {
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
                 delegation_report: None,
+                wait_outcome: None,
                 agents_states: std::collections::HashMap::new(),
             },
             thread_id: "thread-parent".to_string(),
@@ -757,6 +758,7 @@ fn collab_spawn_begin_and_end_emit_item_events() {
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
                 delegation_report: None,
+                wait_outcome: None,
                 agents_states: std::collections::HashMap::from([(
                     "thread-child".to_string(),
                     ApiCollabAgentState {
@@ -839,6 +841,7 @@ fn collab_follow_up_tools_emit_distinct_item_events() {
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
                 delegation_report: None,
+                wait_outcome: None,
                 agents_states: std::collections::HashMap::new(),
             },
             thread_id: "thread-parent".to_string(),
@@ -863,6 +866,7 @@ fn collab_follow_up_tools_emit_distinct_item_events() {
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
                 delegation_report: None,
+                wait_outcome: None,
                 agents_states: std::collections::HashMap::new(),
             },
             thread_id: "thread-parent".to_string(),

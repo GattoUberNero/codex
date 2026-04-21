@@ -270,7 +270,7 @@ pub fn create_resume_agent_tool() -> ToolSpec {
 pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "wait_agent".to_string(),
-        description: "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status."
+        description: "Listen for the first targeted agent to reach a final status. This returns as soon as one target reaches a final status; it does not wait for all listed targets. Completed statuses may include the agent's final message. Returns an explicit wait outcome and any still-active pending targets when the listen window ends before completion is observed. Runtime may extend the requested timeout to reduce busy polling."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -282,7 +282,7 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
 pub fn create_wait_agent_tool_v2(options: WaitAgentTimeoutOptions) -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "wait_agent".to_string(),
-        description: "Wait for agents to reach a final status. Returns a brief wait summary instead of the agent's final content. Returns a timeout summary when no agent reaches a final status before the deadline."
+        description: "Listen for the first targeted agent to reach a final status. This returns as soon as one target reaches a final status; it does not wait for all listed targets. Returns a brief wait summary instead of the agent's final content. If no targets are provided, waits for any collaboration activity. Returns an explicit wait outcome and any still-active pending targets when the listen window ends before completion is observed. Runtime may extend the requested timeout to reduce busy polling."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -320,17 +320,20 @@ pub fn create_list_agents_tool() -> ToolSpec {
 }
 
 pub fn create_close_agent_tool_v1() -> ToolSpec {
-    let properties = BTreeMap::from([(
-        "target".to_string(),
-        JsonSchema::String {
-            enum_values: None,
-            description: Some("Agent id to close (from spawn_agent).".to_string()),
-        },
-    )]);
+    let properties = BTreeMap::from([
+        (
+            "target".to_string(),
+            JsonSchema::String {
+                enum_values: None,
+                description: Some("Agent id to close (from spawn_agent).".to_string()),
+            },
+        ),
+        ("mode".to_string(), close_agent_mode_parameter_schema()),
+    ]);
 
     ToolSpec::Function(ResponsesApiTool {
         name: "close_agent".to_string(),
-        description: "Close an agent and any open descendants when they are no longer needed, and return the target agent's previous status before shutdown was requested. Don't keep agents open for too long if they are not needed anymore.".to_string(),
+        description: "Close an agent and any open descendants when they are no longer needed, and return the target agent's previous status before shutdown was requested. By default, safe_close only closes agents that are already in a final state; use force_cancel only when you intentionally want to terminate running work.".to_string(),
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::Object {
@@ -343,19 +346,22 @@ pub fn create_close_agent_tool_v1() -> ToolSpec {
 }
 
 pub fn create_close_agent_tool_v2() -> ToolSpec {
-    let properties = BTreeMap::from([(
-        "target".to_string(),
-        JsonSchema::String {
-            enum_values: None,
-            description: Some(
-                "Agent id or canonical task name to close (from spawn_agent).".to_string(),
-            ),
-        },
-    )]);
+    let properties = BTreeMap::from([
+        (
+            "target".to_string(),
+            JsonSchema::String {
+                enum_values: None,
+                description: Some(
+                    "Agent id or canonical task name to close (from spawn_agent).".to_string(),
+                ),
+            },
+        ),
+        ("mode".to_string(), close_agent_mode_parameter_schema()),
+    ]);
 
     ToolSpec::Function(ResponsesApiTool {
         name: "close_agent".to_string(),
-        description: "Close an agent and any open descendants when they are no longer needed, and return the target agent's previous status before shutdown was requested. Don't keep agents open for too long if they are not needed anymore.".to_string(),
+        description: "Close an agent and any open descendants when they are no longer needed, and return the target agent's previous status before shutdown was requested. By default, safe_close only closes agents that are already in a final state; use force_cancel only when you intentionally want to terminate running work.".to_string(),
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::Object {
@@ -568,15 +574,17 @@ fn wait_output_schema_v1() -> Value {
         "properties": {
             "status": {
                 "type": "object",
-                "description": "Final statuses keyed by agent id.",
+                "description": "Completion-observed statuses keyed by agent id; empty when the listen window ends without observed completion.",
                 "additionalProperties": agent_status_output_schema()
             },
+            "pending": wait_pending_output_schema(),
             "timed_out": {
                 "type": "boolean",
-                "description": "Whether the wait call returned due to timeout before any agent reached a final status."
-            }
+                "description": "Whether the listen window ended before completion was observed."
+            },
+            "wait_outcome": collab_wait_outcome_output_schema()
         },
-        "required": ["status", "timed_out"],
+        "required": ["status", "pending", "timed_out", "wait_outcome"],
         "additionalProperties": false
     })
 }
@@ -589,13 +597,49 @@ fn wait_output_schema_v2() -> Value {
                 "type": "string",
                 "description": "Brief wait summary without the agent's final content."
             },
+            "pending": wait_pending_output_schema(),
             "timed_out": {
                 "type": "boolean",
-                "description": "Whether the wait call returned due to timeout before any agent reached a final status."
-            }
+                "description": "Whether the listen window ended before completion was observed."
+            },
+            "wait_outcome": collab_wait_outcome_output_schema()
         },
-        "required": ["message", "timed_out"],
+        "required": ["message", "pending", "timed_out", "wait_outcome"],
         "additionalProperties": false
+    })
+}
+
+fn wait_pending_output_schema() -> Value {
+    json!({
+        "type": "array",
+        "description": "Still-active targeted agents observed at the end of this listen window. Empty means no unresolved active target was observed, not necessarily that every listed target completed.",
+        "items": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "Agent id for the unresolved target."
+                },
+                "state": {
+                    "description": "Current known active status for this unresolved target.",
+                    "allOf": [agent_status_output_schema()]
+                }
+            },
+            "required": ["id", "state"],
+            "additionalProperties": false
+        }
+    })
+}
+
+fn collab_wait_outcome_output_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": "Outcome of this wait observation window.",
+        "enum": [
+            "completion_observed",
+            "activity_observed",
+            "listen_window_ended"
+        ]
     })
 }
 
@@ -611,6 +655,15 @@ fn close_agent_output_schema() -> Value {
         "required": ["previous_status"],
         "additionalProperties": false
     })
+}
+
+fn close_agent_mode_parameter_schema() -> JsonSchema {
+    JsonSchema::String {
+        enum_values: Some(vec!["safe_close".to_string(), "force_cancel".to_string()]),
+        description: Some(
+            "Optional close mode. safe_close is the default and only closes already-finished agents; force_cancel intentionally terminates running work.".to_string(),
+        ),
+    }
 }
 
 fn delegation_report_properties() -> BTreeMap<String, JsonSchema> {
@@ -1092,7 +1145,7 @@ fn wait_agent_tool_parameters_v1(options: WaitAgentTimeoutOptions) -> JsonSchema
             "timeout_ms".to_string(),
             JsonSchema::Number {
                 description: Some(format!(
-                    "Optional timeout in milliseconds. Defaults to {}, min {}, max {}. Prefer longer waits (minutes) to avoid busy polling.",
+                    "Optional timeout in milliseconds. Defaults to {}, min {}, max {}. Runtime may extend the requested timeout to reduce busy polling; prefer longer waits (minutes) for long-running work.",
                     options.default_timeout_ms, options.min_timeout_ms, options.max_timeout_ms,
                 )),
             },
@@ -1124,7 +1177,7 @@ fn wait_agent_tool_parameters_v2(options: WaitAgentTimeoutOptions) -> JsonSchema
             "timeout_ms".to_string(),
             JsonSchema::Number {
                 description: Some(format!(
-                    "Optional timeout in milliseconds. Defaults to {}, min {}, max {}. Prefer longer waits (minutes) to avoid busy polling.",
+                    "Optional timeout in milliseconds. Defaults to {}, min {}, max {}. Runtime may extend the requested timeout to reduce busy polling; prefer longer waits (minutes) for long-running work.",
                     options.default_timeout_ms, options.min_timeout_ms, options.max_timeout_ms,
                 )),
             },
@@ -1133,7 +1186,7 @@ fn wait_agent_tool_parameters_v2(options: WaitAgentTimeoutOptions) -> JsonSchema
 
     JsonSchema::Object {
         properties,
-        required: Some(vec!["targets".to_string()]),
+        required: None,
         additional_properties: Some(false.into()),
     }
 }

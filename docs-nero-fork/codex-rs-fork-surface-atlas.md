@@ -535,6 +535,7 @@ These are diagnostic keys carried in hook summary meta, not typed public RPC sch
   - `send_input` is the legacy agent-id path and accepts `message` or `items`
   - `send_message` and `assign_task` share the same text-only input shape in MultiAgentV2; `assign_task` triggers a turn, `send_message` only queues
   - `close_agent` and `send_message` / `assign_task` resolve agent ids or canonical `task_name` values in MultiAgentV2
+  - `close_agent` defaults to `mode: safe_close`; it rejects active targets or active descendants and requires explicit `mode: force_cancel` to terminate running subtree work
   - optional `delegation_report` input has 9 required top-level fields when present, with 1-10 bounds on the three score fields and `expected_duration_minutes > 0`
   - optional nested `orchestration_context` is validated only when present, with hard per-field
     string/pattern rules
@@ -547,9 +548,9 @@ These are diagnostic keys carried in hook summary meta, not typed public RPC sch
     - `orchestration_router_block` uses a current-stage bridge helper to generate the injected block and requires `orchestration_context`
   - request/response shape highlights:
     - `send_input` / `send_message` / `assign_task`: return `submission_id`
-    - `close_agent`: `target` -> `previous_status`
+    - `close_agent`: `target` + optional `mode` (`safe_close` default, `force_cancel` explicit) -> `previous_status`
     - `resume_agent`: `id` -> `status`
-    - `wait_agent` v2: schema declares `targets` (+ optional `timeout_ms`) -> `message` + `timed_out`; current MultiAgentV2 handler behavior is mailbox-activity based and accepts timeout-only calls
+    - `wait_agent` v2: optional `targets` (+ optional `timeout_ms`) -> `message` + `pending[]` + `timed_out` + `wait_outcome`; targeted waits return after first observed completion, while timeout-only calls use mailbox-activity mode
     - `list_agents`: optional `path_prefix` -> `agents[]` (`agent_name`, `agent_status`, `last_task_message`)
 - Event and item contracts:
   - protocol events: `CollabAgentSpawnBeginEvent`, `CollabAgentSpawnEndEvent`, `CollabAgentInteractionBeginEvent`, `CollabAgentInteractionEndEvent`, `CollabWaitingBeginEvent`, `CollabWaitingEndEvent`, `CollabCloseBeginEvent`, `CollabCloseEndEvent`, `CollabResumeBeginEvent`, `CollabResumeEndEvent`

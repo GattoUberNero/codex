@@ -40,6 +40,64 @@ use tokio::process::Command;
 pub(crate) const MIN_WAIT_TIMEOUT_MS: i64 = 10_000;
 pub(crate) const DEFAULT_WAIT_TIMEOUT_MS: i64 = 30_000;
 pub(crate) const MAX_WAIT_TIMEOUT_MS: i64 = 3600 * 1000;
+pub(crate) const WAIT_TIMEOUT_MULTIPLIER: i64 = 2;
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CloseAgentMode {
+    #[default]
+    SafeClose,
+    ForceCancel,
+}
+
+pub(crate) fn effective_wait_timeout_ms(
+    requested_timeout_ms: i64,
+) -> Result<i64, FunctionCallError> {
+    let requested_timeout_ms = match requested_timeout_ms {
+        ms if ms <= 0 => {
+            return Err(FunctionCallError::RespondToModel(
+                "timeout_ms must be greater than zero".to_owned(),
+            ));
+        }
+        ms => ms,
+    };
+    Ok(requested_timeout_ms
+        .saturating_mul(WAIT_TIMEOUT_MULTIPLIER)
+        .clamp(MIN_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS))
+}
+
+pub(crate) fn is_active_agent_status(status: &AgentStatus) -> bool {
+    matches!(
+        status,
+        AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::Interrupted
+    )
+}
+
+pub(crate) async fn validate_safe_close_subtree(
+    session: &Session,
+    agent_id: ThreadId,
+) -> Result<(), FunctionCallError> {
+    if let Some((active_agent_id, status)) = session
+        .services
+        .agent_control
+        .first_active_agent_in_tree(agent_id)
+        .await
+        .map_err(|err| collab_agent_error(agent_id, err))?
+    {
+        return Err(safe_close_rejected_error(active_agent_id, &status));
+    }
+
+    Ok(())
+}
+
+pub(crate) fn safe_close_rejected_error(
+    active_agent_id: ThreadId,
+    status: &AgentStatus,
+) -> FunctionCallError {
+    FunctionCallError::RespondToModel(format!(
+        "agent subtree still has active agent {active_agent_id} ({status:?}); use force_cancel only when you intentionally want to terminate running work"
+    ))
+}
 // Delimiter for structured spawn delegation context embedded into child payload text.
 // This is intentionally explicit so runtime can sanitize task summaries while preserving
 // the structured block in transport.
@@ -101,6 +159,20 @@ where
     })
 }
 
+pub(crate) async fn current_wait_agent_statuses(
+    session: &Session,
+    receiver_thread_ids: &[ThreadId],
+) -> HashMap<ThreadId, AgentStatus> {
+    let mut current_statuses = HashMap::with_capacity(receiver_thread_ids.len());
+    for thread_id in receiver_thread_ids {
+        current_statuses.insert(
+            *thread_id,
+            session.services.agent_control.get_status(*thread_id).await,
+        );
+    }
+    current_statuses
+}
+
 pub(crate) fn build_wait_agent_statuses(
     statuses: &HashMap<ThreadId, AgentStatus>,
     receiver_agents: &[CollabAgentRef],
@@ -134,6 +206,49 @@ pub(crate) fn build_wait_agent_statuses(
         })
         .collect::<Vec<_>>();
     extras.sort_by(|left, right| left.thread_id.to_string().cmp(&right.thread_id.to_string()));
+    entries.extend(extras);
+    entries
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct WaitPendingAgent {
+    pub(crate) id: String,
+    pub(crate) state: AgentStatus,
+}
+
+pub(crate) fn build_wait_agent_pending(
+    statuses: &HashMap<ThreadId, AgentStatus>,
+    receiver_agents: &[CollabAgentRef],
+) -> Vec<WaitPendingAgent> {
+    if statuses.is_empty() {
+        return Vec::new();
+    }
+
+    let mut entries = Vec::new();
+    let mut seen = HashMap::with_capacity(receiver_agents.len());
+    for receiver_agent in receiver_agents {
+        seen.insert(receiver_agent.thread_id, ());
+        if let Some(status) = statuses.get(&receiver_agent.thread_id)
+            && is_active_agent_status(status)
+        {
+            entries.push(WaitPendingAgent {
+                id: receiver_agent.thread_id.to_string(),
+                state: status.clone(),
+            });
+        }
+    }
+
+    let mut extras = statuses
+        .iter()
+        .filter(|(thread_id, status)| {
+            !seen.contains_key(thread_id) && is_active_agent_status(status)
+        })
+        .map(|(thread_id, status)| WaitPendingAgent {
+            id: thread_id.to_string(),
+            state: status.clone(),
+        })
+        .collect::<Vec<_>>();
+    extras.sort_by(|left, right| left.id.cmp(&right.id));
     entries.extend(extras);
     entries
 }

@@ -1,6 +1,7 @@
 use crate::protocol::v2::CollabAgentState;
 use crate::protocol::v2::CollabAgentTool;
 use crate::protocol::v2::CollabAgentToolCallStatus;
+use crate::protocol::v2::CollabWaitOutcome;
 use crate::protocol::v2::CommandAction;
 use crate::protocol::v2::CommandExecutionStatus;
 use crate::protocol::v2::DynamicToolCallOutputContentItem;
@@ -662,6 +663,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
             delegation_report: payload.delegation_report.clone(),
+            wait_outcome: None,
             agents_states: HashMap::new(),
         };
         self.upsert_item_in_current_turn(item);
@@ -705,6 +707,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_effective: payload.context_inheritance_effective,
             context_inheritance_telemetry: payload.context_inheritance_telemetry.clone(),
             delegation_report: payload.delegation_report.clone(),
+            wait_outcome: None,
             agents_states,
         });
     }
@@ -740,6 +743,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
             delegation_report: payload.delegation_report.clone(),
+            wait_outcome: None,
             agents_states: HashMap::new(),
         };
         self.upsert_item_in_current_turn(item);
@@ -782,6 +786,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
             delegation_report: payload.delegation_report.clone(),
+            wait_outcome: None,
             agents_states: [(receiver_id, received_status)].into_iter().collect(),
         });
     }
@@ -811,6 +816,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
             delegation_report: None,
+            wait_outcome: None,
             agents_states: HashMap::new(),
         };
         self.upsert_item_in_current_turn(item);
@@ -837,6 +843,13 @@ impl ThreadHistoryBuilder {
             .iter()
             .map(|(id, status)| (id.to_string(), CollabAgentState::from(status.clone())))
             .collect();
+        let wait_outcome = Some(payload.wait_outcome.map(Into::into).unwrap_or_else(|| {
+            if payload.statuses.is_empty() {
+                CollabWaitOutcome::ListenWindowEnded
+            } else {
+                CollabWaitOutcome::CompletionObserved
+            }
+        }));
         self.upsert_item_in_current_turn(ThreadItem::CollabAgentToolCall {
             id: payload.call_id.clone(),
             tool: CollabAgentTool::Wait,
@@ -854,6 +867,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
             delegation_report: None,
+            wait_outcome,
             agents_states,
         });
     }
@@ -879,6 +893,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
             delegation_report: None,
+            wait_outcome: None,
             agents_states: HashMap::new(),
         };
         self.upsert_item_in_current_turn(item);
@@ -886,7 +901,7 @@ impl ThreadHistoryBuilder {
 
     fn handle_collab_close_end(&mut self, payload: &codex_protocol::protocol::CollabCloseEndEvent) {
         let status = match &payload.status {
-            AgentStatus::Errored(_) | AgentStatus::NotFound => CollabAgentToolCallStatus::Failed,
+            AgentStatus::Errored(_) => CollabAgentToolCallStatus::Failed,
             _ => CollabAgentToolCallStatus::Completed,
         };
         let receiver_id = payload.receiver_thread_id.to_string();
@@ -913,6 +928,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
             delegation_report: None,
+            wait_outcome: None,
             agents_states,
         });
     }
@@ -938,6 +954,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
             delegation_report: None,
+            wait_outcome: None,
             agents_states: HashMap::new(),
         };
         self.upsert_item_in_current_turn(item);
@@ -975,6 +992,7 @@ impl ThreadHistoryBuilder {
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
             delegation_report: None,
+            wait_outcome: None,
             agents_states,
         });
     }
@@ -2788,10 +2806,144 @@ mod tests {
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
                 delegation_report: None,
+                wait_outcome: None,
                 agents_states: [(
                     "00000000-0000-0000-0000-000000000002".into(),
                     CollabAgentState {
                         status: crate::protocol::v2::CollabAgentStatus::Completed,
+                        message: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }
+        );
+    }
+
+    #[test]
+    fn reconstructs_collab_wait_end_item_with_wait_outcome() {
+        let sender_thread_id = ThreadId::try_from("00000000-0000-0000-0000-000000000001")
+            .expect("valid sender thread id");
+        let receiver_thread_id = ThreadId::try_from("00000000-0000-0000-0000-000000000002")
+            .expect("valid receiver thread id");
+        let events = vec![
+            EventMsg::UserMessage(UserMessageEvent {
+                message: "wait on agent".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            }),
+            EventMsg::CollabWaitingBegin(codex_protocol::protocol::CollabWaitingBeginEvent {
+                call_id: "wait-1".into(),
+                sender_thread_id,
+                receiver_thread_ids: vec![receiver_thread_id],
+                receiver_agents: Vec::new(),
+            }),
+            EventMsg::CollabWaitingEnd(codex_protocol::protocol::CollabWaitingEndEvent {
+                call_id: "wait-1".into(),
+                sender_thread_id,
+                wait_outcome: Some(codex_protocol::protocol::CollabWaitOutcome::ListenWindowEnded),
+                agent_statuses: Vec::new(),
+                statuses: [(receiver_thread_id, AgentStatus::Running)]
+                    .into_iter()
+                    .collect(),
+            }),
+        ];
+
+        let items = events
+            .into_iter()
+            .map(RolloutItem::EventMsg)
+            .collect::<Vec<_>>();
+        let turns = build_turns_from_rollout_items(&items);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].items.len(), 2);
+        assert_eq!(
+            turns[0].items[1],
+            ThreadItem::CollabAgentToolCall {
+                id: "wait-1".into(),
+                tool: CollabAgentTool::Wait,
+                status: CollabAgentToolCallStatus::Completed,
+                sender_thread_id: "00000000-0000-0000-0000-000000000001".into(),
+                receiver_thread_ids: vec!["00000000-0000-0000-0000-000000000002".into()],
+                prompt: None,
+                requested_model: None,
+                requested_reasoning_effort: None,
+                model: None,
+                reasoning_effort: None,
+                effective_model: None,
+                effective_reasoning_effort: None,
+                context_inheritance_requested: None,
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
+                delegation_report: None,
+                wait_outcome: Some(crate::protocol::v2::CollabWaitOutcome::ListenWindowEnded),
+                agents_states: [(
+                    "00000000-0000-0000-0000-000000000002".into(),
+                    CollabAgentState {
+                        status: crate::protocol::v2::CollabAgentStatus::Running,
+                        message: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }
+        );
+    }
+
+    #[test]
+    fn reconstructs_collab_close_not_found_as_completed_noop() {
+        let sender_thread_id = ThreadId::try_from("00000000-0000-0000-0000-000000000001")
+            .expect("valid sender thread id");
+        let receiver_thread_id = ThreadId::try_from("00000000-0000-0000-0000-000000000002")
+            .expect("valid receiver thread id");
+        let events = vec![
+            EventMsg::UserMessage(UserMessageEvent {
+                message: "close missing agent".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            }),
+            EventMsg::CollabCloseEnd(codex_protocol::protocol::CollabCloseEndEvent {
+                call_id: "close-1".into(),
+                sender_thread_id,
+                receiver_thread_id,
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
+                status: AgentStatus::NotFound,
+            }),
+        ];
+
+        let items = events
+            .into_iter()
+            .map(RolloutItem::EventMsg)
+            .collect::<Vec<_>>();
+        let turns = build_turns_from_rollout_items(&items);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].items.len(), 2);
+        assert_eq!(
+            turns[0].items[1],
+            ThreadItem::CollabAgentToolCall {
+                id: "close-1".into(),
+                tool: CollabAgentTool::CloseAgent,
+                status: CollabAgentToolCallStatus::Completed,
+                sender_thread_id: "00000000-0000-0000-0000-000000000001".into(),
+                receiver_thread_ids: vec!["00000000-0000-0000-0000-000000000002".into()],
+                prompt: None,
+                requested_model: None,
+                requested_reasoning_effort: None,
+                model: None,
+                reasoning_effort: None,
+                effective_model: None,
+                effective_reasoning_effort: None,
+                context_inheritance_requested: None,
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
+                delegation_report: None,
+                wait_outcome: None,
+                agents_states: [(
+                    "00000000-0000-0000-0000-000000000002".into(),
+                    CollabAgentState {
+                        status: crate::protocol::v2::CollabAgentStatus::NotFound,
                         message: None,
                     },
                 )]
@@ -2855,6 +3007,7 @@ mod tests {
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
                 delegation_report: None,
+                wait_outcome: None,
                 agents_states: HashMap::new(),
             }
         );
@@ -2955,6 +3108,7 @@ mod tests {
                     },
                 ),
                 delegation_report: None,
+                wait_outcome: None,
                 agents_states: [(
                     "00000000-0000-0000-0000-000000000002".into(),
                     CollabAgentState {
@@ -3138,6 +3292,7 @@ mod tests {
                     },
                 ),
                 delegation_report: None,
+                wait_outcome: None,
                 agents_states: [(
                     "00000000-0000-0000-0000-000000000002".into(),
                     CollabAgentState {
@@ -3230,6 +3385,7 @@ mod tests {
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
                 delegation_report: Some(delegation_report),
+                wait_outcome: None,
                 agents_states: [(
                     receiver.to_string(),
                     CollabAgentState {

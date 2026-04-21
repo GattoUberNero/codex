@@ -434,6 +434,7 @@ fn assign_task_tool_includes_optional_delegation_report() {
 #[test]
 fn wait_agent_tool_v2_uses_task_targets_and_summary_output() {
     let ToolSpec::Function(ResponsesApiTool {
+        description: tool_description,
         parameters,
         output_schema,
         ..
@@ -455,10 +456,69 @@ fn wait_agent_tool_v2_uses_task_targets_and_summary_output() {
     else {
         panic!("wait_agent should define targets array");
     };
+    assert!(tool_description.contains("activity"));
+    assert!(tool_description.contains("does not wait for all listed targets"));
     assert!(description.contains("canonical task names"));
+    assert!(tool_description.contains("Runtime may extend the requested timeout"));
+    let output_schema = output_schema.expect("wait output schema");
     assert_eq!(
-        output_schema.expect("wait output schema")["properties"]["message"]["description"],
+        output_schema["properties"]["message"]["description"],
         json!("Brief wait summary without the agent's final content.")
+    );
+    assert_eq!(
+        output_schema["required"],
+        json!(["message", "pending", "timed_out", "wait_outcome"])
+    );
+    assert_eq!(
+        output_schema["properties"]["pending"]["items"]["required"],
+        json!(["id", "state"])
+    );
+    assert_eq!(
+        output_schema["properties"]["wait_outcome"]["enum"],
+        json!([
+            "completion_observed",
+            "activity_observed",
+            "listen_window_ended"
+        ])
+    );
+}
+
+#[test]
+fn close_agent_tool_v2_exposes_safe_close_mode() {
+    let ToolSpec::Function(ResponsesApiTool {
+        description,
+        parameters,
+        output_schema,
+        ..
+    }) = create_close_agent_tool_v2()
+    else {
+        panic!("close_agent should be a function tool");
+    };
+    let JsonSchema::Object {
+        properties,
+        required,
+        ..
+    } = parameters
+    else {
+        panic!("close_agent should use object params");
+    };
+
+    assert!(description.contains("safe_close"));
+    assert!(description.contains("force_cancel"));
+    assert_eq!(required, Some(vec!["target".to_string()]));
+    assert_eq!(
+        properties.get("mode"),
+        Some(&JsonSchema::String {
+            enum_values: Some(vec!["safe_close".to_string(), "force_cancel".to_string()]),
+            description: Some(
+                "Optional close mode. safe_close is the default and only closes already-finished agents; force_cancel intentionally terminates running work."
+                    .to_string(),
+            ),
+        })
+    );
+    assert_eq!(
+        output_schema.expect("close_agent output schema")["required"],
+        json!(["previous_status"])
     );
 }
 

@@ -27,6 +27,7 @@ use codex_app_server_protocol::CollabAgentState as AppServerCollabAgentState;
 use codex_app_server_protocol::CollabAgentStatus as AppServerCollabAgentStatus;
 use codex_app_server_protocol::CollabAgentTool as AppServerCollabAgentTool;
 use codex_app_server_protocol::CollabAgentToolCallStatus as AppServerCollabAgentToolCallStatus;
+use codex_app_server_protocol::CollabWaitOutcome as AppServerCollabWaitOutcome;
 use codex_app_server_protocol::CommandAction as AppServerCommandAction;
 use codex_app_server_protocol::CommandExecutionRequestApprovalParams as AppServerCommandExecutionRequestApprovalParams;
 use codex_app_server_protocol::CommandExecutionSource as AppServerCommandExecutionSource;
@@ -5245,6 +5246,7 @@ async fn live_app_server_collab_wait_items_render_history() {
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
                 delegation_report: None,
+                wait_outcome: None,
                 agents_states: HashMap::new(),
             },
         }),
@@ -5275,6 +5277,7 @@ async fn live_app_server_collab_wait_items_render_history() {
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
                 delegation_report: None,
+                wait_outcome: Some(AppServerCollabWaitOutcome::CompletionObserved),
                 agents_states: HashMap::from([
                     (
                         receiver_thread_id.to_string(),
@@ -5302,6 +5305,14 @@ async fn live_app_server_collab_wait_items_render_history() {
         .collect::<Vec<_>>()
         .join("\n");
     assert_snapshot!("app_server_collab_wait_items_render_history", combined);
+    assert!(
+        combined.contains("First completion observed; 1 target still pending"),
+        "expected explicit first-completion wording, got {combined:?}"
+    );
+    assert!(
+        !combined.contains("Finished waiting"),
+        "expected old finished-waiting wording to be gone, got {combined:?}"
+    );
 }
 
 #[tokio::test]
@@ -5335,6 +5346,7 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
                 delegation_report: None,
+                wait_outcome: None,
                 agents_states: HashMap::new(),
             },
         }),
@@ -5385,6 +5397,7 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                     risks_or_unknowns: "none known".to_string(),
                     orchestration_context: None,
                 }),
+                wait_outcome: None,
                 agents_states: HashMap::from([(
                     spawned_thread_id.to_string(),
                     AppServerCollabAgentState {
@@ -5475,6 +5488,7 @@ async fn live_app_server_collab_spawn_completed_renders_orchestration_context_de
                         },
                     ),
                 }),
+                wait_outcome: None,
                 agents_states: HashMap::from([(
                     spawned_thread_id.to_string(),
                     AppServerCollabAgentState {
@@ -5538,6 +5552,7 @@ async fn replayed_in_progress_spawn_item_renders_begin_row() {
                 risks_or_unknowns: "none known".to_string(),
                 orchestration_context: None,
             }),
+            wait_outcome: None,
             agents_states: HashMap::new(),
         },
         "turn-1".to_string(),
@@ -5619,6 +5634,7 @@ async fn replayed_spawn_begin_event_does_not_render_after_completed_spawn_item()
                 risks_or_unknowns: "none known".to_string(),
                 orchestration_context: None,
             }),
+            wait_outcome: None,
             agents_states: HashMap::from([(
                 spawned_thread_id.to_string(),
                 AppServerCollabAgentState {
@@ -5714,6 +5730,7 @@ async fn completed_spawn_item_falls_back_to_legacy_model_fields_when_effective_m
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
             delegation_report: None,
+            wait_outcome: None,
             agents_states: HashMap::from([(
                 spawned_thread_id.to_string(),
                 AppServerCollabAgentState {
@@ -5769,6 +5786,7 @@ async fn replayed_spawn_notifications_do_not_duplicate_completed_spawn_item() {
             ),
             context_inheritance_telemetry: None,
             delegation_report: None,
+            wait_outcome: None,
             agents_states: HashMap::from([(
                 spawned_thread_id.to_string(),
                 AppServerCollabAgentState {
@@ -5804,6 +5822,7 @@ async fn replayed_spawn_notifications_do_not_duplicate_completed_spawn_item() {
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
                 delegation_report: None,
+                wait_outcome: None,
                 agents_states: HashMap::new(),
             },
         }),
@@ -5835,6 +5854,7 @@ async fn replayed_spawn_notifications_do_not_duplicate_completed_spawn_item() {
                 ),
                 context_inheritance_telemetry: None,
                 delegation_report: None,
+                wait_outcome: None,
                 agents_states: HashMap::from([(
                     spawned_thread_id.to_string(),
                     AppServerCollabAgentState {
@@ -5894,6 +5914,7 @@ async fn replayed_thread_snapshot_event_notifications_do_not_duplicate_completed
             ),
             context_inheritance_telemetry: None,
             delegation_report: None,
+            wait_outcome: None,
             agents_states: HashMap::from([(
                 spawned_thread_id.to_string(),
                 AppServerCollabAgentState {
@@ -5929,6 +5950,7 @@ async fn replayed_thread_snapshot_event_notifications_do_not_duplicate_completed
                 context_inheritance_effective: None,
                 context_inheritance_telemetry: None,
                 delegation_report: None,
+                wait_outcome: None,
                 agents_states: HashMap::new(),
             },
         }),
@@ -5960,6 +5982,7 @@ async fn replayed_thread_snapshot_event_notifications_do_not_duplicate_completed
                 ),
                 context_inheritance_telemetry: None,
                 delegation_report: None,
+                wait_outcome: None,
                 agents_states: HashMap::from([(
                     spawned_thread_id.to_string(),
                     AppServerCollabAgentState {
@@ -6017,6 +6040,7 @@ async fn replayed_in_progress_spawn_item_allows_completed_notification_transitio
             context_inheritance_effective: None,
             context_inheritance_telemetry: None,
             delegation_report: None,
+            wait_outcome: None,
             agents_states: HashMap::new(),
         },
         "turn-1".to_string(),
@@ -6048,6 +6072,7 @@ async fn replayed_in_progress_spawn_item_allows_completed_notification_transitio
                 ),
                 context_inheritance_telemetry: None,
                 delegation_report: None,
+                wait_outcome: None,
                 agents_states: HashMap::from([(
                     spawned_thread_id.to_string(),
                     AppServerCollabAgentState {
