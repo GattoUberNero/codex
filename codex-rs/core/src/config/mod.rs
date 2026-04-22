@@ -578,6 +578,9 @@ pub struct Config {
     /// Optional full model catalog loaded from `model_catalog_json`.
     /// When set, this replaces the bundled catalog for the current process.
     pub model_catalog: Option<ModelsResponse>,
+    /// Optional model catalog overlay loaded from `model_catalog_overlay_json`.
+    /// When set, this merges on top of the bundled catalog for the current process.
+    pub model_catalog_overlay: Option<ModelsResponse>,
 
     /// Optional verbosity control for GPT-5 models (Responses API `text.verbosity`).
     pub model_verbosity: Option<Verbosity>,
@@ -1715,13 +1718,13 @@ pub(crate) fn resolve_codexn_fork_auto_developer_instructions_for_turn(
     ))
 }
 
-fn load_catalog_json(path: &AbsolutePathBuf) -> std::io::Result<ModelsResponse> {
+fn load_catalog_json(path: &AbsolutePathBuf, field_name: &str) -> std::io::Result<ModelsResponse> {
     let file_contents = std::fs::read_to_string(path)?;
     let catalog = serde_json::from_str::<ModelsResponse>(&file_contents).map_err(|err| {
         std::io::Error::new(
             ErrorKind::InvalidData,
             format!(
-                "failed to parse model_catalog_json path `{}` as JSON: {err}",
+                "failed to parse {field_name} path `{}` as JSON: {err}",
                 path.display()
             ),
         )
@@ -1730,7 +1733,7 @@ fn load_catalog_json(path: &AbsolutePathBuf) -> std::io::Result<ModelsResponse> 
         return Err(std::io::Error::new(
             ErrorKind::InvalidData,
             format!(
-                "model_catalog_json path `{}` must contain at least one model",
+                "{field_name} path `{}` must contain at least one model",
                 path.display()
             ),
         ));
@@ -1742,8 +1745,35 @@ fn load_model_catalog(
     model_catalog_json: Option<AbsolutePathBuf>,
 ) -> std::io::Result<Option<ModelsResponse>> {
     model_catalog_json
-        .map(|path| load_catalog_json(&path))
+        .map(|path| load_catalog_json(&path, "model_catalog_json"))
         .transpose()
+}
+
+fn load_model_catalog_overlay(
+    model_catalog_overlay_json: Option<AbsolutePathBuf>,
+) -> std::io::Result<Option<ModelsResponse>> {
+    model_catalog_overlay_json
+        .map(|path| load_catalog_json(&path, "model_catalog_overlay_json"))
+        .transpose()
+}
+
+fn validate_model_catalog_sources(
+    model_catalog_json: Option<&AbsolutePathBuf>,
+    model_catalog_overlay_json: Option<&AbsolutePathBuf>,
+) -> std::io::Result<()> {
+    if let (Some(model_catalog_json), Some(model_catalog_overlay_json)) =
+        (model_catalog_json, model_catalog_overlay_json)
+    {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "model_catalog_json path `{}` and model_catalog_overlay_json path `{}` cannot both be set",
+                model_catalog_json.display(),
+                model_catalog_overlay_json.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn filter_mcp_servers_by_requirements(
@@ -2215,6 +2245,9 @@ pub struct ConfigToml {
     /// Optional path to a JSON model catalog (applied on startup only).
     /// Per-thread `config` overrides are accepted but do not reapply this (no-ops).
     pub model_catalog_json: Option<AbsolutePathBuf>,
+    /// Optional path to a JSON model catalog overlay (applied on startup only).
+    /// Per-thread `config` overrides are accepted but do not reapply this (no-ops).
+    pub model_catalog_overlay_json: Option<AbsolutePathBuf>,
 
     /// Optionally specify a personality for the model
     pub personality: Option<Personality>,
@@ -3434,12 +3467,20 @@ impl Config {
         let review_model = override_review_model.or(cfg.review_model);
 
         let check_for_update_on_startup = cfg.check_for_update_on_startup.unwrap_or(true);
-        let model_catalog = load_model_catalog(
-            config_profile
-                .model_catalog_json
-                .clone()
-                .or(cfg.model_catalog_json.clone()),
+        let model_catalog_json = config_profile
+            .model_catalog_json
+            .clone()
+            .or(cfg.model_catalog_json.clone());
+        let model_catalog_overlay_json = config_profile
+            .model_catalog_overlay_json
+            .clone()
+            .or(cfg.model_catalog_overlay_json.clone());
+        validate_model_catalog_sources(
+            model_catalog_json.as_ref(),
+            model_catalog_overlay_json.as_ref(),
         )?;
+        let model_catalog = load_model_catalog(model_catalog_json)?;
+        let model_catalog_overlay = load_model_catalog_overlay(model_catalog_overlay_json)?;
 
         let log_dir = cfg
             .log_dir
@@ -3621,6 +3662,7 @@ impl Config {
                 .or(cfg.model_reasoning_summary),
             model_supports_reasoning_summaries: cfg.model_supports_reasoning_summaries,
             model_catalog,
+            model_catalog_overlay,
             model_verbosity: config_profile.model_verbosity.or(cfg.model_verbosity),
             chatgpt_base_url: config_profile
                 .chatgpt_base_url

@@ -175,6 +175,7 @@ enum CatalogMode {
 /// Coordinates remote model discovery plus cached metadata on disk.
 #[derive(Debug)]
 pub struct ModelsManager {
+    base_catalog: Vec<ModelInfo>,
     remote_models: RwLock<Vec<ModelInfo>>,
     catalog_mode: CatalogMode,
     collaboration_modes_config: CollaborationModesConfig,
@@ -196,10 +197,11 @@ impl ModelsManager {
         model_catalog: Option<ModelsResponse>,
         collaboration_modes_config: CollaborationModesConfig,
     ) -> Self {
-        Self::new_with_provider(
+        Self::new_with_provider_and_catalog_overlay(
             codex_home,
             auth_manager,
             model_catalog,
+            /*model_catalog_overlay*/ None,
             collaboration_modes_config,
             ModelProviderInfo::create_openai_provider(/*base_url*/ None),
         )
@@ -213,6 +215,25 @@ impl ModelsManager {
         collaboration_modes_config: CollaborationModesConfig,
         provider: ModelProviderInfo,
     ) -> Self {
+        Self::new_with_provider_and_catalog_overlay(
+            codex_home,
+            auth_manager,
+            model_catalog,
+            /*model_catalog_overlay*/ None,
+            collaboration_modes_config,
+            provider,
+        )
+    }
+
+    /// Construct a manager with an explicit provider and optional overlay used for remote model refreshes.
+    pub fn new_with_provider_and_catalog_overlay(
+        codex_home: PathBuf,
+        auth_manager: Arc<AuthManager>,
+        model_catalog: Option<ModelsResponse>,
+        model_catalog_overlay: Option<ModelsResponse>,
+        collaboration_modes_config: CollaborationModesConfig,
+        provider: ModelProviderInfo,
+    ) -> Self {
         let auth_manager = required_auth_manager_for_provider(auth_manager, &provider);
         let cache_path = codex_home.join(MODEL_CACHE_FILE);
         let cache_manager = ModelsCacheManager::new(cache_path, DEFAULT_MODEL_CACHE_TTL);
@@ -221,13 +242,12 @@ impl ModelsManager {
         } else {
             CatalogMode::Default
         };
-        let remote_models = model_catalog
-            .map(|catalog| catalog.models)
-            .unwrap_or_else(|| {
-                Self::load_remote_models_from_file()
-                    .unwrap_or_else(|err| panic!("failed to load bundled models.json: {err}"))
-            });
+        let base_catalog =
+            Self::load_base_catalog(model_catalog.as_ref(), model_catalog_overlay.as_ref())
+                .unwrap_or_else(|err| panic!("failed to load model catalog: {err}"));
+        let remote_models = base_catalog.clone();
         Self {
+            base_catalog,
             remote_models: RwLock::new(remote_models),
             catalog_mode,
             collaboration_modes_config,
@@ -476,24 +496,43 @@ impl ModelsManager {
 
     /// Replace the cached remote models and rebuild the derived presets list.
     async fn apply_remote_models(&self, models: Vec<ModelInfo>) {
-        let mut existing_models = Self::load_remote_models_from_file().unwrap_or_default();
-        for model in models {
-            if let Some(existing_index) = existing_models
-                .iter()
-                .position(|existing| existing.slug == model.slug)
-            {
-                existing_models[existing_index] = model;
-            } else {
-                existing_models.push(model);
-            }
-        }
-        *self.remote_models.write().await = existing_models;
+        *self.remote_models.write().await =
+            Self::merge_catalog_models(self.base_catalog.clone(), models);
     }
 
     fn load_remote_models_from_file() -> Result<Vec<ModelInfo>, std::io::Error> {
         let file_contents = include_str!("../../models.json");
         let response: ModelsResponse = serde_json::from_str(file_contents)?;
         Ok(response.models)
+    }
+
+    fn load_base_catalog(
+        model_catalog: Option<&ModelsResponse>,
+        model_catalog_overlay: Option<&ModelsResponse>,
+    ) -> Result<Vec<ModelInfo>, std::io::Error> {
+        if let Some(model_catalog) = model_catalog {
+            return Ok(model_catalog.models.clone());
+        }
+        let bundled_models = Self::load_remote_models_from_file()?;
+        Ok(Self::merge_catalog_models(
+            bundled_models,
+            model_catalog_overlay
+                .map(|catalog| catalog.models.clone())
+                .unwrap_or_default(),
+        ))
+    }
+
+    fn merge_catalog_models(mut base: Vec<ModelInfo>, overrides: Vec<ModelInfo>) -> Vec<ModelInfo> {
+        for model in overrides {
+            if let Some(existing_index) =
+                base.iter().position(|existing| existing.slug == model.slug)
+            {
+                base[existing_index] = model;
+            } else {
+                base.push(model);
+            }
+        }
+        base
     }
 
     /// Attempt to satisfy the refresh from the cache when it matches the provider and TTL.
@@ -557,11 +596,11 @@ impl ModelsManager {
     }
 
     /// Get model identifier without consulting remote state or cache.
-    pub(crate) fn get_model_offline_for_tests(model: Option<&str>) -> String {
+    pub(crate) fn get_model_offline_for_tests(model: Option<&str>, config: &Config) -> String {
         if let Some(model) = model {
             return model.to_string();
         }
-        let mut models = Self::load_remote_models_from_file().unwrap_or_default();
+        let mut models = Self::offline_catalog_models(config);
         models.sort_by(|a, b| a.priority.cmp(&b.priority));
         let presets: Vec<ModelPreset> = models.into_iter().map(Into::into).collect();
         presets
@@ -577,12 +616,16 @@ impl ModelsManager {
         model: &str,
         config: &Config,
     ) -> ModelInfo {
-        let candidates: &[ModelInfo] = if let Some(model_catalog) = config.model_catalog.as_ref() {
-            &model_catalog.models
-        } else {
-            &[]
-        };
-        Self::construct_model_info_from_candidates(model, candidates, config)
+        let candidates = Self::offline_catalog_models(config);
+        Self::construct_model_info_from_candidates(model, &candidates, config)
+    }
+
+    fn offline_catalog_models(config: &Config) -> Vec<ModelInfo> {
+        Self::load_base_catalog(
+            config.model_catalog.as_ref(),
+            config.model_catalog_overlay.as_ref(),
+        )
+        .unwrap_or_default()
     }
 }
 

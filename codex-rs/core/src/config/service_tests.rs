@@ -671,6 +671,37 @@ async fn write_value_reports_managed_override() {
 }
 
 #[tokio::test]
+async fn write_value_rejects_model_catalog_replace_overlay_conflict() {
+    let tmp = tempdir().expect("tempdir");
+    let path = tmp.path().join(CONFIG_TOML_FILE);
+    let replace_path = tmp.path().join("catalog.json");
+    let overlay_path = tmp.path().join("catalog-overlay.json");
+    std::fs::write(
+        &path,
+        format!("model_catalog_json = \"{}\"\n", replace_path.display()),
+    )
+    .unwrap();
+
+    let service = ConfigService::new_with_defaults(tmp.path().to_path_buf());
+    let error = service
+        .write_value(ConfigValueWriteParams {
+            file_path: Some(path.display().to_string()),
+            key_path: "model_catalog_overlay_json".to_string(),
+            value: serde_json::json!(overlay_path.display().to_string()),
+            merge_strategy: MergeStrategy::Replace,
+            expected_version: None,
+        })
+        .await
+        .expect_err("replace + overlay should conflict on write");
+
+    assert_eq!(
+        error.write_error_code(),
+        Some(ConfigWriteErrorCode::ConfigValidationError)
+    );
+    assert!(error.to_string().contains("cannot both be set"), "{error}");
+}
+
+#[tokio::test]
 async fn upsert_merges_tables_replace_overwrites() -> Result<()> {
     let tmp = tempdir().expect("tempdir");
     let path = tmp.path().join(CONFIG_TOML_FILE);

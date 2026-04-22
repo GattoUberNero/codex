@@ -12046,7 +12046,7 @@ mod tests {
         let codex_home = tempfile::tempdir().expect("create temp dir");
         let config = build_test_config(codex_home.path()).await;
         let config = Arc::new(config);
-        let model = ModelsManager::get_model_offline_for_tests(config.model.as_deref());
+        let model = ModelsManager::get_model_offline_for_tests(config.model.as_deref(), &config);
         let model_info =
             ModelsManager::construct_model_info_offline_for_tests(model.as_str(), &config);
         let reasoning_effort = config.model_reasoning_effort;
@@ -12146,7 +12146,7 @@ mod tests {
         let codex_home = tempfile::tempdir().expect("create temp dir");
         let config = build_test_config(codex_home.path()).await;
         let config = Arc::new(config);
-        let model = ModelsManager::get_model_offline_for_tests(config.model.as_deref());
+        let model = ModelsManager::get_model_offline_for_tests(config.model.as_deref(), &config);
         let model_info =
             ModelsManager::construct_model_info_offline_for_tests(model.as_str(), &config);
         let reasoning_effort = config.model_reasoning_effort;
@@ -12460,7 +12460,7 @@ mod tests {
     ) -> SessionTelemetry {
         SessionTelemetry::new(
             conversation_id,
-            ModelsManager::get_model_offline_for_tests(config.model.as_deref()).as_str(),
+            ModelsManager::get_model_offline_for_tests(config.model.as_deref(), config).as_str(),
             model_info.slug.as_str(),
             None,
             Some("test@test.com".to_string()),
@@ -12476,7 +12476,7 @@ mod tests {
         let codex_home = tempfile::tempdir().expect("create temp dir");
         let config = build_test_config(codex_home.path()).await;
         let config = Arc::new(config);
-        let model = ModelsManager::get_model_offline_for_tests(config.model.as_deref());
+        let model = ModelsManager::get_model_offline_for_tests(config.model.as_deref(), &config);
         let model_info =
             ModelsManager::construct_model_info_offline_for_tests(model.as_str(), &config);
         let reasoning_effort = config.model_reasoning_effort;
@@ -12595,7 +12595,7 @@ mod tests {
             None,
             CollaborationModesConfig::default(),
         ));
-        let model = ModelsManager::get_model_offline_for_tests(config.model.as_deref());
+        let model = ModelsManager::get_model_offline_for_tests(config.model.as_deref(), &config);
         let model_info =
             ModelsManager::construct_model_info_offline_for_tests(model.as_str(), &config);
         let collaboration_mode = CollaborationMode {
@@ -12697,7 +12697,7 @@ mod tests {
         let agent_control = AgentControl::default();
         let exec_policy = Arc::new(ExecPolicyManager::default());
         let (agent_status_tx, _agent_status_rx) = watch::channel(AgentStatus::PendingInit);
-        let model = ModelsManager::get_model_offline_for_tests(config.model.as_deref());
+        let model = ModelsManager::get_model_offline_for_tests(config.model.as_deref(), &config);
         let model_info =
             ModelsManager::construct_model_info_offline_for_tests(model.as_str(), &config);
         let reasoning_effort = config.model_reasoning_effort;
@@ -13156,7 +13156,7 @@ mod tests {
         let agent_control = AgentControl::default();
         let exec_policy = Arc::new(ExecPolicyManager::default());
         let (agent_status_tx, _agent_status_rx) = watch::channel(AgentStatus::PendingInit);
-        let model = ModelsManager::get_model_offline_for_tests(config.model.as_deref());
+        let model = ModelsManager::get_model_offline_for_tests(config.model.as_deref(), &config);
         let model_info =
             ModelsManager::construct_model_info_offline_for_tests(model.as_str(), &config);
         let reasoning_effort = config.model_reasoning_effort;

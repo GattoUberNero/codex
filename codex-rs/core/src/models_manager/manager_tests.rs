@@ -300,6 +300,119 @@ async fn get_model_info_uses_custom_catalog() {
 }
 
 #[tokio::test]
+async fn get_model_info_uses_overlay_catalog_for_bundled_slug() {
+    let codex_home = tempdir().expect("temp dir");
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .build()
+        .await
+        .expect("load default test config");
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
+    let bundled_slug = ModelsManager::load_remote_models_from_file()
+        .expect("bundled catalog")
+        .first()
+        .expect("bundled model")
+        .slug
+        .clone();
+    let mut overlay = remote_model(&bundled_slug, "Overlay Bundled", /*priority*/ -1);
+    overlay.supports_image_detail_original = true;
+
+    let manager = ModelsManager::new_with_provider_and_catalog_overlay(
+        codex_home.path().to_path_buf(),
+        auth_manager,
+        /*model_catalog*/ None,
+        Some(ModelsResponse {
+            models: vec![overlay],
+        }),
+        CollaborationModesConfig::default(),
+        ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+    );
+
+    let model_info = manager.get_model_info(&bundled_slug, &config).await;
+
+    assert_eq!(model_info.slug, bundled_slug);
+    assert_eq!(model_info.display_name, "Overlay Bundled");
+    assert!(model_info.supports_image_detail_original);
+    assert!(!model_info.used_fallback_model_metadata);
+}
+
+#[tokio::test]
+async fn construct_model_info_offline_for_tests_uses_overlay_catalog() {
+    let codex_home = tempdir().expect("temp dir");
+    let mut config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .build()
+        .await
+        .expect("load default test config");
+    let mut overlay = remote_model("gpt-overlay", "Overlay", /*priority*/ 0);
+    overlay.supports_image_detail_original = true;
+    config.model_catalog_overlay = Some(ModelsResponse {
+        models: vec![overlay],
+    });
+
+    let model_info =
+        ModelsManager::construct_model_info_offline_for_tests("gpt-overlay-experiment", &config);
+
+    assert_eq!(model_info.slug, "gpt-overlay-experiment");
+    assert_eq!(model_info.display_name, "Overlay");
+    assert!(model_info.supports_image_detail_original);
+    assert!(!model_info.used_fallback_model_metadata);
+}
+
+#[tokio::test]
+async fn apply_remote_models_preserves_overlay_only_entries() {
+    let codex_home = tempdir().expect("temp dir");
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
+    let overlay_only = remote_model("overlay-only", "Overlay Only", /*priority*/ 3);
+    let remote_only = remote_model("remote-only", "Remote Only", /*priority*/ 1);
+    let manager = ModelsManager::new_with_provider_and_catalog_overlay(
+        codex_home.path().to_path_buf(),
+        auth_manager,
+        /*model_catalog*/ None,
+        Some(ModelsResponse {
+            models: vec![overlay_only.clone()],
+        }),
+        CollaborationModesConfig::default(),
+        ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+    );
+
+    manager.apply_remote_models(vec![remote_only.clone()]).await;
+    let models = manager.get_remote_models().await;
+
+    assert_models_contain(&models, &[overlay_only, remote_only]);
+}
+
+#[tokio::test]
+async fn apply_remote_models_allows_remote_to_override_overlay_slug() {
+    let codex_home = tempdir().expect("temp dir");
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
+    let mut overlay = remote_model("shared-slug", "Overlay", /*priority*/ 2);
+    overlay.supports_image_detail_original = true;
+    let remote = remote_model("shared-slug", "Remote", /*priority*/ 0);
+    let manager = ModelsManager::new_with_provider_and_catalog_overlay(
+        codex_home.path().to_path_buf(),
+        auth_manager,
+        /*model_catalog*/ None,
+        Some(ModelsResponse {
+            models: vec![overlay],
+        }),
+        CollaborationModesConfig::default(),
+        ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+    );
+
+    manager.apply_remote_models(vec![remote]).await;
+    let model = manager
+        .get_remote_models()
+        .await
+        .into_iter()
+        .find(|model| model.slug == "shared-slug")
+        .expect("shared slug should exist");
+
+    assert_eq!(model.display_name, "Remote");
+    assert!(!model.supports_image_detail_original);
+}
+
+#[tokio::test]
 async fn get_model_info_matches_namespaced_suffix() {
     let codex_home = tempdir().expect("temp dir");
     let config = ConfigBuilder::default()
@@ -406,6 +519,46 @@ async fn refresh_available_models_sorts_by_priority() {
         models_mock.requests().len(),
         1,
         "expected a single /models request"
+    );
+}
+
+#[tokio::test]
+async fn refresh_available_models_does_not_override_custom_catalog() {
+    let server = MockServer::start().await;
+    let models_mock = mount_models_once(
+        &server,
+        ModelsResponse {
+            models: vec![remote_model("remote-model", "Remote", /*priority*/ 0)],
+        },
+    )
+    .await;
+
+    let codex_home = tempdir().expect("temp dir");
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let provider = provider_for(server.uri());
+    let custom = remote_model("custom-model", "Custom", /*priority*/ 0);
+    let manager = ModelsManager::new_with_provider(
+        codex_home.path().to_path_buf(),
+        auth_manager,
+        Some(ModelsResponse {
+            models: vec![custom.clone()],
+        }),
+        CollaborationModesConfig::default(),
+        provider,
+    );
+
+    manager
+        .refresh_available_models(RefreshStrategy::Online)
+        .await
+        .expect("refresh succeeds");
+    let models = manager.get_remote_models().await;
+
+    assert_eq!(models, vec![custom]);
+    assert_eq!(
+        models_mock.requests().len(),
+        0,
+        "custom catalog should not hit /models"
     );
 }
 

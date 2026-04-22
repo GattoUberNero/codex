@@ -855,7 +855,7 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
     config.model_provider = provider.clone();
     let effort = config.model_reasoning_effort;
     let summary = config.model_reasoning_summary;
-    let model = codex_core::test_support::get_model_offline(config.model.as_deref());
+    let model = codex_core::test_support::get_model_offline(config.model.as_deref(), &config);
     config.model = Some(model.clone());
     let config = Arc::new(config);
     let model_info =
@@ -2073,7 +2073,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
     config.model_provider = provider.clone();
     let effort = config.model_reasoning_effort;
     let summary = config.model_reasoning_summary;
-    let model = codex_core::test_support::get_model_offline(config.model.as_deref());
+    let model = codex_core::test_support::get_model_offline(config.model.as_deref(), &config);
     config.model = Some(model.clone());
     let config = Arc::new(config);
     let model_info =

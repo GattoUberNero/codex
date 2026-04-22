@@ -123,8 +123,8 @@ pub fn models_manager_with_provider(
     ModelsManager::with_provider_for_tests(codex_home, auth_manager, provider)
 }
 
-pub fn get_model_offline(model: Option<&str>) -> String {
-    ModelsManager::get_model_offline_for_tests(model)
+pub fn get_model_offline(model: Option<&str>, config: &Config) -> String {
+    ModelsManager::get_model_offline_for_tests(model, config)
 }
 
 pub fn construct_model_info_offline(model: &str, config: &Config) -> ModelInfo {

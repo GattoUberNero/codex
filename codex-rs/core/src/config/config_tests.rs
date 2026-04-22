@@ -5028,6 +5028,135 @@ fn model_catalog_json_rejects_empty_catalog() -> std::io::Result<()> {
     Ok(())
 }
 
+#[test]
+fn model_catalog_overlay_json_loads_from_path() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let catalog_path = codex_home.path().join("catalog-overlay.json");
+    let mut catalog: ModelsResponse =
+        serde_json::from_str(include_str!("../../models.json")).expect("valid models.json");
+    catalog.models = catalog.models.into_iter().take(1).collect();
+    std::fs::write(
+        &catalog_path,
+        serde_json::to_string(&catalog).expect("serialize catalog"),
+    )?;
+
+    let cfg = ConfigToml {
+        model_catalog_overlay_json: Some(catalog_path.abs()),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.path().to_path_buf(),
+    )?;
+
+    assert_eq!(config.model_catalog_overlay, Some(catalog));
+    assert_eq!(config.model_catalog, None);
+    Ok(())
+}
+
+#[test]
+fn model_catalog_overlay_json_rejects_empty_catalog() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let catalog_path = codex_home.path().join("catalog-overlay.json");
+    std::fs::write(&catalog_path, r#"{"models":[]}"#)?;
+
+    let cfg = ConfigToml {
+        model_catalog_overlay_json: Some(catalog_path.abs()),
+        ..Default::default()
+    };
+
+    let err = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.path().to_path_buf(),
+    )
+    .expect_err("empty overlay catalog should fail config load");
+
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+    assert!(
+        err.to_string().contains("model_catalog_overlay_json path"),
+        "unexpected error: {err}"
+    );
+    Ok(())
+}
+
+#[test]
+fn model_catalog_json_conflicts_with_overlay_json() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let replace_path = codex_home.path().join("catalog.json");
+    let overlay_path = codex_home.path().join("catalog-overlay.json");
+    let catalog: ModelsResponse =
+        serde_json::from_str(include_str!("../../models.json")).expect("valid models.json");
+    let serialized = serde_json::to_string(&catalog).expect("serialize catalog");
+    std::fs::write(&replace_path, &serialized)?;
+    std::fs::write(&overlay_path, serialized)?;
+
+    let cfg = ConfigToml {
+        model_catalog_json: Some(replace_path.abs()),
+        model_catalog_overlay_json: Some(overlay_path.abs()),
+        ..Default::default()
+    };
+
+    let err = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.path().to_path_buf(),
+    )
+    .expect_err("replace + overlay should conflict");
+
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    assert!(
+        err.to_string().contains("cannot both be set"),
+        "unexpected error: {err}"
+    );
+    Ok(())
+}
+
+#[test]
+fn model_catalog_json_conflicts_with_overlay_json_across_profile_and_global() -> std::io::Result<()>
+{
+    let codex_home = TempDir::new()?;
+    let replace_path = codex_home.path().join("catalog.json");
+    let overlay_path = codex_home.path().join("catalog-overlay.json");
+    let catalog: ModelsResponse =
+        serde_json::from_str(include_str!("../../models.json")).expect("valid models.json");
+    let serialized = serde_json::to_string(&catalog).expect("serialize catalog");
+    std::fs::write(&replace_path, &serialized)?;
+    std::fs::write(&overlay_path, serialized)?;
+
+    let mut profiles = HashMap::new();
+    profiles.insert(
+        "overlay".to_string(),
+        ConfigProfile {
+            model_catalog_overlay_json: Some(overlay_path.abs()),
+            ..Default::default()
+        },
+    );
+
+    let cfg = ConfigToml {
+        profile: Some("overlay".to_string()),
+        model_catalog_json: Some(replace_path.abs()),
+        profiles,
+        ..Default::default()
+    };
+
+    let err = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.path().to_path_buf(),
+    )
+    .expect_err("global replace + profile overlay should conflict");
+
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    assert!(
+        err.to_string().contains("cannot both be set"),
+        "unexpected error: {err}"
+    );
+    Ok(())
+}
+
 fn create_test_fixture() -> std::io::Result<PrecedenceTestFixture> {
     let toml = r#"
 model = "o3"
@@ -5221,6 +5350,7 @@ fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             model_reasoning_summary: Some(ReasoningSummary::Detailed),
             model_supports_reasoning_summaries: None,
             model_catalog: None,
+            model_catalog_overlay: None,
             model_verbosity: None,
             personality: Some(Personality::Pragmatic),
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
@@ -5366,6 +5496,7 @@ fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         model_reasoning_summary: None,
         model_supports_reasoning_summaries: None,
         model_catalog: None,
+        model_catalog_overlay: None,
         model_verbosity: None,
         personality: Some(Personality::Pragmatic),
         chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
@@ -5509,6 +5640,7 @@ fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         model_reasoning_summary: None,
         model_supports_reasoning_summaries: None,
         model_catalog: None,
+        model_catalog_overlay: None,
         model_verbosity: None,
         personality: Some(Personality::Pragmatic),
         chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
@@ -5638,6 +5770,7 @@ fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         model_reasoning_summary: Some(ReasoningSummary::Detailed),
         model_supports_reasoning_summaries: None,
         model_catalog: None,
+        model_catalog_overlay: None,
         model_verbosity: Some(Verbosity::High),
         personality: Some(Personality::Pragmatic),
         chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),

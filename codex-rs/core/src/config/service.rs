@@ -614,8 +614,22 @@ fn toml_value_to_value(value: &TomlValue) -> anyhow::Result<toml_edit::Value> {
     }
 }
 
-fn validate_config(value: &TomlValue) -> Result<(), toml::de::Error> {
-    let _: ConfigToml = value.clone().try_into()?;
+fn validate_config(value: &TomlValue) -> Result<(), String> {
+    let config: ConfigToml = value.clone().try_into().map_err(|err| err.to_string())?;
+    let profile = config
+        .get_config_profile(None)
+        .map_err(|err| err.to_string())?;
+    super::validate_model_catalog_sources(
+        profile
+            .model_catalog_json
+            .as_ref()
+            .or(config.model_catalog_json.as_ref()),
+        profile
+            .model_catalog_overlay_json
+            .as_ref()
+            .or(config.model_catalog_overlay_json.as_ref()),
+    )
+    .map_err(|err| err.to_string())?;
     Ok(())
 }
 

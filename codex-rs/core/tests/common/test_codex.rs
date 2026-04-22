@@ -488,23 +488,24 @@ impl TestCodexBuilder {
             test_env.exec_server_url().map(str::to_owned),
         ));
         let session_source = self.session_source.clone();
-        let thread_manager = if config.model_catalog.is_some() {
-            ThreadManager::new(
-                &config,
-                codex_core::test_support::auth_manager_from_auth(auth.clone()),
-                session_source,
-                CollaborationModesConfig::default(),
-                Arc::clone(&environment_manager),
-            )
-        } else {
-            codex_core::test_support::thread_manager_with_models_provider_and_home_and_source(
-                auth.clone(),
-                config.model_provider.clone(),
-                config.codex_home.clone(),
-                Arc::clone(&environment_manager),
-                session_source,
-            )
-        };
+        let thread_manager =
+            if config.model_catalog.is_some() || config.model_catalog_overlay.is_some() {
+                ThreadManager::new(
+                    &config,
+                    codex_core::test_support::auth_manager_from_auth(auth.clone()),
+                    session_source,
+                    CollaborationModesConfig::default(),
+                    Arc::clone(&environment_manager),
+                )
+            } else {
+                codex_core::test_support::thread_manager_with_models_provider_and_home_and_source(
+                    auth.clone(),
+                    config.model_provider.clone(),
+                    config.codex_home.clone(),
+                    Arc::clone(&environment_manager),
+                    session_source,
+                )
+            };
         let thread_manager = Arc::new(thread_manager);
         let user_shell_override = self.user_shell_override.clone();
 
@@ -613,6 +614,7 @@ impl TestCodexBuilder {
 fn ensure_test_model_catalog(config: &mut Config) -> Result<()> {
     if config.model.as_deref() != Some(TEST_MODEL_WITH_EXPERIMENTAL_TOOLS)
         || config.model_catalog.is_some()
+        || config.model_catalog_overlay.is_some()
     {
         return Ok(());
     }
