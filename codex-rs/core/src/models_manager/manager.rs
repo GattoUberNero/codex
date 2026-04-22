@@ -176,6 +176,7 @@ enum CatalogMode {
 #[derive(Debug)]
 pub struct ModelsManager {
     base_catalog: Vec<ModelInfo>,
+    overlay_catalog: Vec<ModelInfo>,
     remote_models: RwLock<Vec<ModelInfo>>,
     catalog_mode: CatalogMode,
     collaboration_modes_config: CollaborationModesConfig,
@@ -242,12 +243,16 @@ impl ModelsManager {
         } else {
             CatalogMode::Default
         };
-        let base_catalog =
-            Self::load_base_catalog(model_catalog.as_ref(), model_catalog_overlay.as_ref())
-                .unwrap_or_else(|err| panic!("failed to load model catalog: {err}"));
+        let base_catalog = Self::load_base_catalog(model_catalog.as_ref())
+            .unwrap_or_else(|err| panic!("failed to load model catalog: {err}"));
+        let overlay_catalog = model_catalog_overlay
+            .map(|catalog| catalog.models)
+            .unwrap_or_default();
+        let base_catalog = Self::merge_catalog_models(base_catalog, overlay_catalog.clone());
         let remote_models = base_catalog.clone();
         Self {
             base_catalog,
+            overlay_catalog,
             remote_models: RwLock::new(remote_models),
             catalog_mode,
             collaboration_modes_config,
@@ -496,8 +501,9 @@ impl ModelsManager {
 
     /// Replace the cached remote models and rebuild the derived presets list.
     async fn apply_remote_models(&self, models: Vec<ModelInfo>) {
+        let with_remote = Self::merge_catalog_models(self.base_catalog.clone(), models);
         *self.remote_models.write().await =
-            Self::merge_catalog_models(self.base_catalog.clone(), models);
+            Self::merge_catalog_models(with_remote, self.overlay_catalog.clone());
     }
 
     fn load_remote_models_from_file() -> Result<Vec<ModelInfo>, std::io::Error> {
@@ -508,18 +514,11 @@ impl ModelsManager {
 
     fn load_base_catalog(
         model_catalog: Option<&ModelsResponse>,
-        model_catalog_overlay: Option<&ModelsResponse>,
     ) -> Result<Vec<ModelInfo>, std::io::Error> {
         if let Some(model_catalog) = model_catalog {
             return Ok(model_catalog.models.clone());
         }
-        let bundled_models = Self::load_remote_models_from_file()?;
-        Ok(Self::merge_catalog_models(
-            bundled_models,
-            model_catalog_overlay
-                .map(|catalog| catalog.models.clone())
-                .unwrap_or_default(),
-        ))
+        Self::load_remote_models_from_file()
     }
 
     fn merge_catalog_models(mut base: Vec<ModelInfo>, overrides: Vec<ModelInfo>) -> Vec<ModelInfo> {
@@ -596,11 +595,27 @@ impl ModelsManager {
     }
 
     /// Get model identifier without consulting remote state or cache.
-    pub(crate) fn get_model_offline_for_tests(model: Option<&str>, config: &Config) -> String {
+    pub(crate) fn get_model_offline_for_tests(model: Option<&str>) -> String {
         if let Some(model) = model {
             return model.to_string();
         }
-        let mut models = Self::offline_catalog_models(config);
+        let models = Self::load_remote_models_from_file().unwrap_or_default();
+        Self::get_model_offline_from_models(models)
+    }
+
+    /// Get model identifier from a config-aware offline catalog without consulting remote state or cache.
+    pub(crate) fn get_model_offline_for_tests_with_config(
+        model: Option<&str>,
+        config: &Config,
+    ) -> String {
+        if let Some(model) = model {
+            return model.to_string();
+        }
+        let models = Self::offline_catalog_models(config);
+        Self::get_model_offline_from_models(models)
+    }
+
+    fn get_model_offline_from_models(mut models: Vec<ModelInfo>) -> String {
         models.sort_by(|a, b| a.priority.cmp(&b.priority));
         let presets: Vec<ModelPreset> = models.into_iter().map(Into::into).collect();
         presets
@@ -621,11 +636,15 @@ impl ModelsManager {
     }
 
     fn offline_catalog_models(config: &Config) -> Vec<ModelInfo> {
-        Self::load_base_catalog(
-            config.model_catalog.as_ref(),
-            config.model_catalog_overlay.as_ref(),
+        let base = Self::load_base_catalog(config.model_catalog.as_ref()).unwrap_or_default();
+        Self::merge_catalog_models(
+            base,
+            config
+                .model_catalog_overlay
+                .as_ref()
+                .map(|catalog| catalog.models.clone())
+                .unwrap_or_default(),
         )
-        .unwrap_or_default()
     }
 }
 

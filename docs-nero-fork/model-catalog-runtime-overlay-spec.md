@@ -34,8 +34,8 @@ Add a **runtime overlay catalog** that lets the fork:
 Terminology note:
 
 - `model_catalog_json` remains an authoritative replacement source,
-- `model_catalog_overlay_json` is a startup seed layered onto the bundled catalog,
-- overlay is not a permanent winner over later cache/remote data for the same `slug`.
+- `model_catalog_overlay_json` is a startup-local overlay layered onto the bundled catalog and re-applied after cache/remote refresh,
+- overlay is the local winner over later cache/remote data for the same `slug` for the lifetime of the process.
 
 ## Non-goals
 
@@ -112,19 +112,19 @@ If `model_catalog_json` is not set:
 - if `model_catalog_overlay_json` is present, merge overlay models onto bundled models by `slug`,
 - if slug exists in bundled catalog, replace that model entry,
 - if slug does not exist, append it,
-- resulting merged catalog becomes the manager base catalog for this process.
+- resulting merged catalog becomes the initial effective catalog for this process.
 
 Precedence in this path:
 
 - bundled catalog,
-- then local overlay seed,
-- then cache/remote refresh updates.
+- then cache/remote refresh updates,
+- then local overlay.
 
 Product interpretation:
 
-- overlay is a startup-local way to seed or patch the base catalog,
-- remote/cache data may still replace the same `slug` later when refresh happens,
-- this is intentional and must be documented as part of the contract.
+- overlay is a startup-local way to patch the effective catalog,
+- remote/cache data must not replace the same `slug` later while overlay is configured,
+- this gives operators a stable local override without disabling normal refresh for unrelated models.
 
 ### Cache/remote refresh path
 
@@ -132,11 +132,11 @@ Current refresh behavior should continue, but it must use the already-built base
 
 Required change:
 
-- `ModelsManager` stores a `base_catalog: Vec<ModelInfo>`,
+- `ModelsManager` stores a refresh base catalog plus the parsed overlay catalog,
 - `remote_models` is initialized from:
   - full replacement catalog, or
-  - bundled + overlay merged base catalog,
-- `apply_remote_models()` merges fetched/cache models onto `base_catalog`, not onto a fresh reload of bundled `models.json`.
+  - bundled + overlay merged initial effective catalog,
+- `apply_remote_models()` merges fetched/cache models onto the stored base catalog and then reapplies the overlay catalog, not onto a fresh reload of bundled `models.json`.
 - `ThreadManager` must pass both full replacement and overlay data into the manager constructor or equivalent builder API.
 
 Reason:
@@ -193,7 +193,7 @@ Add tests for:
 - overlay overrides a bundled model by slug,
 - overlay appends a new model absent from bundled catalog,
 - cache/remote refresh preserves overlay-only entries when unrelated remote updates arrive,
-- cache/remote refresh can still override an overlaid slug if remote data for that slug arrives,
+- cache/remote refresh cannot override an overlaid slug if remote data for that slug arrives,
 - full replacement mode still blocks refresh exactly as it does today.
 
 ### Integration expectation

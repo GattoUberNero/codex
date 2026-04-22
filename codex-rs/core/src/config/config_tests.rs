@@ -5157,6 +5157,51 @@ fn model_catalog_json_conflicts_with_overlay_json_across_profile_and_global() ->
     Ok(())
 }
 
+#[test]
+fn model_catalog_json_conflicts_with_overlay_json_in_inactive_profile() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let replace_path = codex_home.path().join("catalog.json");
+    let overlay_path = codex_home.path().join("catalog-overlay.json");
+    let catalog: ModelsResponse =
+        serde_json::from_str(include_str!("../../models.json")).expect("valid models.json");
+    let serialized = serde_json::to_string(&catalog).expect("serialize catalog");
+    std::fs::write(&replace_path, &serialized)?;
+    std::fs::write(&overlay_path, serialized)?;
+
+    let mut profiles = HashMap::new();
+    profiles.insert(
+        "overlay".to_string(),
+        ConfigProfile {
+            model_catalog_overlay_json: Some(overlay_path.abs()),
+            ..Default::default()
+        },
+    );
+
+    let cfg = ConfigToml {
+        model_catalog_json: Some(replace_path.abs()),
+        profiles,
+        ..Default::default()
+    };
+
+    let err = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.path().to_path_buf(),
+    )
+    .expect_err("global replace + inactive profile overlay should conflict");
+
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    assert!(
+        err.to_string().contains("profile `overlay`"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        err.to_string().contains("cannot both be set"),
+        "unexpected error: {err}"
+    );
+    Ok(())
+}
+
 fn create_test_fixture() -> std::io::Result<PrecedenceTestFixture> {
     let toml = r#"
 model = "o3"

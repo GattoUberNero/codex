@@ -1783,7 +1783,8 @@ async fn set_rate_limits_retains_previous_credits() {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     let config = build_test_config(codex_home.path()).await;
     let config = Arc::new(config);
-    let model = ModelsManager::get_model_offline_for_tests(config.model.as_deref(), &config);
+    let model =
+        ModelsManager::get_model_offline_for_tests_with_config(config.model.as_deref(), &config);
     let model_info = ModelsManager::construct_model_info_offline_for_tests(model.as_str(), &config);
     let reasoning_effort = config.model_reasoning_effort;
     let collaboration_mode = CollaborationMode {
@@ -1881,7 +1882,8 @@ async fn set_rate_limits_updates_plan_type_when_present() {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     let config = build_test_config(codex_home.path()).await;
     let config = Arc::new(config);
-    let model = ModelsManager::get_model_offline_for_tests(config.model.as_deref(), &config);
+    let model =
+        ModelsManager::get_model_offline_for_tests_with_config(config.model.as_deref(), &config);
     let model_info = ModelsManager::construct_model_info_offline_for_tests(model.as_str(), &config);
     let reasoning_effort = config.model_reasoning_effort;
     let collaboration_mode = CollaborationMode {
@@ -2208,7 +2210,8 @@ fn session_telemetry(
 ) -> SessionTelemetry {
     SessionTelemetry::new(
         conversation_id,
-        ModelsManager::get_model_offline_for_tests(config.model.as_deref(), &config).as_str(),
+        ModelsManager::get_model_offline_for_tests_with_config(config.model.as_deref(), &config)
+            .as_str(),
         model_info.slug.as_str(),
         /*account_id*/ None,
         Some("test@test.com".to_string()),
@@ -2224,7 +2227,8 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
     let codex_home = tempfile::tempdir().expect("create temp dir");
     let config = build_test_config(codex_home.path()).await;
     let config = Arc::new(config);
-    let model = ModelsManager::get_model_offline_for_tests(config.model.as_deref(), &config);
+    let model =
+        ModelsManager::get_model_offline_for_tests_with_config(config.model.as_deref(), &config);
     let model_info = ModelsManager::construct_model_info_offline_for_tests(model.as_str(), &config);
     let reasoning_effort = config.model_reasoning_effort;
     let collaboration_mode = CollaborationMode {
@@ -2488,7 +2492,8 @@ async fn session_new_fails_when_zsh_fork_enabled_without_zsh_path() {
         /*model_catalog*/ None,
         CollaborationModesConfig::default(),
     ));
-    let model = ModelsManager::get_model_offline_for_tests(config.model.as_deref(), &config);
+    let model =
+        ModelsManager::get_model_offline_for_tests_with_config(config.model.as_deref(), &config);
     let model_info = ModelsManager::construct_model_info_offline_for_tests(model.as_str(), &config);
     let collaboration_mode = CollaborationMode {
         mode: ModeKind::Default,
@@ -2586,7 +2591,8 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     let agent_control = AgentControl::default();
     let exec_policy = Arc::new(ExecPolicyManager::default());
     let (agent_status_tx, _agent_status_rx) = watch::channel(AgentStatus::PendingInit);
-    let model = ModelsManager::get_model_offline_for_tests(config.model.as_deref(), &config);
+    let model =
+        ModelsManager::get_model_offline_for_tests_with_config(config.model.as_deref(), &config);
     let model_info = ModelsManager::construct_model_info_offline_for_tests(model.as_str(), &config);
     let reasoning_effort = config.model_reasoning_effort;
     let collaboration_mode = CollaborationMode {
@@ -3436,7 +3442,8 @@ pub(crate) async fn make_session_and_context_with_dynamic_tools_and_rx(
     let agent_control = AgentControl::default();
     let exec_policy = Arc::new(ExecPolicyManager::default());
     let (agent_status_tx, _agent_status_rx) = watch::channel(AgentStatus::PendingInit);
-    let model = ModelsManager::get_model_offline_for_tests(config.model.as_deref(), &config);
+    let model =
+        ModelsManager::get_model_offline_for_tests_with_config(config.model.as_deref(), &config);
     let model_info = ModelsManager::construct_model_info_offline_for_tests(model.as_str(), &config);
     let reasoning_effort = config.model_reasoning_effort;
     let collaboration_mode = CollaborationMode {

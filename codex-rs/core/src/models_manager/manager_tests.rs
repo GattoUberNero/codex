@@ -383,7 +383,7 @@ async fn apply_remote_models_preserves_overlay_only_entries() {
 }
 
 #[tokio::test]
-async fn apply_remote_models_allows_remote_to_override_overlay_slug() {
+async fn apply_remote_models_keeps_overlay_authoritative_for_shared_slug() {
     let codex_home = tempdir().expect("temp dir");
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
     let mut overlay = remote_model("shared-slug", "Overlay", /*priority*/ 2);
@@ -408,8 +408,8 @@ async fn apply_remote_models_allows_remote_to_override_overlay_slug() {
         .find(|model| model.slug == "shared-slug")
         .expect("shared slug should exist");
 
-    assert_eq!(model.display_name, "Remote");
-    assert!(!model.supports_image_detail_original);
+    assert_eq!(model.display_name, "Overlay");
+    assert!(model.supports_image_detail_original);
 }
 
 #[tokio::test]

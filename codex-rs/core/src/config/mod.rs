@@ -1776,6 +1776,29 @@ fn validate_model_catalog_sources(
     Ok(())
 }
 
+pub(super) fn validate_all_model_catalog_sources(config: &ConfigToml) -> std::io::Result<()> {
+    validate_model_catalog_sources(
+        config.model_catalog_json.as_ref(),
+        config.model_catalog_overlay_json.as_ref(),
+    )?;
+    for (profile_name, profile) in &config.profiles {
+        validate_model_catalog_sources(
+            profile
+                .model_catalog_json
+                .as_ref()
+                .or(config.model_catalog_json.as_ref()),
+            profile
+                .model_catalog_overlay_json
+                .as_ref()
+                .or(config.model_catalog_overlay_json.as_ref()),
+        )
+        .map_err(|err| {
+            std::io::Error::new(err.kind(), format!("profile `{profile_name}`: {err}"))
+        })?;
+    }
+    Ok(())
+}
+
 fn filter_mcp_servers_by_requirements(
     mcp_servers: &mut HashMap<String, McpServerConfig>,
     mcp_requirements: Option<&Sourced<BTreeMap<String, McpServerRequirement>>>,
@@ -3040,6 +3063,7 @@ impl Config {
                 .clone(),
             None => ConfigProfile::default(),
         };
+        validate_all_model_catalog_sources(&cfg)?;
         let tool_suggest = resolve_tool_suggest_config(&cfg);
         let feature_overrides = FeatureOverrides {
             include_apply_patch_tool: include_apply_patch_tool_override,
@@ -3475,10 +3499,6 @@ impl Config {
             .model_catalog_overlay_json
             .clone()
             .or(cfg.model_catalog_overlay_json.clone());
-        validate_model_catalog_sources(
-            model_catalog_json.as_ref(),
-            model_catalog_overlay_json.as_ref(),
-        )?;
         let model_catalog = load_model_catalog(model_catalog_json)?;
         let model_catalog_overlay = load_model_catalog_overlay(model_catalog_overlay_json)?;
 
