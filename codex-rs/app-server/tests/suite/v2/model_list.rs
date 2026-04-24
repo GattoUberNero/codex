@@ -14,11 +14,13 @@ use codex_app_server_protocol::ReasoningEffortOption;
 use codex_app_server_protocol::RequestId;
 use codex_protocol::openai_models::ModelPreset;
 use pretty_assertions::assert_eq;
+use serde_json::Value as JsonValue;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
+const OVERLAY_MODEL_SLUG: &str = "nero-overlay-visible-model";
 
 fn model_from_preset(preset: &ModelPreset) -> Model {
     Model {
@@ -71,6 +73,55 @@ fn expected_visible_models() -> Vec<Model> {
         .collect()
 }
 
+fn write_model_catalog_overlay_config(codex_home: &TempDir) -> Result<()> {
+    let mut catalog: JsonValue =
+        serde_json::from_str(include_str!("../../../../core/models.json"))?;
+    let models = catalog
+        .get_mut("models")
+        .and_then(JsonValue::as_array_mut)
+        .expect("bundled models.json should contain models array");
+    let mut overlay_model = models
+        .first()
+        .cloned()
+        .expect("bundled models.json should contain at least one model");
+    let overlay_object = overlay_model
+        .as_object_mut()
+        .expect("bundled model entry should be an object");
+    overlay_object.insert(
+        "slug".to_string(),
+        JsonValue::String(OVERLAY_MODEL_SLUG.to_string()),
+    );
+    overlay_object.insert(
+        "display_name".to_string(),
+        JsonValue::String("Nero Overlay Visible".to_string()),
+    );
+    overlay_object.insert(
+        "description".to_string(),
+        JsonValue::String("Visible model injected by model_catalog_overlay_json".to_string()),
+    );
+    overlay_object.insert("priority".to_string(), JsonValue::Number((-10).into()));
+    overlay_object.insert(
+        "visibility".to_string(),
+        JsonValue::String("list".to_string()),
+    );
+    overlay_object.insert("supported_in_api".to_string(), JsonValue::Bool(true));
+    overlay_object.remove("availability_nux");
+    overlay_object.remove("upgrade");
+
+    let overlay_catalog = serde_json::json!({ "models": [overlay_model] });
+    let overlay_path = codex_home.path().join("models-overlay.json");
+    std::fs::write(
+        &overlay_path,
+        serde_json::to_string_pretty(&overlay_catalog)?,
+    )?;
+    let overlay_display = overlay_path.display();
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        format!("model_catalog_overlay_json = \"{overlay_display}\"\n"),
+    )?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn list_models_returns_all_models_with_large_limit() -> Result<()> {
     let codex_home = TempDir::new()?;
@@ -102,6 +153,56 @@ async fn list_models_returns_all_models_with_large_limit() -> Result<()> {
 
     assert_eq!(items, expected_models);
     assert!(next_cursor.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_models_includes_visible_model_catalog_overlay_entry() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    write_models_cache(codex_home.path())?;
+    write_model_catalog_overlay_config(&codex_home)?;
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_list_models_request(ModelListParams {
+            limit: Some(100),
+            cursor: None,
+            include_hidden: None,
+        })
+        .await?;
+
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    let ModelListResponse { data: items, .. } = to_response::<ModelListResponse>(response)?;
+
+    let overlay = items
+        .iter()
+        .find(|item| item.id == OVERLAY_MODEL_SLUG)
+        .expect("overlay model should be listed by model/list");
+    assert_eq!(
+        overlay,
+        &Model {
+            id: OVERLAY_MODEL_SLUG.to_string(),
+            model: OVERLAY_MODEL_SLUG.to_string(),
+            upgrade: None,
+            upgrade_info: None,
+            availability_nux: None,
+            display_name: "Nero Overlay Visible".to_string(),
+            description: "Visible model injected by model_catalog_overlay_json".to_string(),
+            hidden: false,
+            supported_reasoning_efforts: overlay.supported_reasoning_efforts.clone(),
+            default_reasoning_effort: overlay.default_reasoning_effort,
+            input_modalities: overlay.input_modalities.clone(),
+            supports_personality: overlay.supports_personality,
+            is_default: true,
+        }
+    );
     Ok(())
 }
 

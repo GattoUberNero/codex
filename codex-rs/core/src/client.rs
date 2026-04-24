@@ -371,26 +371,13 @@ impl ModelClient {
         effort: Option<ReasoningEffortConfig>,
         summary: ReasoningSummaryConfig,
         session_telemetry: &SessionTelemetry,
+        usage_limit_recovery: &mut Option<ExternalAuthRecovery>,
+        command_recovery_attempted: &mut bool,
+        auth_state_changed: &mut bool,
     ) -> Result<Vec<ResponseItem>> {
         if prompt.input.is_empty() {
             return Ok(Vec::new());
         }
-        let client_setup = self.current_client_setup().await?;
-        let transport = ReqwestTransport::new(build_reqwest_client());
-        let request_telemetry = Self::build_request_telemetry(
-            session_telemetry,
-            AuthRequestTelemetryContext::new(
-                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
-                &client_setup.api_auth,
-                PendingUnauthorizedRetry::default(),
-            ),
-            RequestRouteTelemetry::for_endpoint(RESPONSES_COMPACT_ENDPOINT),
-            self.state.auth_env_telemetry.clone(),
-        );
-        let client =
-            ApiCompactClient::new(transport, client_setup.api_provider, client_setup.api_auth)
-                .with_telemetry(Some(request_telemetry));
-
         let instructions = prompt.base_instructions.text.clone();
         let input = prompt.get_formatted_input();
         let tools = create_tools_json_for_responses_api(&prompt.tools)?;
@@ -421,10 +408,44 @@ impl ModelClient {
         extra_headers.extend(build_conversation_headers(Some(
             self.state.conversation_id.to_string(),
         )));
-        client
-            .compact_input(&payload, extra_headers)
-            .await
-            .map_err(map_api_error)
+        loop {
+            let client_setup = self.current_client_setup().await?;
+            let transport = ReqwestTransport::new(build_reqwest_client());
+            let request_telemetry = Self::build_request_telemetry(
+                session_telemetry,
+                AuthRequestTelemetryContext::new(
+                    client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                    &client_setup.api_auth,
+                    PendingUnauthorizedRetry::default(),
+                ),
+                RequestRouteTelemetry::for_endpoint(RESPONSES_COMPACT_ENDPOINT),
+                self.state.auth_env_telemetry.clone(),
+            );
+            let client =
+                ApiCompactClient::new(transport, client_setup.api_provider, client_setup.api_auth)
+                    .with_telemetry(Some(request_telemetry));
+            match client.compact_input(&payload, extra_headers.clone()).await {
+                Ok(output) => return Ok(output),
+                Err(api_err) => {
+                    let err = map_api_error(api_err);
+                    let Some(rotation_reason) = usage_limit_or_quota_rotation_reason(&err) else {
+                        return Err(err);
+                    };
+                    if try_recover_usage_limit_or_quota(
+                        usage_limit_recovery,
+                        self.state.auth_manager.as_ref(),
+                        command_recovery_attempted,
+                        rotation_reason,
+                    )
+                    .await?
+                    {
+                        *auth_state_changed = true;
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        }
     }
 
     /// Builds memory summaries for each provided normalized raw memory.
@@ -696,7 +717,35 @@ impl Drop for ModelClientSession {
 }
 
 impl ModelClientSession {
-    fn reset_websocket_session(&mut self) {
+    pub(crate) async fn compact_conversation_history(
+        &mut self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        session_telemetry: &SessionTelemetry,
+    ) -> Result<Vec<ResponseItem>> {
+        let mut auth_state_changed = false;
+        let compact_result = self
+            .client
+            .compact_conversation_history(
+                prompt,
+                model_info,
+                effort,
+                summary,
+                session_telemetry,
+                &mut self.usage_limit_recovery,
+                &mut self.command_recovery_attempted,
+                &mut auth_state_changed,
+            )
+            .await;
+        if auth_state_changed {
+            self.reset_websocket_session();
+        }
+        compact_result
+    }
+
+    pub(crate) fn reset_websocket_session(&mut self) {
         self.websocket_session.connection = None;
         self.websocket_session.last_request = None;
         self.websocket_session.last_response_rx = None;
@@ -850,10 +899,8 @@ impl ModelClientSession {
         &mut self,
         err: &CodexErr,
     ) -> Result<bool> {
-        let rotation_reason = match err {
-            CodexErr::UsageLimitReached(_) => CODEXN_ROTATION_REASON_USAGE_LIMIT,
-            CodexErr::QuotaExceeded => CODEXN_ROTATION_REASON_QUOTA_EXCEEDED,
-            _ => return Ok(false),
+        let Some(rotation_reason) = usage_limit_or_quota_rotation_reason(err) else {
+            return Ok(false);
         };
 
         self.websocket_session.connection = None;
@@ -1406,6 +1453,14 @@ impl ModelClientSession {
             .force_http_fallback(session_telemetry, model_info);
         self.websocket_session = WebsocketSession::default();
         activated
+    }
+}
+
+fn usage_limit_or_quota_rotation_reason(err: &CodexErr) -> Option<&'static str> {
+    match err {
+        CodexErr::UsageLimitReached(_) => Some(CODEXN_ROTATION_REASON_USAGE_LIMIT),
+        CodexErr::QuotaExceeded => Some(CODEXN_ROTATION_REASON_QUOTA_EXCEEDED),
+        _ => None,
     }
 }
 

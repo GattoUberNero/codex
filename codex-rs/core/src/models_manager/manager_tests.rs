@@ -848,6 +848,76 @@ async fn refresh_available_models_drops_removed_remote_models() {
 }
 
 #[tokio::test]
+async fn refresh_available_models_does_not_mix_bundled_models_into_remote_snapshot() {
+    let server = MockServer::start().await;
+    let remote_slug = "remote-only-for-runtime-catalog";
+    let remote_models = vec![remote_model(
+        remote_slug,
+        "Remote Only",
+        /*priority*/ 1,
+    )];
+    let models_mock = mount_models_once(
+        &server,
+        ModelsResponse {
+            models: remote_models.clone(),
+        },
+    )
+    .await;
+
+    let bundled_slug = ModelsManager::load_remote_models_from_file()
+        .expect("bundled catalog")
+        .first()
+        .expect("bundled model")
+        .slug
+        .clone();
+
+    let codex_home = tempdir().expect("temp dir");
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let provider = provider_for(server.uri());
+    let manager = ModelsManager::with_provider_for_tests(
+        codex_home.path().to_path_buf(),
+        auth_manager,
+        provider,
+    );
+
+    manager
+        .refresh_available_models(RefreshStrategy::OnlineIfUncached)
+        .await
+        .expect("refresh succeeds");
+
+    let snapshot = manager.get_remote_models().await;
+    assert_models_contain(&snapshot, &remote_models);
+    assert!(
+        !snapshot.iter().any(|model| model.slug == bundled_slug),
+        "bundled-only model should not remain in runtime snapshot after remote refresh"
+    );
+
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .build()
+        .await
+        .expect("load default test config");
+    let bundled_model_info = manager.get_model_info(&bundled_slug, &config).await;
+    assert!(
+        !bundled_model_info.used_fallback_model_metadata,
+        "bundled model metadata should remain available for compatibility lookups"
+    );
+    let bundled_model_info_from_snapshot =
+        manager.model_info_from_catalog_snapshot(&bundled_slug, &snapshot, &config);
+    assert_eq!(
+        bundled_model_info_from_snapshot, bundled_model_info,
+        "snapshot lookup should match runtime lookup semantics for base-catalog fallback"
+    );
+
+    assert_eq!(
+        models_mock.requests().len(),
+        1,
+        "expected a single /models request"
+    );
+}
+
+#[tokio::test]
 async fn refresh_available_models_skips_network_without_chatgpt_auth() {
     let server = MockServer::start().await;
     let dynamic_slug = "dynamic-model-only-for-test-noauth";

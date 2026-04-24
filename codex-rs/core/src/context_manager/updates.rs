@@ -167,6 +167,9 @@ pub(crate) fn build_model_instructions_update_item(
     previous_turn_settings: Option<&PreviousTurnSettings>,
     next: &TurnContext,
 ) -> Option<DeveloperInstructions> {
+    if !next.emit_model_switch_instructions_update {
+        return None;
+    }
     let previous_turn_settings = previous_turn_settings?;
     if previous_turn_settings.model == next.model_info.slug {
         return None;
@@ -223,8 +226,9 @@ pub(crate) fn build_settings_update_items(
     // deterministically.
     let contextual_user_message = build_environment_update_item(previous, next, shell);
     let developer_update_sections = [
-        // Keep model-switch instructions first so model-specific guidance is read before
-        // any other context diffs on this turn.
+        // Keep additive model-switch instructions first on turns that still need them
+        // (for example fallback-only model changes) so model-specific guidance is read
+        // before any other context diffs on this turn.
         build_model_instructions_update_item(previous_turn_settings, next),
         build_permissions_update_item(previous, next, exec_policy),
         build_runtime_developer_instructions_update_item(previous, next),

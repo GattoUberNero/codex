@@ -24,6 +24,11 @@ use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::with_cached_approval;
 use codex_apply_patch::ApplyPatchAction;
 use codex_apply_patch::CODEX_CORE_APPLY_PATCH_ARG1;
+use codex_nero_self_exec::ResolvedSelfExec;
+use codex_nero_self_exec::SelfExecCandidateDiagnostic;
+use codex_nero_self_exec::SelfExecPaths;
+use codex_nero_self_exec::SelfExecProgramSource;
+use codex_nero_self_exec::resolve_self_exec;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::FileChange;
@@ -53,7 +58,8 @@ pub struct ApplyPatchRuntime;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ApplyPatchProgramSource {
-    ConfiguredCodexSelfExe,
+    ConfiguredSelfExecPrimary,
+    ConfiguredSelfExecFallback,
     CurrentExe,
     #[cfg(target_os = "windows")]
     WindowsResolvedLaunchExe,
@@ -62,10 +68,22 @@ enum ApplyPatchProgramSource {
 impl ApplyPatchProgramSource {
     fn as_str(self) -> &'static str {
         match self {
-            Self::ConfiguredCodexSelfExe => "codex_self_exe",
+            Self::ConfiguredSelfExecPrimary => "configured_self_exec_primary",
+            Self::ConfiguredSelfExecFallback => "configured_self_exec_fallback",
             Self::CurrentExe => "current_exe",
             #[cfg(target_os = "windows")]
             Self::WindowsResolvedLaunchExe => "windows_resolved_launch_exe",
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+impl From<SelfExecProgramSource> for ApplyPatchProgramSource {
+    fn from(value: SelfExecProgramSource) -> Self {
+        match value {
+            SelfExecProgramSource::ConfiguredPrimary => Self::ConfiguredSelfExecPrimary,
+            SelfExecProgramSource::ConfiguredFallback => Self::ConfiguredSelfExecFallback,
+            SelfExecProgramSource::CurrentExe => Self::CurrentExe,
         }
     }
 }
@@ -122,6 +140,7 @@ impl ApplyPatchPathStatus {
 #[derive(Debug)]
 struct ApplyPatchLaunchContext {
     program_source: ApplyPatchProgramSource,
+    resolver_diagnostics: Vec<SelfExecCandidateDiagnostic>,
     pre_sandbox_program: String,
     pre_sandbox_program_status: Option<ApplyPatchPathStatus>,
     pre_sandbox_cwd: ApplyPatchPathStatus,
@@ -131,28 +150,9 @@ struct ApplyPatchLaunchContext {
 }
 
 impl ApplyPatchLaunchContext {
-    fn new(
-        program_source: ApplyPatchProgramSource,
-        pre_sandbox_program: String,
-        pre_sandbox_program_status: Option<ApplyPatchPathStatus>,
-        pre_sandbox_cwd: ApplyPatchPathStatus,
-        sandbox: SandboxType,
-        final_program: String,
-        final_program_status: Option<ApplyPatchPathStatus>,
-    ) -> Self {
-        Self {
-            program_source,
-            pre_sandbox_program,
-            pre_sandbox_program_status,
-            pre_sandbox_cwd,
-            sandbox,
-            final_program,
-            final_program_status,
-        }
-    }
-
     fn from_exec_request(
         program_source: ApplyPatchProgramSource,
+        resolver_diagnostics: Vec<SelfExecCandidateDiagnostic>,
         pre_sandbox_program: &Path,
         pre_sandbox_cwd: &Path,
         exec_request: &crate::sandboxing::ExecRequest,
@@ -161,43 +161,56 @@ impl ApplyPatchLaunchContext {
         let final_program_status = apply_patch_program_path(&final_program)
             .map(|path| ApplyPatchPathStatus::from_path(path.as_path()));
 
-        Self::new(
+        Self {
             program_source,
-            pre_sandbox_program.display().to_string(),
-            apply_patch_program_path(pre_sandbox_program.to_string_lossy().as_ref())
-                .map(|path| ApplyPatchPathStatus::from_path(path.as_path())),
-            ApplyPatchPathStatus::from_path(pre_sandbox_cwd),
-            exec_request.sandbox,
+            resolver_diagnostics,
+            pre_sandbox_program: pre_sandbox_program.display().to_string(),
+            pre_sandbox_program_status: apply_patch_program_path(
+                pre_sandbox_program.to_string_lossy().as_ref(),
+            )
+            .map(|path| ApplyPatchPathStatus::from_path(path.as_path())),
+            pre_sandbox_cwd: ApplyPatchPathStatus::from_path(pre_sandbox_cwd),
+            sandbox: exec_request.sandbox,
             final_program,
             final_program_status,
-        )
+        }
     }
 
-    fn has_preflight_problem(&self) -> bool {
+    fn has_executable_preflight_problem(&self) -> bool {
         self.pre_sandbox_program_status
             .as_ref()
             .is_some_and(ApplyPatchPathStatus::missing_file)
-            || self.pre_sandbox_cwd.missing_dir()
             || self
                 .final_program_status
                 .as_ref()
                 .is_some_and(ApplyPatchPathStatus::missing_file)
     }
 
+    fn has_cwd_preflight_problem(&self) -> bool {
+        self.pre_sandbox_cwd.missing_dir()
+    }
+
+    fn has_preflight_problem(&self) -> bool {
+        self.has_executable_preflight_problem() || self.has_cwd_preflight_problem()
+    }
+
     fn render(&self) -> String {
-        let mut lines = vec![
-            format!("program_source={}", self.program_source.as_str()),
-            if let Some(status) = &self.pre_sandbox_program_status {
-                status.render("pre_sandbox_program")
-            } else {
-                format!(
-                    "pre_sandbox_program={} metadata_error=not_checked",
-                    self.pre_sandbox_program
-                )
-            },
-            self.pre_sandbox_cwd.render("pre_sandbox_cwd"),
-            format!("sandbox={:?}", self.sandbox),
-        ];
+        let mut lines = vec![format!("program_source={}", self.program_source.as_str())];
+        lines.extend(
+            self.resolver_diagnostics
+                .iter()
+                .map(SelfExecCandidateDiagnostic::render),
+        );
+        lines.push(if let Some(status) = &self.pre_sandbox_program_status {
+            status.render("pre_sandbox_program")
+        } else {
+            format!(
+                "pre_sandbox_program={} metadata_error=not_checked",
+                self.pre_sandbox_program
+            )
+        });
+        lines.push(self.pre_sandbox_cwd.render("pre_sandbox_cwd"));
+        lines.push(format!("sandbox={:?}", self.sandbox));
         if let Some(status) = &self.final_program_status {
             lines.push(status.render("final_program"));
         } else {
@@ -208,6 +221,65 @@ impl ApplyPatchLaunchContext {
         }
         lines.join("\n")
     }
+}
+
+#[derive(Debug)]
+enum ApplyPatchPrepareError {
+    ExecutablePath {
+        label: &'static str,
+        launch_context: Box<ApplyPatchLaunchContext>,
+    },
+    Other(String),
+}
+
+impl ApplyPatchPrepareError {
+    fn from_launch_context(label: &'static str, launch_context: ApplyPatchLaunchContext) -> Self {
+        if launch_context.has_executable_preflight_problem()
+            && !launch_context.has_cwd_preflight_problem()
+        {
+            Self::ExecutablePath {
+                label,
+                launch_context: Box::new(launch_context),
+            }
+        } else {
+            Self::Other(format!("{label}:\n{}", launch_context.render()))
+        }
+    }
+
+    fn render(&self) -> String {
+        match self {
+            Self::ExecutablePath {
+                label,
+                launch_context,
+            } => format!("{label}:\n{}", launch_context.render()),
+            Self::Other(message) => message.clone(),
+        }
+    }
+
+    fn into_tool_error(self) -> ToolError {
+        ToolError::Message(self.render())
+    }
+
+    fn retryable_executable_path_context(&self) -> Option<&ApplyPatchLaunchContext> {
+        match self {
+            Self::ExecutablePath { launch_context, .. }
+                if launch_context.program_source
+                    == ApplyPatchProgramSource::ConfiguredSelfExecPrimary =>
+            {
+                Some(launch_context.as_ref())
+            }
+            _ => None,
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+#[derive(Clone, Debug)]
+struct PreparedApplyPatchCommand {
+    program_source: ApplyPatchProgramSource,
+    pre_sandbox_program: PathBuf,
+    resolver_diagnostics: Vec<SelfExecCandidateDiagnostic>,
+    retry_fallback: Option<PathBuf>,
 }
 
 fn apply_patch_program_path(program: &str) -> Option<PathBuf> {
@@ -248,31 +320,25 @@ impl ApplyPatchRuntime {
 
     #[cfg(not(target_os = "windows"))]
     fn build_sandbox_command(
-        req: &ApplyPatchRequest,
-        codex_self_exe: Option<&PathBuf>,
-    ) -> Result<(SandboxCommand, ApplyPatchProgramSource, PathBuf), ToolError> {
-        let (exe, source) = Self::resolve_apply_patch_program(codex_self_exe)?;
-        Ok((
-            Self::build_sandbox_command_with_program(req, exe.clone()),
-            source,
-            exe,
-        ))
+        _req: &ApplyPatchRequest,
+        self_exec_paths: &SelfExecPaths,
+    ) -> Result<PreparedApplyPatchCommand, ToolError> {
+        let resolved = Self::resolve_apply_patch_program(self_exec_paths)?;
+        Ok(PreparedApplyPatchCommand {
+            program_source: resolved.source.into(),
+            pre_sandbox_program: resolved.path,
+            resolver_diagnostics: resolved.diagnostics,
+            retry_fallback: resolved.retry_fallback,
+        })
     }
 
     #[cfg(not(target_os = "windows"))]
     fn resolve_apply_patch_program(
-        codex_self_exe: Option<&PathBuf>,
-    ) -> Result<(PathBuf, ApplyPatchProgramSource), ToolError> {
-        if let Some(path) = codex_self_exe {
-            return Ok((
-                path.clone(),
-                ApplyPatchProgramSource::ConfiguredCodexSelfExe,
-            ));
-        }
-
-        std::env::current_exe()
-            .map(|path| (path, ApplyPatchProgramSource::CurrentExe))
-            .map_err(|e| ToolError::Message(format!("failed to determine codex exe: {e}")))
+        self_exec_paths: &SelfExecPaths,
+    ) -> Result<ResolvedSelfExec, ToolError> {
+        resolve_self_exec(self_exec_paths).map_err(|err| {
+            ToolError::Message(format!("failed to resolve apply_patch self-exec:\n{err}"))
+        })
     }
 
     fn build_sandbox_command_with_program(req: &ApplyPatchRequest, exe: PathBuf) -> SandboxCommand {
@@ -286,6 +352,145 @@ impl ApplyPatchRuntime {
             // Run apply_patch with a minimal environment for determinism and to avoid leaks.
             env: HashMap::new(),
             additional_permissions: req.additional_permissions.clone(),
+        }
+    }
+
+    fn prepare_exec_request(
+        req: &ApplyPatchRequest,
+        attempt: &SandboxAttempt<'_>,
+        program_source: ApplyPatchProgramSource,
+        pre_sandbox_program: PathBuf,
+        resolver_diagnostics: Vec<SelfExecCandidateDiagnostic>,
+    ) -> Result<(crate::sandboxing::ExecRequest, ApplyPatchLaunchContext), ApplyPatchPrepareError>
+    {
+        let preflight_launch_context = ApplyPatchLaunchContext {
+            program_source,
+            resolver_diagnostics: resolver_diagnostics.clone(),
+            pre_sandbox_program: pre_sandbox_program.display().to_string(),
+            pre_sandbox_program_status: apply_patch_program_path(
+                pre_sandbox_program.to_string_lossy().as_ref(),
+            )
+            .map(|path| ApplyPatchPathStatus::from_path(path.as_path())),
+            pre_sandbox_cwd: ApplyPatchPathStatus::from_path(req.action.cwd.as_path()),
+            sandbox: attempt.sandbox,
+            final_program: pre_sandbox_program.display().to_string(),
+            final_program_status: apply_patch_program_path(
+                pre_sandbox_program.to_string_lossy().as_ref(),
+            )
+            .map(|path| ApplyPatchPathStatus::from_path(path.as_path())),
+        };
+        if preflight_launch_context.has_preflight_problem() {
+            return Err(ApplyPatchPrepareError::from_launch_context(
+                "apply_patch launch preflight failed",
+                preflight_launch_context,
+            ));
+        }
+
+        let options = ExecOptions {
+            expiration: req.timeout_ms.into(),
+            capture_policy: ExecCapturePolicy::ShellTool,
+        };
+        let env = attempt
+            .env_for(
+                Self::build_sandbox_command_with_program(req, pre_sandbox_program.clone()),
+                options,
+                /*network*/ None,
+            )
+            .map_err(|err| {
+                ApplyPatchPrepareError::Other(format!(
+                    "apply_patch launch preparation failed:\nprogram_source={}\npre_sandbox_program={}\npre_sandbox_cwd={}\nsandbox={:?}\ntransform_error={err}",
+                    program_source.as_str(),
+                    pre_sandbox_program.display(),
+                    req.action.cwd.display(),
+                    attempt.sandbox,
+                ))
+            })?;
+        let launch_context = ApplyPatchLaunchContext::from_exec_request(
+            program_source,
+            resolver_diagnostics,
+            pre_sandbox_program.as_path(),
+            req.action.cwd.as_path(),
+            &env,
+        );
+        if launch_context.has_preflight_problem() {
+            return Err(ApplyPatchPrepareError::from_launch_context(
+                "apply_patch launch preflight failed",
+                launch_context,
+            ));
+        }
+        Ok((env, launch_context))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn fallback_retry_command(
+        fallback: PathBuf,
+        resolver_diagnostics: Vec<SelfExecCandidateDiagnostic>,
+    ) -> PreparedApplyPatchCommand {
+        PreparedApplyPatchCommand {
+            program_source: ApplyPatchProgramSource::ConfiguredSelfExecFallback,
+            pre_sandbox_program: fallback,
+            resolver_diagnostics,
+            retry_fallback: None,
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn is_retryable_launch_error(err: &CodexErr, launch_context: &ApplyPatchLaunchContext) -> bool {
+        if launch_context.program_source != ApplyPatchProgramSource::ConfiguredSelfExecPrimary {
+            return false;
+        }
+        let CodexErr::Io(io_err) = err else {
+            return false;
+        };
+        matches!(
+            io_err.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+        ) || io_err
+            .raw_os_error()
+            .is_some_and(|code| matches!(code, libc::ENOEXEC | libc::ETXTBSY))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    async fn execute_with_fallback_retry(
+        req: &ApplyPatchRequest,
+        attempt: &SandboxAttempt<'_>,
+        ctx: &ToolCtx,
+        fallback: PathBuf,
+        resolver_diagnostics: Vec<SelfExecCandidateDiagnostic>,
+        primary_context_text: &str,
+        primary_error_text: &str,
+    ) -> Result<ExecToolCallOutput, ToolError> {
+        let retry_command = Self::fallback_retry_command(fallback, resolver_diagnostics);
+        let (retry_env, retry_launch_context) = Self::prepare_exec_request(
+            req,
+            attempt,
+            retry_command.program_source,
+            retry_command.pre_sandbox_program,
+            retry_command.resolver_diagnostics,
+        )
+        .map_err(|retry_prepare_err| {
+            ToolError::Message(format!(
+                "apply_patch launch failed after fallback retry:\nprimary_launch_context:\n{primary_context_text}\nprimary_error={primary_error_text}\nfallback_prepare_error:\n{}",
+                retry_prepare_err.render()
+            ))
+        })?;
+        let retry_launch_context_text = retry_launch_context.render();
+        execute_env(retry_env, Self::stdout_stream(ctx))
+            .await
+            .map_err(|retry_err| {
+                ToolError::Message(format!(
+                    "apply_patch launch failed after fallback retry:\nprimary_launch_context:\n{primary_context_text}\nprimary_error={primary_error_text}\nfallback_launch_context:\n{retry_launch_context_text}\nfallback_source_error={retry_err:?}"
+                ))
+            })
+    }
+
+    fn map_launch_error(err: CodexErr, launch_context_text: &str) -> ToolError {
+        match err {
+            CodexErr::Sandbox(SandboxErr::Timeout { .. })
+            | CodexErr::Sandbox(SandboxErr::Denied { .. }) => ToolError::Codex(err),
+            other => ToolError::Message(format!(
+                "apply_patch launch failed:\n{launch_context_text}\nsource_error={other:?}"
+            )),
         }
     }
 
@@ -393,75 +598,80 @@ impl ToolRuntime<ApplyPatchRequest, ExecToolCallOutput> for ApplyPatchRuntime {
         ctx: &ToolCtx,
     ) -> Result<ExecToolCallOutput, ToolError> {
         #[cfg(target_os = "windows")]
-        let (command, program_source, pre_sandbox_program) =
-            Self::build_sandbox_command(req, &ctx.turn.config.codex_home)?;
-        #[cfg(not(target_os = "windows"))]
-        let (command, program_source, pre_sandbox_program) =
-            Self::build_sandbox_command(req, ctx.turn.codex_self_exe.as_ref())?;
-        let pre_sandbox_program_text = pre_sandbox_program.display().to_string();
-        let pre_sandbox_program_status =
-            apply_patch_program_path(pre_sandbox_program.to_string_lossy().as_ref())
-                .map(|path| ApplyPatchPathStatus::from_path(path.as_path()));
-        let pre_sandbox_cwd_status = ApplyPatchPathStatus::from_path(req.action.cwd.as_path());
-        if pre_sandbox_program_status
-            .as_ref()
-            .is_some_and(ApplyPatchPathStatus::missing_file)
-            || pre_sandbox_cwd_status.missing_dir()
-        {
-            let launch_context = ApplyPatchLaunchContext::new(
+        let (env, launch_context) = {
+            let (_command, program_source, pre_sandbox_program) =
+                Self::build_sandbox_command(req, &ctx.turn.config.codex_home)?;
+            Self::prepare_exec_request(
+                req,
+                attempt,
                 program_source,
-                pre_sandbox_program_text,
-                pre_sandbox_program_status,
-                pre_sandbox_cwd_status,
-                attempt.sandbox,
-                pre_sandbox_program.display().to_string(),
-                apply_patch_program_path(pre_sandbox_program.to_string_lossy().as_ref())
-                    .map(|path| ApplyPatchPathStatus::from_path(path.as_path())),
-            );
-            return Err(ToolError::Message(format!(
-                "apply_patch launch preflight failed:\n{}",
-                launch_context.render()
-            )));
-        }
-
-        let options = ExecOptions {
-            expiration: req.timeout_ms.into(),
-            capture_policy: ExecCapturePolicy::ShellTool,
+                pre_sandbox_program,
+                Vec::new(),
+            )
+            .map_err(ApplyPatchPrepareError::into_tool_error)?
         };
-        let env = attempt
-            .env_for(command, options, /*network*/ None)
-            .map_err(|err| {
-                ToolError::Message(format!(
-                    "apply_patch launch preparation failed:\nprogram_source={}\npre_sandbox_program={}\npre_sandbox_cwd={}\nsandbox={:?}\ntransform_error={err}",
-                    program_source.as_str(),
-                    pre_sandbox_program.display(),
-                    req.action.cwd.display(),
-                    attempt.sandbox,
-                ))
-            })?;
-        let launch_context = ApplyPatchLaunchContext::from_exec_request(
-            program_source,
-            pre_sandbox_program.as_path(),
-            req.action.cwd.as_path(),
-            &env,
-        );
-        if launch_context.has_preflight_problem() {
-            return Err(ToolError::Message(format!(
-                "apply_patch launch preflight failed:\n{}",
-                launch_context.render()
-            )));
-        }
+
+        #[cfg(not(target_os = "windows"))]
+        let (env, launch_context, retry_fallback, resolver_diagnostics) = {
+            let prepared = Self::build_sandbox_command(req, &ctx.turn.self_exec_paths)?;
+            match Self::prepare_exec_request(
+                req,
+                attempt,
+                prepared.program_source,
+                prepared.pre_sandbox_program.clone(),
+                prepared.resolver_diagnostics.clone(),
+            ) {
+                Ok((env, launch_context)) => (
+                    env,
+                    launch_context,
+                    prepared.retry_fallback.clone(),
+                    prepared.resolver_diagnostics,
+                ),
+                Err(prepare_err) => {
+                    if let Some(fallback) = prepared.retry_fallback
+                        && let Some(primary_launch_context) =
+                            prepare_err.retryable_executable_path_context()
+                    {
+                        return Self::execute_with_fallback_retry(
+                            req,
+                            attempt,
+                            ctx,
+                            fallback,
+                            prepared.resolver_diagnostics,
+                            &primary_launch_context.render(),
+                            &prepare_err.render(),
+                        )
+                        .await;
+                    }
+                    return Err(prepare_err.into_tool_error());
+                }
+            }
+        };
+
         let launch_context_text = launch_context.render();
-        let out = execute_env(env, Self::stdout_stream(ctx))
-            .await
-            .map_err(|err| match err {
-                CodexErr::Sandbox(SandboxErr::Timeout { .. })
-                | CodexErr::Sandbox(SandboxErr::Denied { .. }) => ToolError::Codex(err),
-                other => ToolError::Message(format!(
-                    "apply_patch launch failed:\n{launch_context_text}\nsource_error={other:?}"
-                )),
-            })?;
-        Ok(out)
+        match execute_env(env, Self::stdout_stream(ctx)).await {
+            Ok(out) => Ok(out),
+            Err(err) => {
+                #[cfg(not(target_os = "windows"))]
+                {
+                    if let Some(fallback) = retry_fallback
+                        && Self::is_retryable_launch_error(&err, &launch_context)
+                    {
+                        return Self::execute_with_fallback_retry(
+                            req,
+                            attempt,
+                            ctx,
+                            fallback,
+                            resolver_diagnostics,
+                            &launch_context_text,
+                            &format!("source_error={err:?}"),
+                        )
+                        .await;
+                    }
+                }
+                Err(Self::map_launch_error(err, &launch_context_text))
+            }
+        }
     }
 }
 

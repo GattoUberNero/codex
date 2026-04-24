@@ -411,7 +411,7 @@ async fn process_compacted_history_inserts_context_before_last_real_user_message
 }
 
 #[tokio::test]
-async fn process_compacted_history_reinjects_model_switch_message() {
+async fn process_compacted_history_skips_model_switch_message_for_rebased_session() {
     let compacted_history = vec![ResponseItem::Message {
         id: None,
         role: "user".to_string(),
@@ -432,14 +432,20 @@ async fn process_compacted_history_reinjects_model_switch_message() {
     )
     .await;
 
-    let ResponseItem::Message { role, content, .. } = &initial_context[0] else {
-        panic!("expected developer message");
-    };
-    assert_eq!(role, "developer");
-    let [ContentItem::InputText { text }, ..] = content.as_slice() else {
-        panic!("expected developer text");
-    };
-    assert!(text.contains("<model_switch>"));
+    assert!(
+        !initial_context.iter().any(|item| {
+            matches!(
+                item,
+                ResponseItem::Message { role, content, .. }
+                    if role == "developer"
+                        && content.iter().any(|content_item| matches!(
+                            content_item,
+                            ContentItem::InputText { text } if text.contains("<model_switch>")
+                        ))
+            )
+        }),
+        "did not expect model switch reinjection for rebased session history"
+    );
 
     let mut expected = initial_context;
     expected.push(ResponseItem::Message {

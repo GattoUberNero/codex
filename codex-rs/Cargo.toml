@@ -12,6 +12,7 @@ members = [
     "apply-patch",
     "nero-apply-patch",
     "nero-file-reader",
+    "nero-self-exec",
     "arg0",
     "feedback",
     "features",
@@ -109,6 +110,7 @@ codex-code-mode = { path = "code-mode" }
     codex-apply-patch = { path = "apply-patch" }
     codex-nero-apply-patch = { path = "nero-apply-patch" }
     codex-nero-file-reader = { path = "nero-file-reader" }
+    codex-nero-self-exec = { path = "nero-self-exec" }
     codex-arg0 = { path = "arg0" }
 codex-async-utils = { path = "async-utils" }
 codex-backend-client = { path = "backend-client" }

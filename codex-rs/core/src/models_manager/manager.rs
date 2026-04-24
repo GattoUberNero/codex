@@ -39,6 +39,7 @@ use tokio::time::timeout;
 use tracing::error;
 use tracing::info;
 use tracing::instrument;
+use tracing::warn;
 
 const MODEL_CACHE_FILE: &str = "models_cache.json";
 const DEFAULT_MODEL_CACHE_TTL: Duration = Duration::from_secs(300);
@@ -248,8 +249,8 @@ impl ModelsManager {
         let overlay_catalog = model_catalog_overlay
             .map(|catalog| catalog.models)
             .unwrap_or_default();
-        let base_catalog = Self::merge_catalog_models(base_catalog, overlay_catalog.clone());
-        let remote_models = base_catalog.clone();
+        let remote_models =
+            Self::merge_catalog_models(base_catalog.clone(), overlay_catalog.clone());
         Self {
             base_catalog,
             overlay_catalog,
@@ -340,7 +341,33 @@ impl ModelsManager {
     #[instrument(level = "info", skip(self, config), fields(model = model))]
     pub async fn get_model_info(&self, model: &str, config: &Config) -> ModelInfo {
         let remote_models = self.get_remote_models().await;
-        Self::construct_model_info_from_candidates(model, &remote_models, config)
+        self.model_info_from_catalog_snapshot(model, &remote_models, config)
+    }
+
+    pub(crate) async fn model_catalog_snapshot(&self) -> Vec<ModelInfo> {
+        self.get_remote_models().await
+    }
+
+    pub(crate) fn model_info_from_catalog_snapshot(
+        &self,
+        model: &str,
+        remote_models: &[ModelInfo],
+        config: &Config,
+    ) -> ModelInfo {
+        let model_info = Self::construct_model_info_from_candidates(model, remote_models, config);
+        if !model_info.used_fallback_model_metadata {
+            return model_info;
+        }
+
+        let base_model_info =
+            Self::construct_model_info_from_candidates(model, &self.base_catalog, config);
+        if !base_model_info.used_fallback_model_metadata {
+            warn!(
+                model,
+                "model metadata missing from active runtime catalog; using base catalog metadata"
+            );
+        }
+        base_model_info
     }
 
     fn find_model_by_longest_prefix(model: &str, candidates: &[ModelInfo]) -> Option<ModelInfo> {
@@ -501,9 +528,8 @@ impl ModelsManager {
 
     /// Replace the cached remote models and rebuild the derived presets list.
     async fn apply_remote_models(&self, models: Vec<ModelInfo>) {
-        let with_remote = Self::merge_catalog_models(self.base_catalog.clone(), models);
         *self.remote_models.write().await =
-            Self::merge_catalog_models(with_remote, self.overlay_catalog.clone());
+            Self::merge_catalog_models(models, self.overlay_catalog.clone());
     }
 
     fn load_remote_models_from_file() -> Result<Vec<ModelInfo>, std::io::Error> {

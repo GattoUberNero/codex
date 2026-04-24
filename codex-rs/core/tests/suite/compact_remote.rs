@@ -1003,6 +1003,118 @@ async fn remote_pre_turn_compaction_quota_recovers_via_auth_rotate_command() -> 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial(auth_rotate_cmd_env)]
+async fn remote_pre_turn_compaction_usage_limit_recovery_then_retry_failure_stops_turn()
+-> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    const AUTH_ROTATE_CMD_ENV: &str = "CODEXN_AUTH_ROTATE_CMD";
+
+    let _guard = EnvVarGuard::set(AUTH_ROTATE_CMD_ENV, "true");
+    let harness = TestCodexHarness::with_builder(
+        test_codex()
+            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+            .with_config(|config| {
+                config.model_auto_compact_token_limit = Some(120);
+                config.model_provider.request_max_retries = Some(0);
+                config.model_provider.stream_max_retries = Some(0);
+            }),
+    )
+    .await?;
+    let codex = harness.test().codex.clone();
+
+    let responses_mock = responses::mount_sse_sequence(
+        harness.server(),
+        vec![sse(vec![
+            responses::ev_assistant_message("initial-assistant", "initial turn complete"),
+            responses::ev_completed_with_tokens("initial-response", /*total_tokens*/ 500_000),
+        ])],
+    )
+    .await;
+
+    let first_compact_mock = responses::mount_compact_response_once(
+        harness.server(),
+        ResponseTemplate::new(429)
+            .insert_header("content-type", "application/json")
+            .set_body_json(serde_json::json!({
+                "error": {
+                    "type": "usage_limit_reached",
+                    "message": "limit reached during remote compact",
+                    "plan_type": "pro"
+                }
+            })),
+    )
+    .await;
+    let second_compact_mock = responses::mount_compact_json_once(
+        harness.server(),
+        serde_json::json!({ "output": "invalid compact payload shape" }),
+    )
+    .await;
+    let post_compact_turn_mock = mount_sse_once(
+        harness.server(),
+        sse(vec![
+            responses::ev_assistant_message("post-compact-assistant", "should not run"),
+            responses::ev_completed("post-compact-response"),
+        ]),
+    )
+    .await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "turn that exceeds token threshold".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+        })
+        .await?;
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "turn that triggers auto compact".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+        })
+        .await?;
+
+    let error_message = wait_for_event_match(&codex, |event| match event {
+        EventMsg::Error(err) => Some(err.message.clone()),
+        _ => None,
+    })
+    .await;
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    assert!(
+        error_message.contains("Error running remote compact task"),
+        "expected compact failure prefix after recovery, got {error_message}"
+    );
+    assert_eq!(
+        first_compact_mock.requests().len(),
+        1,
+        "expected one failed compact attempt before auth rotation"
+    );
+    assert_eq!(
+        second_compact_mock.requests().len(),
+        1,
+        "expected one retried compact attempt after auth rotation"
+    );
+    assert_eq!(
+        responses_mock.requests().len(),
+        1,
+        "expected no post-compaction /responses turn when retried compact fails"
+    );
+    assert!(
+        post_compact_turn_mock.requests().is_empty(),
+        "expected agent loop to stop after retried compact failure"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(auth_rotate_cmd_env)]
 async fn remote_pre_turn_compaction_rotation_command_failure_stops_turn() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -2507,6 +2619,21 @@ async fn snapshot_request_shape_remote_pre_turn_compaction_strips_incoming_model
     let initial_turn_request = initial_turn_request_mock.single_request();
     let compact_request = compact_mock.single_request();
     let post_compact_turn_request = post_compact_turn_request_mock.single_request();
+    assert_eq!(
+        initial_turn_request.body_json()["model"].as_str(),
+        Some(previous_model),
+        "initial turn should run on previous model"
+    );
+    assert_eq!(
+        compact_request.body_json()["model"].as_str(),
+        Some(next_model),
+        "pre-turn remote compaction should run on switched model"
+    );
+    assert_eq!(
+        post_compact_turn_request.body_json()["model"].as_str(),
+        Some(next_model),
+        "post-compaction follow-up should run on switched model"
+    );
     let compact_body = compact_request.body_json().to_string();
     assert!(
         !compact_body.contains("AFTER_SWITCH_USER"),
@@ -2527,14 +2654,22 @@ async fn snapshot_request_shape_remote_pre_turn_compaction_strips_incoming_model
         "post-compaction follow-up should preserve incoming user message via runtime append"
     );
     assert!(
-        follow_up_body.contains("<model_switch>"),
-        "post-compaction follow-up should include the model-switch update item"
+        !follow_up_body.contains("<model_switch>"),
+        "post-compaction follow-up should rely on rebased instructions instead of model-switch update item"
+    );
+    let expected_follow_up_instructions =
+        codex_core::test_support::construct_model_info_offline(next_model, &harness.test().config)
+            .get_model_instructions(harness.test().config.personality);
+    assert_eq!(
+        post_compact_turn_request.instructions_text(),
+        expected_follow_up_instructions,
+        "post-compaction follow-up should send switched-model base instructions"
     );
 
     insta::assert_snapshot!(
         "remote_pre_turn_compaction_strips_incoming_model_switch_shapes",
         format_labeled_requests_snapshot(
-            "Remote pre-turn compaction during model switch currently excludes incoming user input, strips incoming <model_switch> from the compact request payload, and restores it in the post-compaction follow-up request.",
+            "Remote pre-turn compaction during explicit model switch excludes incoming user input, strips incoming <model_switch> from the compact request payload, and keeps the post-compaction follow-up clean by relying on rebased instructions.",
             &[
                 ("Initial Request (Previous Model)", &initial_turn_request),
                 ("Remote Compaction Request", &compact_request),

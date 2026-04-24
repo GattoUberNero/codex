@@ -68,6 +68,7 @@ use codex_features::FeatureOverrides;
 use codex_features::Features;
 use codex_features::FeaturesToml;
 use codex_git_utils::resolve_root_git_project_for_trust;
+use codex_nero_self_exec::SelfExecPaths;
 use codex_protocol::config_types::AltScreenMode;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::Personality;
@@ -531,9 +532,10 @@ pub struct Config {
     /// output will be hyperlinked using the specified URI scheme.
     pub file_opener: UriBasedFileOpener,
 
-    /// Path to the current Codex executable. This cannot be set in the config
-    /// file: it must be set in code via [`ConfigOverrides`].
-    pub codex_self_exe: Option<PathBuf>,
+    /// Runtime-only primary/fallback paths used by self-exec tools such as
+    /// `apply_patch`. This cannot be set in the config file: it must be set in
+    /// code via [`ConfigOverrides`].
+    pub self_exec_paths: SelfExecPaths,
 
     /// Path to the `codex-linux-sandbox` executable. This must be set if
     /// [`codex_sandboxing::SandboxType::LinuxSeccomp`] is used. Note that this
@@ -823,7 +825,7 @@ impl Config {
     /// designed to use [AskForApproval::Never] exclusively.
     ///
     /// Further, [ConfigOverrides] contains some options that are not supported
-    /// in [ConfigToml], such as `cwd`, `codex_self_exe`, `codex_linux_sandbox_exe`, and
+    /// in [ConfigToml], such as `cwd`, `self_exec_paths`, `codex_linux_sandbox_exe`, and
     /// `main_execve_wrapper_exe`.
     pub async fn load_with_cli_overrides_and_harness_overrides(
         cli_overrides: Vec<(String, TomlValue)>,
@@ -2818,7 +2820,7 @@ pub struct ConfigOverrides {
     pub model_provider: Option<String>,
     pub service_tier: Option<Option<ServiceTier>>,
     pub config_profile: Option<String>,
-    pub codex_self_exe: Option<PathBuf>,
+    pub self_exec_paths: SelfExecPaths,
     pub codex_linux_sandbox_exe: Option<PathBuf>,
     pub main_execve_wrapper_exe: Option<PathBuf>,
     pub js_repl_node_path: Option<PathBuf>,
@@ -3029,7 +3031,7 @@ impl Config {
             model_provider,
             service_tier: service_tier_override,
             config_profile: config_profile_key,
-            codex_self_exe,
+            self_exec_paths,
             codex_linux_sandbox_exe,
             main_execve_wrapper_exe,
             js_repl_node_path: js_repl_node_path_override,
@@ -3658,7 +3660,7 @@ impl Config {
             history,
             ephemeral: ephemeral.unwrap_or_default(),
             file_opener: cfg.file_opener.unwrap_or(UriBasedFileOpener::VsCode),
-            codex_self_exe,
+            self_exec_paths,
             codex_linux_sandbox_exe,
             main_execve_wrapper_exe,
             js_repl_node_path,

@@ -37,7 +37,9 @@ use crate::exec_policy::ExecPolicyManager;
 use crate::models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use crate::models_manager::manager::ModelsManager;
 use crate::models_manager::manager::RefreshStrategy;
+use crate::nero_auto_runtime_state::NeroStateLock;
 use crate::nero_auto_runtime_state::NeroStopHookDebugReportingMode;
+use crate::nero_auto_runtime_state::acquire_state_lock;
 use crate::nero_auto_runtime_state::resolve_nero_auto_config_path;
 use crate::nero_auto_runtime_state::resolve_stop_hook_debug_reporting_mode;
 use crate::parse_command::parse_command;
@@ -82,6 +84,7 @@ use codex_hooks::Hooks;
 use codex_hooks::HooksConfig;
 use codex_hooks::NeroHookAction;
 use codex_hooks::NeroHookMsgFormat;
+use codex_nero_self_exec::SelfExecPaths;
 use codex_network_proxy::NetworkProxy;
 use codex_network_proxy::NetworkProxyAuditMetadata;
 use codex_network_proxy::normalize_host;
@@ -157,7 +160,10 @@ use serde_json;
 use serde_json::Value;
 use serde_json::json;
 use tokio::fs::OpenOptions as TokioOpenOptions;
+use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio::io::BufReader as TokioBufReader;
+use tokio::io::BufWriter as TokioBufWriter;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tokio::sync::oneshot;
@@ -458,6 +464,9 @@ const HOOK_AUTO_REPLY_TAB_PRIORITY_GRACE_MS: u64 = 300;
 const HOOK_AUTO_REPLY_WAIT_FOR_TERMINAL_TIMEOUT_MS: u64 = 30_000;
 const HOOK_AUTO_REPLY_WAIT_POLL_INTERVAL_MS: u64 = 10;
 const NERO_HOOK_DELIVERY_LOG_FILENAME: &str = "nero-hook-delivery.jsonl";
+const MODEL_SWITCH_BASE_REBASE_QUEUE_FILENAME: &str = "model-switch-base-rebase-queue.jsonl";
+const MODEL_SWITCH_BASE_REBASE_QUEUE_LOCK_MAX_RETRIES: usize = 20;
+const MODEL_SWITCH_BASE_REBASE_QUEUE_LOCK_RETRY_SLEEP_MS: u64 = 100;
 const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
 const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyber-safety";
 const DIRECT_APP_TOOL_EXPOSURE_THRESHOLD: usize = 100;
@@ -1102,6 +1111,338 @@ async fn append_nero_model_fallback_audit(
     .await;
 }
 
+fn model_switch_base_rebase_queue_path(codex_home: &Path) -> PathBuf {
+    codex_home
+        .join("log")
+        .join(MODEL_SWITCH_BASE_REBASE_QUEUE_FILENAME)
+}
+
+async fn acquire_model_switch_base_rebase_queue_lock(
+    codex_home: &Path,
+) -> Result<NeroStateLock, String> {
+    let queue_path = model_switch_base_rebase_queue_path(codex_home);
+    for attempt in 0..MODEL_SWITCH_BASE_REBASE_QUEUE_LOCK_MAX_RETRIES {
+        match acquire_state_lock(&queue_path) {
+            Ok(lock) => return Ok(lock),
+            Err(err) => {
+                let has_remaining_retry =
+                    attempt + 1 < MODEL_SWITCH_BASE_REBASE_QUEUE_LOCK_MAX_RETRIES;
+                if has_remaining_retry && err.contains("lock is unavailable") {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        MODEL_SWITCH_BASE_REBASE_QUEUE_LOCK_RETRY_SLEEP_MS,
+                    ))
+                    .await;
+                    continue;
+                }
+                return Err(format!(
+                    "acquire model switch rebase queue lock {} (retries={}): {}",
+                    queue_path.display(),
+                    MODEL_SWITCH_BASE_REBASE_QUEUE_LOCK_MAX_RETRIES,
+                    err
+                ));
+            }
+        }
+    }
+    Err(format!(
+        "acquire model switch rebase queue lock {} exhausted retries={}",
+        queue_path.display(),
+        MODEL_SWITCH_BASE_REBASE_QUEUE_LOCK_MAX_RETRIES
+    ))
+}
+
+fn queued_model_switch_base_rebase_payload(
+    previous: &SessionConfiguration,
+    next: &SessionConfiguration,
+    updates: &SessionSettingsUpdate,
+) -> Option<(PathBuf, String, String)> {
+    updates.collaboration_mode.as_ref()?;
+    if previous.collaboration_mode.model() == next.collaboration_mode.model() {
+        return None;
+    }
+    if next.original_config_do_not_use.base_instructions.is_some() {
+        return None;
+    }
+    if previous.base_instructions == next.base_instructions {
+        return None;
+    }
+    let thread_name = next
+        .thread_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)?;
+    Some((
+        next.codex_home.clone(),
+        thread_name,
+        next.base_instructions.clone(),
+    ))
+}
+
+async fn append_model_switch_base_rebase_queue_entry(
+    codex_home: &Path,
+    thread_name: &str,
+    base_instructions: &str,
+) -> Result<(), String> {
+    let _queue_lock = acquire_model_switch_base_rebase_queue_lock(codex_home).await?;
+    let queue_path = model_switch_base_rebase_queue_path(codex_home);
+    if let Some(parent) = queue_path.parent()
+        && let Err(err) = tokio::fs::create_dir_all(parent).await
+    {
+        return Err(format!(
+            "create model switch rebase queue dir {}: {}",
+            parent.display(),
+            err
+        ));
+    }
+    let mut file = match TokioOpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&queue_path)
+        .await
+    {
+        Ok(file) => file,
+        Err(err) => {
+            return Err(format!(
+                "open model switch rebase queue {}: {}",
+                queue_path.display(),
+                err
+            ));
+        }
+    };
+    let entry_id = Uuid::now_v7().to_string();
+    let record = json!({
+        "entry_id": entry_id,
+        "ts": Utc::now().to_rfc3339(),
+        "thread_name": thread_name,
+        "base_instructions": base_instructions,
+    });
+    let mut line = match serde_json::to_string(&record) {
+        Ok(value) => value,
+        Err(err) => {
+            return Err(format!(
+                "serialize model switch rebase queue record for thread {}: {}",
+                thread_name, err
+            ));
+        }
+    };
+    line.push('\n');
+    if let Err(err) = file.write_all(line.as_bytes()).await {
+        return Err(format!(
+            "append model switch rebase queue record to {}: {}",
+            queue_path.display(),
+            err
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct ModelSwitchBaseRebaseQueueEntry {
+    base_instructions: String,
+    line_index: usize,
+    raw_line: String,
+}
+
+async fn take_model_switch_base_rebase_queue_entry(
+    codex_home: &Path,
+    thread_name: &str,
+) -> Result<Option<ModelSwitchBaseRebaseQueueEntry>, String> {
+    let _queue_lock = acquire_model_switch_base_rebase_queue_lock(codex_home).await?;
+    let queue_path = model_switch_base_rebase_queue_path(codex_home);
+    let queue_content = match tokio::fs::read_to_string(&queue_path).await {
+        Ok(value) => value,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(format!(
+                "read model switch rebase queue {}: {}",
+                queue_path.display(),
+                err
+            ));
+        }
+    };
+
+    let mut queued_base_instructions: Option<ModelSwitchBaseRebaseQueueEntry> = None;
+    for (line_index, line) in queue_content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let parsed = serde_json::from_str::<Value>(trimmed);
+        if let Ok(record) = parsed {
+            let queued_thread = record
+                .get("thread_name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
+            let queued_base = record
+                .get("base_instructions")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            if queued_thread == thread_name
+                && let Some(queued_base) = queued_base
+            {
+                queued_base_instructions = Some(ModelSwitchBaseRebaseQueueEntry {
+                    base_instructions: queued_base,
+                    line_index,
+                    raw_line: trimmed.to_string(),
+                });
+            }
+        }
+    }
+    Ok(queued_base_instructions)
+}
+
+async fn consume_model_switch_base_rebase_queue_entry(
+    codex_home: &Path,
+    consumed_entry: &ModelSwitchBaseRebaseQueueEntry,
+) -> Result<(), String> {
+    let _queue_lock = acquire_model_switch_base_rebase_queue_lock(codex_home).await?;
+    let queue_path = model_switch_base_rebase_queue_path(codex_home);
+    let queue_content = match tokio::fs::read_to_string(&queue_path).await {
+        Ok(value) => value,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!(
+                "consume model switch rebase queue entry not found: {}",
+                queue_path.display()
+            ));
+        }
+        Err(err) => {
+            return Err(format!(
+                "read model switch rebase queue {}: {}",
+                queue_path.display(),
+                err
+            ));
+        }
+    };
+
+    let mut retained_lines: Vec<String> = Vec::new();
+    let mut consumed_any = false;
+    for (line_index, line) in queue_content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !consumed_any
+            && line_index == consumed_entry.line_index
+            && trimmed == consumed_entry.raw_line
+        {
+            consumed_any = true;
+            continue;
+        }
+        retained_lines.push(trimmed.to_string());
+    }
+    if !consumed_any {
+        return Err(format!(
+            "consume model switch rebase queue entry not found: {}",
+            queue_path.display()
+        ));
+    }
+    if retained_lines.is_empty() {
+        if let Err(err) = tokio::fs::remove_file(&queue_path).await
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(format!(
+                "remove consumed model switch rebase queue {}: {}",
+                queue_path.display(),
+                err
+            ));
+        }
+        return Ok(());
+    }
+
+    let mut rewritten = retained_lines.join("\n");
+    rewritten.push('\n');
+    let rewrite_path = queue_path.with_extension(format!("jsonl.rewrite-{}", Uuid::now_v7()));
+    if let Err(err) = tokio::fs::write(&rewrite_path, rewritten).await {
+        let _ = tokio::fs::remove_file(&rewrite_path).await;
+        return Err(format!(
+            "write rewritten model switch rebase queue {}: {}",
+            rewrite_path.display(),
+            err
+        ));
+    }
+    if let Err(err) = tokio::fs::rename(&rewrite_path, &queue_path).await {
+        let _ = tokio::fs::remove_file(&rewrite_path).await;
+        return Err(format!(
+            "replace model switch rebase queue {} -> {}: {}",
+            rewrite_path.display(),
+            queue_path.display(),
+            err
+        ));
+    }
+    Ok(())
+}
+
+async fn rewrite_rollout_session_meta_base_instructions(
+    rollout_path: &Path,
+    base_instructions: &str,
+) -> Result<bool, String> {
+    let input = tokio::fs::File::open(rollout_path)
+        .await
+        .map_err(|err| format!("open rollout for rewrite: {err}"))?;
+    let rewrite_path = rollout_path.with_extension(format!("jsonl.rewrite-{}", Uuid::now_v7()));
+    let output = tokio::fs::File::create(&rewrite_path)
+        .await
+        .map_err(|err| format!("create rollout rewrite temp file: {err}"))?;
+    let mut reader = TokioBufReader::new(input).lines();
+    let mut writer = TokioBufWriter::new(output);
+    let mut rewritten = false;
+
+    while let Some(line) = match reader.next_line().await {
+        Ok(line) => line,
+        Err(err) => {
+            let _ = tokio::fs::remove_file(&rewrite_path).await;
+            return Err(format!("read rollout line during rewrite: {err}"));
+        }
+    } {
+        let mut output_line = line;
+        if !rewritten
+            && let Ok(mut value) = serde_json::from_str::<Value>(&output_line)
+            && value
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == "session_meta")
+            && let Some(payload) = value.get_mut("payload").and_then(Value::as_object_mut)
+        {
+            payload.insert(
+                "base_instructions".to_string(),
+                Value::String(base_instructions.to_string()),
+            );
+            output_line = match serde_json::to_string(&value) {
+                Ok(serialized) => serialized,
+                Err(err) => {
+                    let _ = tokio::fs::remove_file(&rewrite_path).await;
+                    return Err(format!("serialize rewritten session_meta line: {err}"));
+                }
+            };
+            rewritten = true;
+        }
+        if let Err(err) = writer.write_all(output_line.as_bytes()).await {
+            let _ = tokio::fs::remove_file(&rewrite_path).await;
+            return Err(format!("write rollout line during rewrite: {err}"));
+        }
+        if let Err(err) = writer.write_all(b"\n").await {
+            let _ = tokio::fs::remove_file(&rewrite_path).await;
+            return Err(format!("write rollout newline during rewrite: {err}"));
+        }
+    }
+    if let Err(err) = writer.flush().await {
+        let _ = tokio::fs::remove_file(&rewrite_path).await;
+        return Err(format!("flush rollout rewrite output: {err}"));
+    }
+
+    if !rewritten {
+        let _ = tokio::fs::remove_file(&rewrite_path).await;
+        return Ok(false);
+    }
+
+    if let Err(err) = tokio::fs::rename(&rewrite_path, rollout_path).await {
+        let _ = tokio::fs::remove_file(&rewrite_path).await;
+        return Err(format!("replace rollout after rewrite: {err}"));
+    }
+    Ok(true)
+}
+
 impl Codex {
     /// Spawn a new [`Codex`] and initialize the session.
     pub(crate) async fn spawn(args: CodexSpawnArgs) -> CodexResult<CodexSpawnOk> {
@@ -1607,7 +1948,7 @@ pub(crate) struct TurnContext {
     pub(crate) features: ManagedFeatures,
     pub(crate) ghost_snapshot: GhostSnapshotConfig,
     pub(crate) final_output_json_schema: Option<Value>,
-    pub(crate) codex_self_exe: Option<PathBuf>,
+    pub(crate) self_exec_paths: SelfExecPaths,
     pub(crate) codex_linux_sandbox_exe: Option<PathBuf>,
     pub(crate) tool_call_gate: Arc<ReadinessFlag>,
     pub(crate) truncation_policy: TruncationPolicy,
@@ -1616,6 +1957,7 @@ pub(crate) struct TurnContext {
     pub(crate) turn_metadata_state: Arc<TurnMetadataState>,
     pub(crate) turn_skills: TurnSkillsContext,
     pub(crate) turn_timing_state: Arc<TurnTimingState>,
+    pub(crate) emit_model_switch_instructions_update: bool,
 }
 impl TurnContext {
     pub(crate) fn model_context_window(&self) -> Option<i64> {
@@ -1740,7 +2082,7 @@ impl TurnContext {
             features,
             ghost_snapshot: self.ghost_snapshot.clone(),
             final_output_json_schema: self.final_output_json_schema.clone(),
-            codex_self_exe: self.codex_self_exe.clone(),
+            self_exec_paths: self.self_exec_paths.clone(),
             codex_linux_sandbox_exe: self.codex_linux_sandbox_exe.clone(),
             tool_call_gate: Arc::new(ReadinessFlag::new()),
             truncation_policy,
@@ -1749,6 +2091,7 @@ impl TurnContext {
             turn_metadata_state: self.turn_metadata_state.clone(),
             turn_skills: self.turn_skills.clone(),
             turn_timing_state: Arc::clone(&self.turn_timing_state),
+            emit_model_switch_instructions_update: true,
         }
     }
 
@@ -2152,6 +2495,37 @@ impl Session {
         Ok((network_proxy, session_network_proxy))
     }
 
+    fn maybe_rebase_base_instructions_for_explicit_model_switch(
+        &self,
+        previous: &SessionConfiguration,
+        next: &mut SessionConfiguration,
+        updates: &SessionSettingsUpdate,
+        model_catalog_snapshot: Option<&[ModelInfo]>,
+    ) {
+        if updates.collaboration_mode.is_none() {
+            return;
+        }
+        if previous.collaboration_mode.model() == next.collaboration_mode.model() {
+            return;
+        }
+        if next.original_config_do_not_use.base_instructions.is_some() {
+            return;
+        }
+        let Some(model_catalog_snapshot) = model_catalog_snapshot else {
+            return;
+        };
+
+        let model_info = self
+            .services
+            .models_manager
+            .model_info_from_catalog_snapshot(
+                next.collaboration_mode.model(),
+                model_catalog_snapshot,
+                next.original_config_do_not_use.as_ref(),
+            );
+        next.base_instructions = model_info.get_model_instructions(next.personality);
+    }
+
     /// Don't expand the number of mutated arguments on config. We are in the process of getting rid of it.
     pub(crate) fn build_per_turn_config(session_configuration: &SessionConfiguration) -> Config {
         // todo(aibrahim): store this state somewhere else so we don't need to mut config
@@ -2334,7 +2708,7 @@ impl Session {
             features: per_turn_config.features.clone(),
             ghost_snapshot: per_turn_config.ghost_snapshot.clone(),
             final_output_json_schema: None,
-            codex_self_exe: per_turn_config.codex_self_exe.clone(),
+            self_exec_paths: per_turn_config.self_exec_paths.clone(),
             codex_linux_sandbox_exe: per_turn_config.codex_linux_sandbox_exe.clone(),
             tool_call_gate: Arc::new(ReadinessFlag::new()),
             truncation_policy: model_info.truncation_policy.into(),
@@ -2343,6 +2717,7 @@ impl Session {
             turn_metadata_state,
             turn_skills: TurnSkillsContext::new(skills_outcome),
             turn_timing_state: Arc::new(TurnTimingState::default()),
+            emit_model_switch_instructions_update: false,
         }
     }
 
@@ -2665,6 +3040,84 @@ impl Session {
                 }
             };
         session_configuration.thread_name = thread_name.clone();
+        if matches!(&initial_history, InitialHistory::Resumed(_))
+            && let Some(thread_name) = thread_name.as_deref()
+        {
+            match take_model_switch_base_rebase_queue_entry(&config.codex_home, thread_name).await {
+                Ok(Some(queued_entry)) => {
+                    if session_configuration
+                        .original_config_do_not_use
+                        .base_instructions
+                        .is_some()
+                    {
+                        debug!(
+                            thread_name,
+                            "skipping queued model switch rebase on resume due to explicit base_instructions override"
+                        );
+                        if let Err(err) = consume_model_switch_base_rebase_queue_entry(
+                            &config.codex_home,
+                            &queued_entry,
+                        )
+                        .await
+                        {
+                            return Err(anyhow::anyhow!(
+                                "failed to consume queued model switch base rebase entry after explicit override for thread {thread_name}: {err}"
+                            ));
+                        }
+                    } else {
+                        if config.ephemeral {
+                            session_configuration.base_instructions =
+                                queued_entry.base_instructions.clone();
+                        } else {
+                            let Some(rollout_path) = rollout_path.as_deref() else {
+                                return Err(anyhow::anyhow!(
+                                    "queued model switch rebase has no rollout path to update for thread {thread_name}"
+                                ));
+                            };
+                            match rewrite_rollout_session_meta_base_instructions(
+                                rollout_path,
+                                &queued_entry.base_instructions,
+                            )
+                            .await
+                            {
+                                Ok(true) => {
+                                    session_configuration.base_instructions =
+                                        queued_entry.base_instructions.clone();
+                                }
+                                Ok(false) => {
+                                    return Err(anyhow::anyhow!(
+                                        "queued model switch rebase could not find session_meta in rollout {}",
+                                        rollout_path.display()
+                                    ));
+                                }
+                                Err(err) => {
+                                    return Err(anyhow::anyhow!(
+                                        "failed to apply queued model switch rebase to rollout {}: {err}",
+                                        rollout_path.display()
+                                    ));
+                                }
+                            };
+                        }
+                        if let Err(err) = consume_model_switch_base_rebase_queue_entry(
+                            &config.codex_home,
+                            &queued_entry,
+                        )
+                        .await
+                        {
+                            return Err(anyhow::anyhow!(
+                                "failed to consume queued model switch base rebase entry after rollout rewrite for thread {thread_name}: {err}"
+                            ));
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    return Err(anyhow::anyhow!(
+                        "failed to read queued model switch base rebase entry on resume for thread {thread_name}: {err}"
+                    ));
+                }
+            }
+        }
         let state = SessionState::new(session_configuration.clone());
         let managed_network_requirements_enabled = config.managed_network_requirements_enabled();
         let network_approval = Arc::new(NetworkApprovalService::default());
@@ -3602,14 +4055,49 @@ impl Session {
         &self,
         updates: SessionSettingsUpdate,
     ) -> ConstraintResult<()> {
+        let model_catalog_snapshot = if updates.collaboration_mode.is_some() {
+            Some(self.services.models_manager.model_catalog_snapshot().await)
+        } else {
+            None
+        };
         let mut state = self.state.lock().await;
 
         match state.session_configuration.apply(&updates) {
-            Ok(updated) => {
-                let previous_cwd = state.session_configuration.cwd.clone();
+            Ok(mut updated) => {
+                let previous_configuration = state.session_configuration.clone();
+                self.maybe_rebase_base_instructions_for_explicit_model_switch(
+                    &previous_configuration,
+                    &mut updated,
+                    &updates,
+                    model_catalog_snapshot.as_deref(),
+                );
+                let queued_model_switch_base_rebase = queued_model_switch_base_rebase_payload(
+                    &previous_configuration,
+                    &updated,
+                    &updates,
+                );
+                let previous_cwd = previous_configuration.cwd.clone();
                 let next_cwd = updated.cwd.clone();
                 let codex_home = updated.codex_home.clone();
                 let session_source = updated.session_source.clone();
+                if let Some((codex_home, thread_name, base_instructions)) =
+                    queued_model_switch_base_rebase
+                    && let Err(err) = append_model_switch_base_rebase_queue_entry(
+                        &codex_home,
+                        &thread_name,
+                        &base_instructions,
+                    )
+                    .await
+                {
+                    warn!(
+                        error = %err,
+                        thread_name,
+                        "failed to enqueue model switch base rebase after settings update"
+                    );
+                    return Err(crate::config::ConstraintError::empty_field(format!(
+                        "model switch base rebase queue persist failed: {err}"
+                    )));
+                }
                 state.session_configuration = updated;
                 drop(state);
 
@@ -3634,17 +4122,61 @@ impl Session {
         sub_id: String,
         updates: SessionSettingsUpdate,
     ) -> ConstraintResult<Arc<TurnContext>> {
+        let model_catalog_snapshot = if updates.collaboration_mode.is_some() {
+            Some(self.services.models_manager.model_catalog_snapshot().await)
+        } else {
+            None
+        };
         let (
             session_configuration,
             sandbox_policy_changed,
             previous_cwd,
             codex_home,
             session_source,
+            explicit_model_switch_update,
         ) = {
             let mut state = self.state.lock().await;
             match state.session_configuration.clone().apply(&updates) {
-                Ok(next) => {
-                    let previous_cwd = state.session_configuration.cwd.clone();
+                Ok(mut next) => {
+                    let previous_configuration = state.session_configuration.clone();
+                    let explicit_model_switch_update = updates.collaboration_mode.is_some()
+                        && previous_configuration.collaboration_mode.model()
+                            != next.collaboration_mode.model();
+                    self.maybe_rebase_base_instructions_for_explicit_model_switch(
+                        &previous_configuration,
+                        &mut next,
+                        &updates,
+                        model_catalog_snapshot.as_deref(),
+                    );
+                    let queued_model_switch_base_rebase = queued_model_switch_base_rebase_payload(
+                        &previous_configuration,
+                        &next,
+                        &updates,
+                    );
+                    if let Some((codex_home, thread_name, base_instructions)) =
+                        queued_model_switch_base_rebase
+                        && let Err(err) = append_model_switch_base_rebase_queue_entry(
+                            &codex_home,
+                            &thread_name,
+                            &base_instructions,
+                        )
+                        .await
+                    {
+                        let err = crate::config::ConstraintError::empty_field(format!(
+                            "model switch base rebase queue persist failed: {err}"
+                        ));
+                        drop(state);
+                        self.send_event_raw(Event {
+                            id: sub_id.clone(),
+                            msg: EventMsg::Error(ErrorEvent {
+                                message: err.to_string(),
+                                codex_error_info: Some(CodexErrorInfo::BadRequest),
+                            }),
+                        })
+                        .await;
+                        return Err(err);
+                    }
+                    let previous_cwd = previous_configuration.cwd.clone();
                     let sandbox_policy_changed =
                         state.session_configuration.sandbox_policy != next.sandbox_policy;
                     let codex_home = next.codex_home.clone();
@@ -3656,6 +4188,7 @@ impl Session {
                         previous_cwd,
                         codex_home,
                         session_source,
+                        explicit_model_switch_update,
                     )
                 }
                 Err(err) => {
@@ -3679,13 +4212,13 @@ impl Session {
             &codex_home,
             &session_source,
         );
-
         Ok(self
             .new_turn_from_configuration(
                 sub_id,
                 session_configuration,
                 updates.final_output_json_schema,
                 sandbox_policy_changed,
+                explicit_model_switch_update,
             )
             .await)
     }
@@ -3965,10 +4498,28 @@ impl Session {
         session_configuration: SessionConfiguration,
         final_output_json_schema: Option<Option<Value>>,
         sandbox_policy_changed: bool,
+        explicit_model_switch_update: bool,
     ) -> Arc<TurnContext> {
+        let requested_model = session_configuration.collaboration_mode.model().to_string();
+        let model_fallback = session_configuration.nero_model_fallback.clone();
+        let previous_turn_settings = self.previous_turn_settings().await;
         let session_configuration = self
             .apply_model_fallback_pre_turn(session_configuration)
             .await;
+        let effective_model = session_configuration.collaboration_mode.model();
+        let fallback_selected = effective_model != requested_model;
+        let fallback_recovery = !explicit_model_switch_update
+            && !fallback_selected
+            && model_fallback.as_ref().is_some_and(|model_fallback| {
+                previous_turn_settings.as_ref().is_some_and(|previous| {
+                    previous.model != effective_model
+                        && model_fallback
+                            .ladder
+                            .iter()
+                            .any(|step| step.model == previous.model)
+                })
+            });
+        let emit_model_switch_instructions_update = fallback_selected || fallback_recovery;
         let per_turn_config = Self::build_per_turn_config(&session_configuration);
         self.services
             .mcp_connection_manager
@@ -4035,6 +4586,7 @@ impl Session {
             Arc::clone(&self.js_repl),
             skills_outcome,
         );
+        turn_context.emit_model_switch_instructions_update = emit_model_switch_instructions_update;
         turn_context.realtime_active = self.conversation.running_state().await.is_some();
 
         if let Some(final_schema) = final_output_json_schema {
@@ -4145,6 +4697,7 @@ impl Session {
             session_configuration,
             /*final_output_json_schema*/ None,
             /*sandbox_policy_changed*/ false,
+            /*explicit_model_switch_update*/ false,
         )
         .await
     }
@@ -5271,7 +5824,8 @@ impl Session {
     /// When the reference snapshot is missing, this injects full initial context. Otherwise, it
     /// emits only settings diff items.
     ///
-    /// If full context is injected and a model switch occurred, this prepends the
+    /// If full context is injected and the turn still requires additive model guidance
+    /// (for example, a fallback-only per-turn model change), this prepends the
     /// `<model_switch>` developer message so model-specific instructions are not lost.
     ///
     /// This is the normal runtime path that establishes a new `reference_context_item`.
@@ -7972,7 +8526,7 @@ async fn spawn_review_thread(
         shell_environment_policy: parent_turn_context.shell_environment_policy.clone(),
         cwd: parent_turn_context.cwd.clone(),
         final_output_json_schema: None,
-        codex_self_exe: parent_turn_context.codex_self_exe.clone(),
+        self_exec_paths: parent_turn_context.self_exec_paths.clone(),
         codex_linux_sandbox_exe: parent_turn_context.codex_linux_sandbox_exe.clone(),
         tool_call_gate: Arc::new(ReadinessFlag::new()),
         js_repl: Arc::clone(&sess.js_repl),
@@ -7981,6 +8535,7 @@ async fn spawn_review_thread(
         turn_metadata_state,
         turn_skills: TurnSkillsContext::new(parent_turn_context.turn_skills.outcome.clone()),
         turn_timing_state: Arc::new(TurnTimingState::default()),
+        emit_model_switch_instructions_update: false,
     };
 
     // Seed the child task with the review prompt as the initial user message.
@@ -8090,11 +8645,18 @@ pub(crate) async fn run_turn(
         collaboration_mode_kind: turn_context.collaboration_mode.mode,
     });
     sess.send_event(&turn_context, event).await;
+
+    // `ModelClientSession` is turn-scoped and caches WebSocket + sticky routing state, so we reuse
+    // one instance across pre-sampling compaction and retries within this turn.
+    let mut client_session =
+        prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
+    client_session.reset_usage_limit_recovery_budget();
+
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
     // new user message are recorded. Estimate pending incoming items (context
     // diffs/full reinjection + user input) and trigger compaction preemptively
     // when they would push the thread over the compaction threshold.
-    if run_pre_sampling_compact(&sess, &turn_context)
+    if run_pre_sampling_compact(&sess, &turn_context, &mut client_session)
         .await
         .is_err()
     {
@@ -8309,11 +8871,6 @@ pub(crate) async fn run_turn(
         None
     };
 
-    // `ModelClientSession` is turn-scoped and caches WebSocket + sticky routing state, so we reuse
-    // one instance across retries within this turn.
-    let mut client_session =
-        prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
-
     loop {
         if run_pending_session_start_hooks(&sess, &turn_context).await {
             break;
@@ -8448,6 +9005,7 @@ pub(crate) async fn run_turn(
                         &sess,
                         &turn_context,
                         InitialContextInjection::BeforeLastUserMessage,
+                        &mut client_session,
                     )
                     .await
                     .is_err()
@@ -9351,7 +9909,9 @@ pub(crate) async fn run_turn(
                             turn_context = next_turn_context;
                             pending_fallback_success_step =
                                 Some((from_model, step, resolved_effort, e.to_string()));
-                            client_session = sess.services.model_client.new_session();
+                            // Model fallback needs a fresh transport, but it must not reopen the
+                            // turn-scoped quota/usage recovery budget.
+                            client_session.reset_websocket_session();
                             continue;
                         }
                         Ok(ModelFallbackAfterErrorOutcome::Exhausted) => {
@@ -9423,12 +9983,14 @@ pub(crate) async fn run_turn(
 async fn run_pre_sampling_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
+    client_session: &mut ModelClientSession,
 ) -> CodexResult<()> {
     let total_usage_tokens_before_compaction = sess.get_total_token_usage().await;
     maybe_run_previous_model_inline_compact(
         sess,
         turn_context,
         total_usage_tokens_before_compaction,
+        client_session,
     )
     .await?;
     let total_usage_tokens = sess.get_total_token_usage().await;
@@ -9438,7 +10000,13 @@ async fn run_pre_sampling_compact(
         .unwrap_or(i64::MAX);
     // Compact if the total usage tokens are greater than the auto compact limit
     if total_usage_tokens >= auto_compact_limit {
-        run_auto_compact(sess, turn_context, InitialContextInjection::DoNotInject).await?;
+        run_auto_compact(
+            sess,
+            turn_context,
+            InitialContextInjection::DoNotInject,
+            client_session,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -9453,6 +10021,7 @@ async fn maybe_run_previous_model_inline_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     total_usage_tokens: i64,
+    client_session: &mut ModelClientSession,
 ) -> CodexResult<bool> {
     let Some(previous_turn_settings) = sess.previous_turn_settings().await else {
         return Ok(false);
@@ -9481,6 +10050,7 @@ async fn maybe_run_previous_model_inline_compact(
             sess,
             &previous_model_turn_context,
             InitialContextInjection::DoNotInject,
+            client_session,
         )
         .await?;
         return Ok(true);
@@ -9492,12 +10062,14 @@ async fn run_auto_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     initial_context_injection: InitialContextInjection,
+    client_session: &mut ModelClientSession,
 ) -> CodexResult<()> {
     if should_use_remote_compact_task(&turn_context.provider) {
         run_inline_remote_auto_compact_task(
             Arc::clone(sess),
             Arc::clone(turn_context),
             initial_context_injection,
+            client_session,
         )
         .await?;
     } else {
@@ -10548,8 +11120,6 @@ async fn try_run_sampling_request(
     );
     let plan_mode = turn_context.collaboration_mode.mode == ModeKind::Plan;
     let receiving_span = trace_span!("receiving_stream");
-    // Keep one bounded rotate/retry budget for the whole turn request, not per stream attempt.
-    client_session.reset_usage_limit_recovery_budget();
     'request: loop {
         let mut stream = client_session
             .stream(
@@ -12039,6 +12609,303 @@ mod tests {
 
         let history = sess.clone_history().await;
         assert_eq!(initial_context, history.raw_items());
+    }
+
+    #[tokio::test]
+    async fn append_model_switch_rebase_queue_errors_when_log_path_is_not_directory() {
+        let codex_home = tempfile::tempdir().expect("create temp dir");
+        let bogus_log_path = codex_home.path().join("log");
+        tokio::fs::write(&bogus_log_path, "not-a-directory")
+            .await
+            .expect("create bogus log path file");
+
+        let error = append_model_switch_base_rebase_queue_entry(
+            codex_home.path(),
+            "thread-name",
+            "base-instructions",
+        )
+        .await
+        .expect_err("expected append queue entry to fail when log path is a file");
+
+        assert!(
+            error.contains("acquire model switch rebase queue lock"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn take_model_switch_rebase_queue_errors_when_log_path_is_not_directory() {
+        let codex_home = tempfile::tempdir().expect("create temp dir");
+        let bogus_log_path = codex_home.path().join("log");
+        tokio::fs::write(&bogus_log_path, "not-a-directory")
+            .await
+            .expect("create bogus log path file");
+
+        let error = take_model_switch_base_rebase_queue_entry(codex_home.path(), "thread-name")
+            .await
+            .expect_err("expected take queue entry to fail when log path is a file");
+
+        assert!(
+            error.contains("acquire model switch rebase queue lock"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn consume_model_switch_rebase_queue_cleans_temp_file_on_rewrite_write_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let codex_home = tempfile::tempdir().expect("create temp dir");
+        let log_dir = codex_home.path().join("log");
+        tokio::fs::create_dir_all(&log_dir)
+            .await
+            .expect("create log dir");
+        let queue_path = log_dir.join(MODEL_SWITCH_BASE_REBASE_QUEUE_FILENAME);
+        let queue_payload = concat!(
+            "{\"thread_name\":\"target\",\"base_instructions\":\"old-base\"}\n",
+            "{\"thread_name\":\"retained\",\"base_instructions\":\"keep-base\"}\n"
+        );
+        tokio::fs::write(&queue_path, queue_payload)
+            .await
+            .expect("seed queue file");
+
+        let file_name = queue_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("queue file name");
+        let lock_path = queue_path.with_file_name(format!(".{file_name}.lock"));
+        tokio::fs::write(&lock_path, "lock")
+            .await
+            .expect("seed lock file");
+
+        std::fs::set_permissions(&log_dir, std::fs::Permissions::from_mode(0o555))
+            .expect("set log dir readonly");
+        let consumed_entry = take_model_switch_base_rebase_queue_entry(codex_home.path(), "target")
+            .await
+            .expect("peek should succeed")
+            .expect("expected target entry");
+        let result =
+            consume_model_switch_base_rebase_queue_entry(codex_home.path(), &consumed_entry).await;
+        std::fs::set_permissions(&log_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("restore log dir permissions");
+
+        let error = result.expect_err("expected rewrite write failure due readonly log dir");
+        assert!(
+            error.contains("write rewritten model switch rebase queue"),
+            "unexpected error: {error}"
+        );
+
+        let mut entries = tokio::fs::read_dir(&log_dir).await.expect("read log dir");
+        while let Some(entry) = entries.next_entry().await.expect("read dir entry") {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            assert!(
+                !name.contains(".rewrite-"),
+                "expected no leaked rewrite temp files, found: {name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn model_switch_rebase_queue_peek_does_not_consume_and_consume_removes_entry() {
+        let codex_home = tempfile::tempdir().expect("create temp dir");
+        let log_dir = codex_home.path().join("log");
+        tokio::fs::create_dir_all(&log_dir)
+            .await
+            .expect("create log dir");
+        let queue_path = log_dir.join(MODEL_SWITCH_BASE_REBASE_QUEUE_FILENAME);
+        let queue_payload = concat!(
+            "{\"thread_name\":\"target\",\"base_instructions\":\"old-base\"}\n",
+            "{\"thread_name\":\"retained\",\"base_instructions\":\"keep-base\"}\n"
+        );
+        tokio::fs::write(&queue_path, queue_payload)
+            .await
+            .expect("seed queue file");
+
+        let peeked = take_model_switch_base_rebase_queue_entry(codex_home.path(), "target")
+            .await
+            .expect("peek should succeed");
+        assert_eq!(
+            peeked
+                .as_ref()
+                .map(|entry| entry.base_instructions.as_str()),
+            Some("old-base")
+        );
+        let queue_after_peek = tokio::fs::read_to_string(&queue_path)
+            .await
+            .expect("queue should still exist after peek");
+        assert!(
+            queue_after_peek.contains("\"thread_name\":\"target\""),
+            "peek must not consume queue entry"
+        );
+
+        consume_model_switch_base_rebase_queue_entry(
+            codex_home.path(),
+            peeked.as_ref().expect("target entry"),
+        )
+        .await
+        .expect("consume should succeed");
+        let queue_after_consume = tokio::fs::read_to_string(&queue_path)
+            .await
+            .expect("queue should still exist with retained entry");
+        assert!(
+            !queue_after_consume.contains("\"thread_name\":\"target\""),
+            "consume must remove matching entry"
+        );
+        assert!(
+            queue_after_consume.contains("\"thread_name\":\"retained\""),
+            "consume must keep non-matching entries"
+        );
+    }
+
+    #[tokio::test]
+    async fn consume_model_switch_rebase_queue_keeps_newer_same_thread_entries() {
+        let codex_home = tempfile::tempdir().expect("create temp dir");
+        let log_dir = codex_home.path().join("log");
+        tokio::fs::create_dir_all(&log_dir)
+            .await
+            .expect("create log dir");
+        let queue_path = log_dir.join(MODEL_SWITCH_BASE_REBASE_QUEUE_FILENAME);
+        let queue_payload = "{\"thread_name\":\"target\",\"base_instructions\":\"old-base\",\"ts\":\"2026-01-01T00:00:00Z\"}\n";
+        tokio::fs::write(&queue_path, queue_payload)
+            .await
+            .expect("seed queue file");
+
+        let old_entry = take_model_switch_base_rebase_queue_entry(codex_home.path(), "target")
+            .await
+            .expect("peek should succeed")
+            .expect("expected target entry");
+        append_model_switch_base_rebase_queue_entry(codex_home.path(), "target", "new-base")
+            .await
+            .expect("append newer entry");
+
+        consume_model_switch_base_rebase_queue_entry(codex_home.path(), &old_entry)
+            .await
+            .expect("consume old entry");
+
+        let latest = take_model_switch_base_rebase_queue_entry(codex_home.path(), "target")
+            .await
+            .expect("peek latest should succeed");
+        assert_eq!(
+            latest
+                .as_ref()
+                .map(|entry| entry.base_instructions.as_str()),
+            Some("new-base")
+        );
+    }
+
+    #[tokio::test]
+    async fn consume_model_switch_rebase_queue_errors_when_entry_missing() {
+        let codex_home = tempfile::tempdir().expect("create temp dir");
+        let log_dir = codex_home.path().join("log");
+        tokio::fs::create_dir_all(&log_dir)
+            .await
+            .expect("create log dir");
+        let queue_path = log_dir.join(MODEL_SWITCH_BASE_REBASE_QUEUE_FILENAME);
+        let queue_payload = "{\"thread_name\":\"target\",\"base_instructions\":\"old-base\",\"ts\":\"2026-01-01T00:00:00Z\"}\n";
+        tokio::fs::write(&queue_path, queue_payload)
+            .await
+            .expect("seed queue file");
+
+        let entry = take_model_switch_base_rebase_queue_entry(codex_home.path(), "target")
+            .await
+            .expect("peek should succeed")
+            .expect("target entry should exist");
+
+        tokio::fs::write(
+            &queue_path,
+            "{\"thread_name\":\"target\",\"base_instructions\":\"new-base\",\"ts\":\"2026-01-01T00:00:01Z\"}\n",
+        )
+        .await
+        .expect("replace queue contents");
+
+        let error = consume_model_switch_base_rebase_queue_entry(codex_home.path(), &entry)
+            .await
+            .expect_err("consume should fail when queued entry no longer exists");
+        assert!(
+            error.contains("consume model switch rebase queue entry not found"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_settings_fails_when_model_switch_rebase_queue_persist_fails() {
+        let (session, previous_context) = make_session_and_context().await;
+        let next_model = if previous_context.model_info.slug == "gpt-5.1" {
+            "gpt-5"
+        } else {
+            "gpt-5.1"
+        };
+        let next_context = previous_context
+            .with_model(next_model.to_string(), &session.services.models_manager)
+            .await;
+        let mut state = session.state.lock().await;
+        state.session_configuration.thread_name = Some("queue-fail-thread".to_string());
+        let codex_home = state.session_configuration.codex_home.clone();
+        drop(state);
+
+        tokio::fs::create_dir_all(&codex_home)
+            .await
+            .expect("create codex home");
+        tokio::fs::write(codex_home.join("log"), "not-a-directory")
+            .await
+            .expect("create bogus log path file");
+
+        let error = session
+            .update_settings(SessionSettingsUpdate {
+                collaboration_mode: Some(next_context.collaboration_mode.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect_err("expected update_settings to fail when queue persist fails");
+        assert!(
+            error
+                .to_string()
+                .contains("model switch base rebase queue persist failed"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_turn_with_sub_id_fails_when_model_switch_rebase_queue_persist_fails() {
+        let (session, previous_context) = make_session_and_context().await;
+        let next_model = if previous_context.model_info.slug == "gpt-5.1" {
+            "gpt-5"
+        } else {
+            "gpt-5.1"
+        };
+        let next_context = previous_context
+            .with_model(next_model.to_string(), &session.services.models_manager)
+            .await;
+        let mut state = session.state.lock().await;
+        state.session_configuration.thread_name = Some("queue-fail-thread".to_string());
+        let codex_home = state.session_configuration.codex_home.clone();
+        drop(state);
+
+        tokio::fs::create_dir_all(&codex_home)
+            .await
+            .expect("create codex home");
+        tokio::fs::write(codex_home.join("log"), "not-a-directory")
+            .await
+            .expect("create bogus log path file");
+
+        let error = session
+            .new_turn_with_sub_id(
+                "queue-persist-fail-sub".to_string(),
+                SessionSettingsUpdate {
+                    collaboration_mode: Some(next_context.collaboration_mode.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("expected new_turn_with_sub_id to fail when queue persist fails");
+        assert!(
+            error
+                .to_string()
+                .contains("model switch base rebase queue persist failed"),
+            "unexpected error: {error}"
+        );
     }
 
     #[tokio::test]
@@ -13934,8 +14801,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_initial_context_prepends_model_switch_message() {
-        let (session, turn_context) = make_session_and_context().await;
+    async fn build_initial_context_prepends_model_switch_message_for_additive_turns() {
+        let (session, previous_context) = make_session_and_context().await;
+        let turn_context = previous_context
+            .with_model("gpt-5".to_string(), &session.services.models_manager)
+            .await;
         let previous_turn_settings = PreviousTurnSettings {
             model: "previous-regular-model".to_string(),
             realtime_active: None,
@@ -13954,6 +14824,41 @@ mod tests {
             panic!("expected developer text");
         };
         assert!(text.contains("<model_switch>"));
+    }
+
+    #[tokio::test]
+    async fn fallback_recovery_enables_model_switch_message() {
+        let (session, _turn_context) = make_session_and_context().await;
+        let fallback_model = "fallback-recovery-model".to_string();
+        let previous_turn_settings = PreviousTurnSettings {
+            model: fallback_model.clone(),
+            realtime_active: None,
+        };
+        {
+            let mut state = session.state.lock().await;
+            state.session_configuration.nero_model_fallback =
+                Some(crate::config::NeroModelFallbackConfig {
+                    cooldown_seconds: 60,
+                    max_wait_seconds: 0,
+                    sticky: false,
+                    ladder: vec![crate::config::NeroModelFallbackStep {
+                        model: fallback_model,
+                        reasoning_effort: codex_protocol::openai_models::ReasoningEffort::Medium,
+                    }],
+                });
+            state.set_previous_turn_settings(Some(previous_turn_settings.clone()));
+        }
+
+        let turn_context = session
+            .new_default_turn_with_sub_id("fallback-recovery".to_string())
+            .await;
+
+        let model_switch = crate::context_manager::updates::build_model_instructions_update_item(
+            Some(&previous_turn_settings),
+            &turn_context,
+        )
+        .expect("fallback recovery should emit model switch instructions");
+        assert!(model_switch.into_text().contains("<model_switch>"));
     }
 
     #[tokio::test]

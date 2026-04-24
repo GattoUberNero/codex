@@ -97,6 +97,64 @@ fn map_api_error_does_not_fallback_limit_name_to_limit_id() {
 }
 
 #[test]
+fn map_api_error_maps_insufficient_quota_429_to_quota_exceeded() {
+    let body = serde_json::json!({
+        "error": {
+            "code": "insufficient_quota",
+            "message": "quota exceeded during remote compact",
+        }
+    })
+    .to_string();
+    let err = map_api_error(ApiError::Transport(TransportError::Http {
+        status: http::StatusCode::TOO_MANY_REQUESTS,
+        url: Some("http://example.com/v1/responses/compact".to_string()),
+        headers: None,
+        body: Some(body),
+    }));
+
+    assert!(matches!(err, CodexErr::QuotaExceeded));
+}
+
+#[test]
+fn map_api_error_maps_usage_limit_code_429_to_usage_limit_reached() {
+    let body = serde_json::json!({
+        "error": {
+            "code": "usage_limit_reached",
+            "message": "usage limit reached during remote compact",
+            "plan_type": "plus",
+        }
+    })
+    .to_string();
+    let err = map_api_error(ApiError::Transport(TransportError::Http {
+        status: http::StatusCode::TOO_MANY_REQUESTS,
+        url: Some("http://example.com/v1/responses/compact".to_string()),
+        headers: None,
+        body: Some(body),
+    }));
+
+    assert!(matches!(err, CodexErr::UsageLimitReached(_)));
+}
+
+#[test]
+fn map_api_error_maps_insufficient_quota_type_429_to_quota_exceeded() {
+    let body = serde_json::json!({
+        "error": {
+            "type": "insufficient_quota",
+            "message": "quota exhausted during remote compact",
+        }
+    })
+    .to_string();
+    let err = map_api_error(ApiError::Transport(TransportError::Http {
+        status: http::StatusCode::TOO_MANY_REQUESTS,
+        url: Some("http://example.com/v1/responses/compact".to_string()),
+        headers: None,
+        body: Some(body),
+    }));
+
+    assert!(matches!(err, CodexErr::QuotaExceeded));
+}
+
+#[test]
 fn map_api_error_extracts_identity_auth_details_from_headers() {
     let mut headers = HeaderMap::new();
     headers.insert(REQUEST_ID_HEADER, http::HeaderValue::from_static("req-401"));

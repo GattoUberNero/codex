@@ -70,7 +70,7 @@ pub(crate) fn map_api_error(err: ApiError) -> CodexErr {
                     CodexErr::InternalServerError
                 } else if status == http::StatusCode::TOO_MANY_REQUESTS {
                     if let Ok(err) = serde_json::from_str::<UsageErrorResponse>(&body_text) {
-                        if err.error.error_type.as_deref() == Some("usage_limit_reached") {
+                        if err.error.matches_type_or_code("usage_limit_reached") {
                             let limit_id = extract_header(headers.as_ref(), ACTIVE_LIMIT_HEADER);
                             let rate_limits = headers.as_ref().and_then(|map| {
                                 parse_rate_limit_for_limit(map, limit_id.as_deref())
@@ -86,8 +86,10 @@ pub(crate) fn map_api_error(err: ApiError) -> CodexErr {
                                 rate_limits: rate_limits.map(Box::new),
                                 promo_message,
                             });
-                        } else if err.error.error_type.as_deref() == Some("usage_not_included") {
+                        } else if err.error.matches_type_or_code("usage_not_included") {
                             return CodexErr::UsageNotIncluded;
+                        } else if err.error.matches_type_or_code("insufficient_quota") {
+                            return CodexErr::QuotaExceeded;
                         }
                     }
 
@@ -205,8 +207,16 @@ struct UsageErrorResponse {
 struct UsageErrorBody {
     #[serde(rename = "type")]
     error_type: Option<String>,
+    #[serde(rename = "code")]
+    error_code: Option<String>,
     plan_type: Option<PlanType>,
     resets_at: Option<i64>,
+}
+
+impl UsageErrorBody {
+    fn matches_type_or_code(&self, value: &str) -> bool {
+        self.error_type.as_deref() == Some(value) || self.error_code.as_deref() == Some(value)
+    }
 }
 
 #[derive(Clone, Default)]

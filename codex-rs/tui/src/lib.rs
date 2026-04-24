@@ -739,6 +739,7 @@ pub async fn run_main(
 
     let additional_dirs = cli.add_dir.clone();
 
+    let executable_paths = arg0_paths.runtime_executable_paths();
     let overrides = ConfigOverrides {
         model,
         approval_policy,
@@ -746,9 +747,9 @@ pub async fn run_main(
         cwd,
         model_provider: model_provider_override.clone(),
         config_profile: cli.config_profile.clone(),
-        codex_self_exe: arg0_paths.codex_self_exe.clone(),
-        codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe.clone(),
-        main_execve_wrapper_exe: arg0_paths.main_execve_wrapper_exe.clone(),
+        self_exec_paths: executable_paths.self_exec_paths,
+        codex_linux_sandbox_exe: executable_paths.codex_linux_sandbox_exe,
+        main_execve_wrapper_exe: executable_paths.main_execve_wrapper_exe,
         show_raw_agent_reasoning: cli.oss.then_some(true),
         additional_writable_roots: additional_dirs,
         ..Default::default()

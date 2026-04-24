@@ -1542,6 +1542,7 @@ dependencies = [
  "anyhow",
  "codex-apply-patch",
  "codex-linux-sandbox",
+ "codex-nero-self-exec",
  "codex-sandboxing",
  "codex-shell-escalation",
  "codex-utils-home-dir",
@@ -1834,6 +1835,7 @@ dependencies = [
  "codex-instructions",
  "codex-login",
  "codex-nero-file-reader",
+ "codex-nero-self-exec",
  "codex-network-proxy",
  "codex-otel",
  "codex-plugin",
@@ -2301,6 +2303,14 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "codex-nero-self-exec"
+version = "0.118.0"
+dependencies = [
+ "pretty_assertions",
+ "tempfile",
 ]
 
 [[package]]

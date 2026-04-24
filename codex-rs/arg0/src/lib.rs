@@ -4,6 +4,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use codex_apply_patch::CODEX_CORE_APPLY_PATCH_ARG1;
+use codex_nero_self_exec::SelfExecPaths;
 use codex_sandboxing::landlock::CODEX_LINUX_SANDBOX_ARG0;
 use codex_utils_home_dir::find_codex_home;
 #[cfg(unix)]
@@ -16,15 +17,23 @@ const MISSPELLED_APPLY_PATCH_ARG0: &str = "applypatch";
 const EXECVE_WRAPPER_ARG0: &str = "codex-execve-wrapper";
 const LOCK_FILENAME: &str = ".lock";
 const TOKIO_WORKER_STACK_SIZE_BYTES: usize = 16 * 1024 * 1024;
+const CODEXNX_SELF_BIN_PRIMARY_ENV: &str = "CODEXNX_SELF_BIN_PRIMARY";
+const CODEXNX_SELF_BIN_FALLBACK_ENV: &str = "CODEXNX_SELF_BIN_FALLBACK";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Arg0DispatchPaths {
-    /// Stable path to the current Codex executable for child re-execs.
+    /// Launcher/runtime-provided primary/fallback paths for child self-execs.
     ///
-    /// Prefer this over [`std::env::current_exe()`] in code that may run under
-    /// a test harness, where `current_exe()` can point at the harness binary
-    /// instead of the real Codex CLI.
-    pub codex_self_exe: Option<PathBuf>,
+    /// `current_exe()` remains a compatibility fallback inside the resolver, but
+    /// should not be the only source of truth in live dev workflows.
+    pub self_exec_paths: SelfExecPaths,
+    pub codex_linux_sandbox_exe: Option<PathBuf>,
+    pub main_execve_wrapper_exe: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RuntimeExecutablePaths {
+    pub self_exec_paths: SelfExecPaths,
     pub codex_linux_sandbox_exe: Option<PathBuf>,
     pub main_execve_wrapper_exe: Option<PathBuf>,
 }
@@ -47,6 +56,16 @@ impl Arg0PathEntryGuard {
 
     pub fn paths(&self) -> &Arg0DispatchPaths {
         &self.paths
+    }
+}
+
+impl Arg0DispatchPaths {
+    pub fn runtime_executable_paths(&self) -> RuntimeExecutablePaths {
+        RuntimeExecutablePaths {
+            self_exec_paths: self.self_exec_paths.clone(),
+            codex_linux_sandbox_exe: self.codex_linux_sandbox_exe.clone(),
+            main_execve_wrapper_exe: self.main_execve_wrapper_exe.clone(),
+        }
     }
 }
 
@@ -166,7 +185,7 @@ where
     runtime.block_on(async move {
         let current_exe = std::env::current_exe().ok();
         let paths = Arg0DispatchPaths {
-            codex_self_exe: current_exe.clone(),
+            self_exec_paths: configured_self_exec_paths(),
             codex_linux_sandbox_exe: if cfg!(target_os = "linux") {
                 linux_sandbox_exe_path(path_entry_guard.as_ref(), current_exe)
             } else {
@@ -179,6 +198,31 @@ where
 
         main_fn(paths).await
     })
+}
+
+fn self_exec_paths_from_env_values(
+    primary: Option<std::ffi::OsString>,
+    fallback: Option<std::ffi::OsString>,
+) -> SelfExecPaths {
+    fn parse(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+        let value = value?;
+        if value.to_string_lossy().trim().is_empty() {
+            return None;
+        }
+        Some(PathBuf::from(value))
+    }
+
+    SelfExecPaths {
+        primary: parse(primary),
+        fallback: parse(fallback),
+    }
+}
+
+fn configured_self_exec_paths() -> SelfExecPaths {
+    self_exec_paths_from_env_values(
+        std::env::var_os(CODEXNX_SELF_BIN_PRIMARY_ENV),
+        std::env::var_os(CODEXNX_SELF_BIN_FALLBACK_ENV),
+    )
 }
 
 fn linux_sandbox_exe_path(
@@ -205,7 +249,8 @@ const ILLEGAL_ENV_VAR_PREFIX: &str = "CODEX_";
 /// Load env vars from ~/.codex/.env.
 ///
 /// Security: Do not allow `.env` files to create or modify any variables
-/// with names starting with `CODEX_`.
+/// with names starting with `CODEX_`. Launcher-provided self-exec paths also
+/// win over `.env`, so live dev sessions cannot be silently redirected.
 fn load_dotenv() {
     if let Ok(codex_home) = find_codex_home()
         && let Ok(iter) = dotenvy::from_path_iter(codex_home.join(".env"))
@@ -214,17 +259,41 @@ fn load_dotenv() {
     }
 }
 
-/// Helper to set vars from a dotenvy iterator while filtering out `CODEX_` keys.
+/// Helper to set vars from a dotenvy iterator while filtering out protected keys.
 fn set_filtered<I>(iter: I)
 where
     I: IntoIterator<Item = Result<(String, String), dotenvy::Error>>,
 {
     for (key, value) in iter.into_iter().flatten() {
-        if !key.to_ascii_uppercase().starts_with(ILLEGAL_ENV_VAR_PREFIX) {
+        if should_set_dotenv_key(&key) {
             // It is safe to call set_var() because our process is
             // single-threaded at this point in its execution.
             unsafe { std::env::set_var(&key, &value) };
         }
+    }
+}
+
+fn should_set_dotenv_key(key: &str) -> bool {
+    should_set_dotenv_key_with_existing(
+        key,
+        std::env::var_os(CODEXNX_SELF_BIN_PRIMARY_ENV).is_some(),
+        std::env::var_os(CODEXNX_SELF_BIN_FALLBACK_ENV).is_some(),
+    )
+}
+
+fn should_set_dotenv_key_with_existing(
+    key: &str,
+    primary_exists: bool,
+    fallback_exists: bool,
+) -> bool {
+    let upper = key.to_ascii_uppercase();
+    if upper.starts_with(ILLEGAL_ENV_VAR_PREFIX) {
+        return false;
+    }
+    match upper.as_str() {
+        CODEXNX_SELF_BIN_PRIMARY_ENV => !primary_exists,
+        CODEXNX_SELF_BIN_FALLBACK_ENV => !fallback_exists,
+        _ => true,
     }
 }
 
@@ -343,7 +412,7 @@ pub fn prepend_path_entry_for_codex_aliases() -> std::io::Result<Arg0PathEntryGu
     }
 
     let paths = Arg0DispatchPaths {
-        codex_self_exe: std::env::current_exe().ok(),
+        self_exec_paths: configured_self_exec_paths(),
         codex_linux_sandbox_exe: {
             #[cfg(target_os = "linux")]
             {
@@ -418,8 +487,10 @@ mod tests {
     use super::Arg0DispatchPaths;
     use super::Arg0PathEntryGuard;
     use super::LOCK_FILENAME;
+    use super::RuntimeExecutablePaths;
     use super::janitor_cleanup;
     use super::linux_sandbox_exe_path;
+    use codex_nero_self_exec::SelfExecPaths;
     use std::fs;
     use std::fs::File;
     use std::path::Path;
@@ -437,6 +508,74 @@ mod tests {
     }
 
     #[test]
+    fn self_exec_paths_from_env_values_ignores_blank_values() {
+        let paths = super::self_exec_paths_from_env_values(Some("   ".into()), Some("".into()));
+
+        assert_eq!(paths, SelfExecPaths::default());
+    }
+
+    #[test]
+    fn self_exec_paths_from_env_values_preserves_primary_and_fallback() {
+        let paths = super::self_exec_paths_from_env_values(
+            Some("/tmp/primary".into()),
+            Some("/tmp/fallback".into()),
+        );
+
+        assert_eq!(
+            paths,
+            SelfExecPaths {
+                primary: Some(PathBuf::from("/tmp/primary")),
+                fallback: Some(PathBuf::from("/tmp/fallback")),
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_executable_paths_clones_all_runtime_paths() {
+        let dispatch = Arg0DispatchPaths {
+            self_exec_paths: SelfExecPaths {
+                primary: Some(PathBuf::from("/tmp/primary")),
+                fallback: Some(PathBuf::from("/tmp/fallback")),
+            },
+            codex_linux_sandbox_exe: Some(PathBuf::from("/tmp/codex-linux-sandbox")),
+            main_execve_wrapper_exe: Some(PathBuf::from("/tmp/codex-execve-wrapper")),
+        };
+
+        assert_eq!(
+            dispatch.runtime_executable_paths(),
+            RuntimeExecutablePaths {
+                self_exec_paths: dispatch.self_exec_paths.clone(),
+                codex_linux_sandbox_exe: dispatch.codex_linux_sandbox_exe.clone(),
+                main_execve_wrapper_exe: dispatch.main_execve_wrapper_exe,
+            }
+        );
+    }
+
+    #[test]
+    fn dotenv_filter_preserves_existing_self_exec_paths() {
+        assert!(!super::should_set_dotenv_key_with_existing(
+            "CODEX_SANDBOX",
+            /*primary_exists*/ false,
+            /*fallback_exists*/ false,
+        ));
+        assert!(super::should_set_dotenv_key_with_existing(
+            "CODEXNX_SELF_BIN_PRIMARY",
+            /*primary_exists*/ false,
+            /*fallback_exists*/ true,
+        ));
+        assert!(!super::should_set_dotenv_key_with_existing(
+            "CODEXNX_SELF_BIN_PRIMARY",
+            /*primary_exists*/ true,
+            /*fallback_exists*/ false,
+        ));
+        assert!(!super::should_set_dotenv_key_with_existing(
+            "CODEXNX_SELF_BIN_FALLBACK",
+            /*primary_exists*/ false,
+            /*fallback_exists*/ true,
+        ));
+    }
+
+    #[test]
     fn linux_sandbox_exe_path_prefers_codex_linux_sandbox_alias() -> std::io::Result<()> {
         let temp_dir = TempDir::new()?;
         let lock_file = create_lock(temp_dir.path())?;
@@ -445,7 +584,10 @@ mod tests {
             temp_dir,
             lock_file,
             Arg0DispatchPaths {
-                codex_self_exe: Some(PathBuf::from("/usr/bin/codex")),
+                self_exec_paths: SelfExecPaths {
+                    primary: Some(PathBuf::from("/usr/bin/codex")),
+                    fallback: None,
+                },
                 codex_linux_sandbox_exe: Some(alias_path.clone()),
                 main_execve_wrapper_exe: None,
             },

@@ -92,7 +92,7 @@ fn apply_patch_responses(
 
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn apply_patch_cli_uses_codex_self_exe_with_linux_sandbox_helper_alias() -> Result<()> {
+async fn apply_patch_cli_uses_self_exec_primary_with_linux_sandbox_helper_alias() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let harness = apply_patch_harness().await?;

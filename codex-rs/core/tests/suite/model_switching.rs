@@ -102,8 +102,19 @@ fn test_model_info(
     }
 }
 
+const MODEL_SWITCH_INSTRUCTIONS_PREAMBLE: &str = "The user was previously using a different model. Please continue the conversation according to the following instructions:";
+
+fn assert_no_additive_model_switch_message(developer_texts: &[String], context: &str) {
+    assert!(
+        developer_texts.iter().all(|text| {
+            !text.contains("<model_switch>") && !text.contains(MODEL_SWITCH_INSTRUCTIONS_PREAMBLE)
+        }),
+        "{context}: {developer_texts:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn model_change_appends_model_instructions_developer_message() -> Result<()> {
+async fn model_change_rebases_base_instructions_without_developer_message() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = MockServer::start().await;
@@ -179,22 +190,31 @@ async fn model_change_appends_model_instructions_developer_message() -> Result<(
     let requests = resp_mock.requests();
     assert_eq!(requests.len(), 2, "expected two model requests");
 
+    let expected_instructions =
+        codex_core::test_support::construct_model_info_offline(next_model, &test.config)
+            .get_model_instructions(test.config.personality);
     let second_request = requests.last().expect("expected second request");
+    assert_eq!(
+        second_request.body_json()["model"].as_str(),
+        Some(next_model),
+        "expected switched model slug in follow-up request"
+    );
+    assert_eq!(
+        second_request.instructions_text(),
+        expected_instructions,
+        "expected explicit model switch to rebase request instructions"
+    );
     let developer_texts = second_request.message_input_texts("developer");
-    let model_switch_text = developer_texts
-        .iter()
-        .find(|text| text.contains("<model_switch>"))
-        .expect("expected model switch message in developer input");
-    assert!(
-        model_switch_text.contains("The user was previously using a different model."),
-        "expected model switch preamble, got: {model_switch_text:?}"
+    assert_no_additive_model_switch_message(
+        &developer_texts,
+        "did not expect model switch message after explicit rebase",
     );
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn model_and_personality_change_only_appends_model_instructions() -> Result<()> {
+async fn model_and_personality_change_rebases_without_extra_developer_messages() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -278,18 +298,353 @@ async fn model_and_personality_change_only_appends_model_instructions() -> Resul
     assert_eq!(requests.len(), 2, "expected two model requests");
 
     let second_request = requests.last().expect("expected second request");
+    let expected_instructions =
+        codex_core::test_support::construct_model_info_offline(next_model, &test.config)
+            .get_model_instructions(Some(Personality::Pragmatic));
+    assert_eq!(
+        second_request.body_json()["model"].as_str(),
+        Some(next_model),
+        "expected switched model slug in follow-up request"
+    );
+    assert_eq!(
+        second_request.instructions_text(),
+        expected_instructions,
+        "expected explicit switch with personality change to rebase instructions"
+    );
     let developer_texts = second_request.message_input_texts("developer");
-    assert!(
-        developer_texts
-            .iter()
-            .any(|text| text.contains("<model_switch>")),
-        "expected model switch message when model changes"
+    assert_no_additive_model_switch_message(
+        &developer_texts,
+        "did not expect model switch message when model changes via explicit rebase",
     );
     assert!(
         !developer_texts
             .iter()
             .any(|text| text.contains("<personality_spec>")),
         "did not expect personality update message when model changed in same turn"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_base_instructions_override_blocks_model_switch_rebase() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let resp_mock = mount_sse_sequence(
+        &server,
+        vec![sse_completed("resp-1"), sse_completed("resp-2")],
+    )
+    .await;
+
+    let override_instructions = "operator override instructions";
+    let test = test_codex()
+        .with_model("gpt-5.2-codex")
+        .with_config(|config| {
+            config.base_instructions = Some(override_instructions.to_string());
+        })
+        .build(&server)
+        .await?;
+
+    test.codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: test.cwd_path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: None,
+            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            model: test.session_configured.model.clone(),
+            effort: test.config.model_reasoning_effort,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await?;
+    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    test.codex
+        .submit(Op::OverrideTurnContext {
+            cwd: None,
+            approval_policy: None,
+            approvals_reviewer: None,
+            sandbox_policy: None,
+            windows_sandbox_level: None,
+            model: Some("gpt-5.1-codex-max".to_string()),
+            effort: None,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+            nero_auto_runtime: None,
+        })
+        .await?;
+
+    test.codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "switch models".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: test.cwd_path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: None,
+            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            model: "gpt-5.1-codex-max".to_string(),
+            effort: test.config.model_reasoning_effort,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await?;
+    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let requests = resp_mock.requests();
+    assert_eq!(requests.len(), 2, "expected two model requests");
+
+    let second_request = requests.last().expect("expected second request");
+    assert_eq!(
+        second_request.body_json()["model"].as_str(),
+        Some("gpt-5.1-codex-max"),
+        "expected switched model slug even when base instructions override is active"
+    );
+    assert_eq!(
+        second_request.instructions_text(),
+        override_instructions,
+        "expected explicit base instructions override to remain authoritative"
+    );
+    let developer_texts = second_request.message_input_texts("developer");
+    assert_no_additive_model_switch_message(
+        &developer_texts,
+        "did not expect model switch message when base instructions override is active",
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_switch_a_to_b_to_a_rebases_each_turn_without_additive_message() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let resp_mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse_completed("resp-1"),
+            sse_completed("resp-2"),
+            sse_completed("resp-3"),
+        ],
+    )
+    .await;
+
+    let base_model = "gpt-5.2-codex";
+    let switched_model = "gpt-5.1-codex-max";
+    let mut builder = test_codex().with_model(base_model);
+    let test = builder.build(&server).await?;
+
+    test.codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "start on A".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: test.cwd_path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: None,
+            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            model: base_model.to_string(),
+            effort: test.config.model_reasoning_effort,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await?;
+    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    test.codex
+        .submit(Op::OverrideTurnContext {
+            cwd: None,
+            approval_policy: None,
+            approvals_reviewer: None,
+            sandbox_policy: None,
+            windows_sandbox_level: None,
+            model: Some(switched_model.to_string()),
+            effort: None,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+            nero_auto_runtime: None,
+        })
+        .await?;
+    test.codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "switch to B".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: test.cwd_path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: None,
+            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            model: switched_model.to_string(),
+            effort: test.config.model_reasoning_effort,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await?;
+    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    test.codex
+        .submit(Op::OverrideTurnContext {
+            cwd: None,
+            approval_policy: None,
+            approvals_reviewer: None,
+            sandbox_policy: None,
+            windows_sandbox_level: None,
+            model: Some(base_model.to_string()),
+            effort: None,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+            nero_auto_runtime: None,
+        })
+        .await?;
+    test.codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "switch back to A".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: test.cwd_path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: None,
+            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            model: base_model.to_string(),
+            effort: test.config.model_reasoning_effort,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await?;
+    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let requests = resp_mock.requests();
+    assert_eq!(requests.len(), 3, "expected three model requests");
+
+    let expected_switched_instructions =
+        codex_core::test_support::construct_model_info_offline(switched_model, &test.config)
+            .get_model_instructions(test.config.personality);
+    assert_eq!(
+        requests[1].body_json()["model"].as_str(),
+        Some(switched_model),
+        "expected switched model slug for A->B turn"
+    );
+    assert_eq!(
+        requests[1].instructions_text(),
+        expected_switched_instructions
+    );
+    let switched_developer_texts = requests[1].message_input_texts("developer");
+    assert_no_additive_model_switch_message(
+        &switched_developer_texts,
+        "did not expect additive model-switch message while rebasing to B",
+    );
+
+    let expected_base_instructions =
+        codex_core::test_support::construct_model_info_offline(base_model, &test.config)
+            .get_model_instructions(test.config.personality);
+    assert_eq!(
+        requests[2].body_json()["model"].as_str(),
+        Some(base_model),
+        "expected base model slug for B->A turn"
+    );
+    assert_eq!(requests[2].instructions_text(), expected_base_instructions);
+    let base_developer_texts = requests[2].message_input_texts("developer");
+    assert_no_additive_model_switch_message(
+        &base_developer_texts,
+        "did not expect additive model-switch message while rebasing back to A",
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pre_first_turn_override_rebases_base_instructions_without_additive_message() -> Result<()>
+{
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let resp_mock = mount_sse_once(&server, sse_completed("resp-1")).await;
+    let mut builder = test_codex().with_model("gpt-5.2-codex");
+    let test = builder.build(&server).await?;
+    let next_model = "gpt-5.1-codex-max";
+
+    test.codex
+        .submit(Op::OverrideTurnContext {
+            cwd: None,
+            approval_policy: None,
+            approvals_reviewer: None,
+            sandbox_policy: None,
+            windows_sandbox_level: None,
+            model: Some(next_model.to_string()),
+            effort: None,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+            nero_auto_runtime: None,
+        })
+        .await?;
+
+    test.codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "first turn after override".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: test.cwd_path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: None,
+            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            model: next_model.to_string(),
+            effort: test.config.model_reasoning_effort,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await?;
+    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let request = resp_mock.single_request();
+    let expected_instructions =
+        codex_core::test_support::construct_model_info_offline(next_model, &test.config)
+            .get_model_instructions(test.config.personality);
+    assert_eq!(
+        request.body_json()["model"].as_str(),
+        Some(next_model),
+        "expected overridden model slug in first post-override turn"
+    );
+    assert_eq!(request.instructions_text(), expected_instructions);
+    let developer_texts = request.message_input_texts("developer");
+    assert_no_additive_model_switch_message(
+        &developer_texts,
+        "did not expect additive model-switch developer message on first turn after override",
     );
 
     Ok(())

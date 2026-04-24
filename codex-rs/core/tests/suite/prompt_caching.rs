@@ -748,10 +748,10 @@ async fn per_turn_overrides_keep_cached_prefix_and_key_constant() -> anyhow::Res
         Some("developer")
     );
     assert!(
-        request2.has_message_with_input_texts("developer", |texts| {
+        !request2.has_message_with_input_texts("developer", |texts| {
             texts.iter().any(|text| text.contains("<model_switch>"))
         }),
-        "expected model switch section after model override: {expected_settings_update_msg:?}"
+        "did not expect model switch section after explicit model override: {expected_settings_update_msg:?}"
     );
     let expected_env_msg_2 = body2["input"][body1_input.len() + 1].clone();
     assert_eq!(expected_env_msg_2["role"].as_str(), Some("user"));
@@ -1018,10 +1018,10 @@ async fn send_user_turn_with_changes_sends_environment_context() -> anyhow::Resu
         Some("developer")
     );
     assert!(
-        request2.has_message_with_input_texts("developer", |texts| {
+        !request2.has_message_with_input_texts("developer", |texts| {
             texts.iter().any(|text| text.contains("<model_switch>"))
         }),
-        "expected model switch section after model override: {expected_settings_update_msg:?}"
+        "did not expect model switch section after explicit model override: {expected_settings_update_msg:?}"
     );
     let expected_user_message_2 = text_user_input("hello 2".to_string());
     let expected_input_2 = serde_json::Value::Array(vec![

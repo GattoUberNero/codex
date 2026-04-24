@@ -591,9 +591,10 @@ impl CodexMessageProcessor {
                 data: None,
             })?;
         apply_runtime_feature_enablement(&mut config, &self.current_runtime_feature_enablement());
-        config.codex_self_exe = self.arg0_paths.codex_self_exe.clone();
-        config.codex_linux_sandbox_exe = self.arg0_paths.codex_linux_sandbox_exe.clone();
-        config.main_execve_wrapper_exe = self.arg0_paths.main_execve_wrapper_exe.clone();
+        let executable_paths = self.arg0_paths.runtime_executable_paths();
+        config.self_exec_paths = executable_paths.self_exec_paths;
+        config.codex_linux_sandbox_exe = executable_paths.codex_linux_sandbox_exe;
+        config.main_execve_wrapper_exe = executable_paths.main_execve_wrapper_exe;
         Ok(config)
     }
 
@@ -2422,6 +2423,7 @@ impl CodexMessageProcessor {
         developer_instructions: Option<String>,
         personality: Option<Personality>,
     ) -> ConfigOverrides {
+        let executable_paths = self.arg0_paths.runtime_executable_paths();
         ConfigOverrides {
             model,
             model_provider,
@@ -2432,8 +2434,9 @@ impl CodexMessageProcessor {
             approvals_reviewer: approvals_reviewer
                 .map(codex_app_server_protocol::ApprovalsReviewer::to_core),
             sandbox_mode: sandbox.map(SandboxMode::to_core),
-            codex_linux_sandbox_exe: self.arg0_paths.codex_linux_sandbox_exe.clone(),
-            main_execve_wrapper_exe: self.arg0_paths.main_execve_wrapper_exe.clone(),
+            self_exec_paths: executable_paths.self_exec_paths,
+            codex_linux_sandbox_exe: executable_paths.codex_linux_sandbox_exe,
+            main_execve_wrapper_exe: executable_paths.main_execve_wrapper_exe,
             base_instructions,
             developer_instructions,
             personality,
@@ -8015,6 +8018,7 @@ impl CodexMessageProcessor {
             .unwrap_or_else(|| config.cwd.to_path_buf());
         let cli_overrides = self.current_cli_overrides();
         let runtime_feature_enablement = self.current_runtime_feature_enablement();
+        let executable_paths = self.arg0_paths.runtime_executable_paths();
         let outgoing = Arc::clone(&self.outgoing);
         let connection_id = request_id.connection_id;
 
@@ -8024,6 +8028,9 @@ impl CodexMessageProcessor {
                 /*request_overrides*/ None,
                 ConfigOverrides {
                     cwd: Some(command_cwd.clone()),
+                    self_exec_paths: executable_paths.self_exec_paths,
+                    codex_linux_sandbox_exe: executable_paths.codex_linux_sandbox_exe,
+                    main_execve_wrapper_exe: executable_paths.main_execve_wrapper_exe,
                     ..Default::default()
                 },
                 Some(command_cwd.clone()),

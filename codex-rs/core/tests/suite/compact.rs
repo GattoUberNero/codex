@@ -22,6 +22,7 @@ use codex_protocol::user_input::UserInput;
 use core_test_support::context_snapshot;
 use core_test_support::context_snapshot::ContextSnapshotOptions;
 use core_test_support::context_snapshot::ContextSnapshotRenderMode;
+use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_local_shell_call;
 use core_test_support::responses::ev_reasoning_item;
 use core_test_support::responses::mount_models_once;
@@ -115,17 +116,18 @@ fn model_info_with_context_window(slug: &str, context_window: i64) -> ModelInfo 
 }
 
 fn assert_pre_sampling_switch_compaction_requests(
-    first: &serde_json::Value,
-    compact: &serde_json::Value,
-    follow_up: &serde_json::Value,
+    first: &ResponsesRequest,
+    compact: &ResponsesRequest,
+    follow_up: &ResponsesRequest,
     previous_model: &str,
     next_model: &str,
+    expected_follow_up_instructions: &str,
 ) {
-    assert_eq!(first["model"].as_str(), Some(previous_model));
-    assert_eq!(compact["model"].as_str(), Some(previous_model));
-    assert_eq!(follow_up["model"].as_str(), Some(next_model));
+    assert_eq!(first.body_json()["model"].as_str(), Some(previous_model));
+    assert_eq!(compact.body_json()["model"].as_str(), Some(previous_model));
+    assert_eq!(follow_up.body_json()["model"].as_str(), Some(next_model));
 
-    let compact_body = compact.to_string();
+    let compact_body = compact.body_json().to_string();
     assert!(
         body_contains_text(&compact_body, SUMMARIZATION_PROMPT),
         "pre-sampling compact request should include summarization prompt"
@@ -134,10 +136,15 @@ fn assert_pre_sampling_switch_compaction_requests(
         !compact_body.contains("<model_switch>"),
         "pre-sampling compact request should strip trailing model-switch update item"
     );
-    let follow_up_body = follow_up.to_string();
+    let follow_up_body = follow_up.body_json().to_string();
     assert!(
-        follow_up_body.contains("<model_switch>"),
-        "follow-up request after successful model-switch compaction should include model-switch update item"
+        !follow_up_body.contains("<model_switch>"),
+        "follow-up request after successful explicit model-switch compaction should rely on rebased instructions"
+    );
+    assert_eq!(
+        follow_up.instructions_text(),
+        expected_follow_up_instructions,
+        "follow-up request should rebase `instructions` to the switched model"
     );
 }
 
@@ -1795,18 +1802,22 @@ async fn pre_sampling_compact_runs_on_switch_to_smaller_context_model() {
         3,
         "expected user, compact, and follow-up requests"
     );
+    let expected_follow_up_instructions =
+        codex_core::test_support::construct_model_info_offline(next_model, &test.config)
+            .get_model_instructions(test.config.personality);
     assert_pre_sampling_switch_compaction_requests(
-        &requests[0].body_json(),
-        &requests[1].body_json(),
-        &requests[2].body_json(),
+        &requests[0],
+        &requests[1],
+        &requests[2],
         previous_model,
         next_model,
+        &expected_follow_up_instructions,
     );
 
     insta::assert_snapshot!(
         "pre_sampling_model_switch_compaction_shapes",
         format_labeled_requests_snapshot(
-            "Pre-sampling compaction on model switch to a smaller context window: current behavior compacts using prior-turn history only (incoming user message excluded), and the follow-up request carries compacted history plus the new user message.",
+            "Pre-sampling compaction on explicit model switch to a smaller context window compacts prior-turn history only (incoming user message excluded), and the follow-up request uses rebased instructions without additive <model_switch> payloads.",
             &[
                 ("Initial Request (Previous Model)", &requests[0]),
                 ("Pre-sampling Compaction Request", &requests[1]),
@@ -1955,12 +1966,16 @@ async fn pre_sampling_compact_runs_after_resume_and_switch_to_smaller_model() {
         3,
         "expected user, compact, and follow-up requests"
     );
+    let expected_follow_up_instructions =
+        codex_core::test_support::construct_model_info_offline(next_model, &resumed.config)
+            .get_model_instructions(resumed.config.personality);
     assert_pre_sampling_switch_compaction_requests(
-        &requests[0].body_json(),
-        &requests[1].body_json(),
-        &requests[2].body_json(),
+        &requests[0],
+        &requests[1],
+        &requests[2],
         previous_model,
         next_model,
+        &expected_follow_up_instructions,
     );
 }
 
@@ -3201,14 +3216,22 @@ async fn snapshot_request_shape_pre_turn_compaction_strips_incoming_model_switch
 
     let follow_up_body = requests[2].body_json().to_string();
     assert!(
-        follow_up_body.contains("<model_switch>"),
-        "post-compaction follow-up should include model-switch update item"
+        !follow_up_body.contains("<model_switch>"),
+        "post-compaction follow-up should rely on rebased instructions instead of model-switch update item"
+    );
+    let expected_follow_up_instructions =
+        codex_core::test_support::construct_model_info_offline(next_model, &test.config)
+            .get_model_instructions(test.config.personality);
+    assert_eq!(
+        requests[2].instructions_text(),
+        expected_follow_up_instructions,
+        "post-compaction follow-up should send switched-model base instructions"
     );
 
     insta::assert_snapshot!(
         "pre_turn_compaction_strips_incoming_model_switch_shapes",
         format_labeled_requests_snapshot(
-            "Pre-turn compaction during model switch (without pre-sampling model-switch compaction): current behavior strips incoming <model_switch> from the compact request and restores it in the post-compaction follow-up request.",
+            "Pre-turn compaction during explicit model switch (without pre-sampling model-switch compaction): compact request omits <model_switch> and the post-compaction follow-up relies on rebased instructions instead of restoring it.",
             &[
                 ("Initial Request (Previous Model)", &requests[0]),
                 ("Local Compaction Request", &requests[1]),

@@ -4265,8 +4265,11 @@ async fn record_context_updates_and_set_reference_context_item_persists_baseline
 }
 
 #[tokio::test]
-async fn build_initial_context_prepends_model_switch_message() {
-    let (session, turn_context) = make_session_and_context().await;
+async fn build_initial_context_prepends_model_switch_message_for_additive_turns() {
+    let (session, previous_context) = make_session_and_context().await;
+    let turn_context = previous_context
+        .with_model("gpt-5".to_string(), &session.services.models_manager)
+        .await;
     let previous_turn_settings = PreviousTurnSettings {
         model: "previous-regular-model".to_string(),
         realtime_active: None,
@@ -4289,7 +4292,7 @@ async fn build_initial_context_prepends_model_switch_message() {
 
 #[tokio::test]
 async fn record_context_updates_and_set_reference_context_item_persists_full_reinjection_to_rollout()
- {
+{
     let (session, previous_context) = make_session_and_context().await;
     let next_model = if previous_context.model_info.slug == "gpt-5.1" {
         "gpt-5"

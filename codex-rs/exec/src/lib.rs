@@ -329,6 +329,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     };
 
     // Load configuration and determine approval policy
+    let executable_paths = arg0_paths.runtime_executable_paths();
     let overrides = ConfigOverrides {
         model,
         review_model: None,
@@ -340,9 +341,9 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         cwd: resolved_cwd,
         model_provider: model_provider.clone(),
         service_tier: None,
-        codex_self_exe: arg0_paths.codex_self_exe.clone(),
-        codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe.clone(),
-        main_execve_wrapper_exe: arg0_paths.main_execve_wrapper_exe.clone(),
+        self_exec_paths: executable_paths.self_exec_paths,
+        codex_linux_sandbox_exe: executable_paths.codex_linux_sandbox_exe,
+        main_execve_wrapper_exe: executable_paths.main_execve_wrapper_exe,
         js_repl_node_path: None,
         js_repl_node_module_dirs: None,
         zsh_path: None,

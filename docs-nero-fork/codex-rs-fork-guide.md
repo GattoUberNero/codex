@@ -161,7 +161,34 @@ Najważniejsze nośniki:
 - ladder/cooldown/sticky,
 - runtime state w sesji.
 
-### 2.6 STOP Hook Debug Reporting
+### 2.6 Model Catalog Runtime Overlay
+
+User experience:
+
+- operator może dodać albo nadpisać definicje modeli bez przebudowy binarki,
+- baza pozostaje bundled `codex-rs/core/models.json`,
+- lokalny overlay jest ładowany na starcie i wygrywa nad bundled/cache/remote dla tych samych `slug`,
+- nowe modele z overlay trafiają do `model/list` i TUI picker, jeżeli mają widoczność/listowalność zgodną z `ModelInfo`.
+
+Główna rola w systemie:
+
+- umożliwić szybkie przyjęcie nowych definicji modeli lub upstream metadata bez pełnego update'u forka,
+- zachować normalny cache/remote refresh dla modeli nieobjętych overlay,
+- przenieść kontrolę nad `ModelInfo`, w tym `instructions`, `model_messages`, capability flags i reasoning metadata, do lokalnego pliku JSON.
+
+Ważny caveat:
+
+- `model_catalog_json` to pełne replacement i nie może być łączone z overlay,
+- `model_catalog_overlay_json` jest startup-only; MVP nie ma hot reload,
+- overlay musi mieć pełny kształt `ModelsResponse`, taki jak `codex-rs/core/models.json`.
+
+Najważniejsze nośniki:
+
+- `model_catalog_overlay_json = "/abs/path/models.overlay.json"`,
+- `model_catalog_json = "/abs/path/models.json"` jako pełny replacement,
+- `ModelsManager` merge: bundled -> cache/remote -> overlay.
+
+### 2.7 STOP Hook Debug Reporting
 
 User experience:
 
