@@ -2515,14 +2515,11 @@ impl Session {
             return;
         };
 
-        let model_info = self
-            .services
-            .models_manager
-            .model_info_from_catalog_snapshot(
-                next.collaboration_mode.model(),
-                model_catalog_snapshot,
-                next.original_config_do_not_use.as_ref(),
-            );
+        let model_info = ModelsManager::model_info_from_catalog_snapshot(
+            next.collaboration_mode.model(),
+            model_catalog_snapshot,
+            next.original_config_do_not_use.as_ref(),
+        );
         next.base_instructions = model_info.get_model_instructions(next.personality);
     }
 
