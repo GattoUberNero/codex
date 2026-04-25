@@ -74,9 +74,34 @@ fn user_config_layer(codex_home: &TempDir, config_toml: &str) -> ConfigLayerEntr
     )
 }
 
+fn project_config_layer(project_dot_codex: &std::path::Path) -> ConfigLayerEntry {
+    let dot_codex_folder = AbsolutePathBuf::try_from(project_dot_codex.to_path_buf())
+        .expect("project .codex path should be absolute");
+    ConfigLayerEntry::new(
+        ConfigLayerSource::Project { dot_codex_folder },
+        toml::from_str("").expect("project layer toml"),
+    )
+}
+
 fn config_stack(codex_home: &TempDir, user_config_toml: &str) -> ConfigLayerStack {
     ConfigLayerStack::new(
         vec![user_config_layer(codex_home, user_config_toml)],
+        Default::default(),
+        ConfigRequirementsToml::default(),
+    )
+    .expect("valid config layer stack")
+}
+
+fn config_stack_with_project_layer(
+    codex_home: &TempDir,
+    user_config_toml: &str,
+    project_dot_codex: &std::path::Path,
+) -> ConfigLayerStack {
+    ConfigLayerStack::new(
+        vec![
+            user_config_layer(codex_home, user_config_toml),
+            project_config_layer(project_dot_codex),
+        ],
         Default::default(),
         ConfigRequirementsToml::default(),
     )
@@ -590,6 +615,131 @@ async fn skills_for_config_ignores_cwd_cache_when_session_flags_reenable_skill()
         .find(|skill| skill.name == "demo-skill")
         .expect("demo skill should be discovered");
     assert_eq!(child_outcome.is_skill_enabled(child_skill), true);
+}
+
+#[tokio::test]
+async fn project_skill_policy_overlay_can_expose_global_user_skill_locally() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let project = tempfile::tempdir().expect("tempdir");
+    let project_dot_codex = project.path().join(".codex");
+    fs::create_dir_all(&project_dot_codex).expect("create project .codex");
+    let skill_dir = codex_home.path().join("skills").join("global-demo");
+    fs::create_dir_all(&skill_dir).expect("create skill dir");
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        r#"---
+name: global-demo
+description: global demo
+metadata:
+  agent-filter-mode: deny-all
+---
+
+# Body
+"#,
+    )
+    .expect("write skill");
+    fs::write(
+        project_dot_codex.join("skills.policy.toml"),
+        r#"
+[[overrides]]
+name = "global-demo"
+source = "user"
+source_path = "global-demo"
+enabled = true
+agent_filter_mode = "whitelist"
+allowed_agent_types = ["architect"]
+"#,
+    )
+    .expect("write project policy");
+    let config_layer_stack = config_stack_with_project_layer(&codex_home, "", &project_dot_codex);
+    let skills_manager = SkillsManager::new(
+        codex_home.path().to_path_buf(),
+        /*bundled_skills_enabled*/ true,
+    );
+
+    let outcome = skills_for_config_with_stack(&skills_manager, &project, &config_layer_stack, &[]);
+    let visible = outcome.filter_for_agent_identity("architect");
+
+    assert!(
+        visible
+            .skills
+            .iter()
+            .any(|skill| skill.name == "global-demo"),
+        "expected project policy overlay to expose global-demo to architect"
+    );
+    assert!(
+        !outcome
+            .filter_for_agent_identity("reviewer-baby")
+            .skills
+            .iter()
+            .any(|skill| skill.name == "global-demo"),
+        "expected project policy overlay to keep global-demo hidden from non-whitelisted agents"
+    );
+}
+
+#[tokio::test]
+async fn project_skill_policy_overlay_cache_tracks_parse_error_changes() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let project = tempfile::tempdir().expect("tempdir");
+    let project_dot_codex = project.path().join(".codex");
+    fs::create_dir_all(&project_dot_codex).expect("create project .codex");
+    let skill_dir = codex_home.path().join("skills").join("cache-demo");
+    fs::create_dir_all(&skill_dir).expect("create skill dir");
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        r#"---
+name: cache-demo
+description: cache demo
+metadata:
+  agent-filter-mode: deny-all
+---
+
+# Body
+"#,
+    )
+    .expect("write skill");
+    let policy_path = project_dot_codex.join("skills.policy.toml");
+    fs::write(&policy_path, "[[overrides]\n").expect("write invalid project policy");
+    let config_layer_stack = config_stack_with_project_layer(&codex_home, "", &project_dot_codex);
+    let skills_manager = SkillsManager::new(
+        codex_home.path().to_path_buf(),
+        /*bundled_skills_enabled*/ true,
+    );
+
+    let invalid_outcome =
+        skills_for_config_with_stack(&skills_manager, &project, &config_layer_stack, &[]);
+    assert!(
+        invalid_outcome
+            .errors
+            .iter()
+            .any(|error| error.path == policy_path),
+        "expected invalid project policy to be surfaced"
+    );
+
+    fs::write(
+        &policy_path,
+        r#"
+[[overrides]]
+name = "cache-demo"
+source = "user"
+source_path = "cache-demo"
+enabled = true
+agent_filter_mode = "whitelist"
+allowed_agent_types = ["architect"]
+"#,
+    )
+    .expect("write valid project policy");
+
+    let valid_outcome =
+        skills_for_config_with_stack(&skills_manager, &project, &config_layer_stack, &[]);
+    assert!(
+        valid_outcome
+            .filter_for_agent_identity("architect")
+            .skills
+            .iter()
+            .any(|skill| skill.name == "cache-demo"),
+        "expected cache to observe fixed project policy"
+    );
 }
 
 #[test]

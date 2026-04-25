@@ -85,9 +85,13 @@ Add a pre-launch resume model pinning step:
 2. Do nothing if the user already supplied `--model`, `--model=...`, `-m`, or `-m...`.
 3. Resolve the target through `~/.codex/session_index.jsonl` to find thread id and recent metadata.
 4. Locate the rollout under `~/.codex/sessions` or `~/.codex/archived_sessions`.
-5. Scan the rollout from the end and return the first valid model found in:
+5. Scan the rollout from the end and return the first valid model from a main-session
+   `turn_context` record found in:
    - `payload.model`
    - `payload.collaboration_mode.settings.model`
+   Ignore subagent/delegation telemetry such as `event_msg` /
+   `collab_agent_spawn_end`; those records describe child agents and must not pin
+   the parent session model.
 6. Launch Codex with `--model <rollout_model>` prepended to the forwarded arguments.
 7. Log a concise line:
    - `codexn: resume model pinned from rollout = <model>`

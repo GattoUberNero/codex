@@ -25,6 +25,10 @@ use crate::loader::skill_roots;
 use crate::model::SkillAgentFilterDefaults;
 use crate::model::SkillAgentFilterMode;
 use crate::model::SkillMetadata;
+use crate::policy_overlays::ProjectSkillPolicyOverlay;
+use crate::policy_overlays::ProjectSkillPolicyOverlaySet;
+use crate::policy_overlays::apply_project_skill_policy_overlays;
+use crate::policy_overlays::project_skill_policy_overlays_from_stack;
 use crate::system::install_system_skills;
 use crate::system::uninstall_system_skills;
 
@@ -103,13 +107,24 @@ impl SkillsManager {
         let skill_config_rules = skill_config_rules_from_stack(&input.config_layer_stack);
         let agent_filter_defaults =
             skill_agent_filter_defaults_from_stack(&input.config_layer_stack);
-        let cache_key = config_skills_cache_key(&roots, &skill_config_rules, agent_filter_defaults);
+        let project_policy_overlays =
+            project_skill_policy_overlays_from_stack(&input.config_layer_stack);
+        let cache_key = config_skills_cache_key(
+            &roots,
+            &skill_config_rules,
+            agent_filter_defaults,
+            &project_policy_overlays,
+        );
         if let Some(outcome) = self.cached_outcome_for_config(&cache_key) {
             return outcome;
         }
 
         let outcome = finalize_skill_outcome(
-            self.build_skill_outcome(roots, &skill_config_rules),
+            refresh_loaded_skill_indexes(apply_project_skill_policy_overlays(
+                self.build_skill_outcome(roots, &skill_config_rules),
+                &project_policy_overlays,
+                self.codex_home.as_path(),
+            )),
             &input.config_layer_stack,
             &configured_extra_user_roots,
             &non_explicit_roots,
@@ -176,8 +191,14 @@ impl SkillsManager {
                 }),
         );
         let skill_config_rules = skill_config_rules_from_stack(&input.config_layer_stack);
+        let project_policy_overlays =
+            project_skill_policy_overlays_from_stack(&input.config_layer_stack);
         let outcome = finalize_skill_outcome(
-            self.build_skill_outcome(roots, &skill_config_rules),
+            refresh_loaded_skill_indexes(apply_project_skill_policy_overlays(
+                self.build_skill_outcome(roots, &skill_config_rules),
+                &project_policy_overlays,
+                self.codex_home.as_path(),
+            )),
             &input.config_layer_stack,
             &merged_extra_user_roots,
             &non_explicit_roots,
@@ -249,6 +270,8 @@ struct ConfigSkillsCacheKey {
     roots: Vec<(PathBuf, u8)>,
     skill_config_rules: SkillConfigRules,
     agent_filter_defaults: SkillAgentFilterDefaults,
+    project_policy_overlays: Vec<ProjectSkillPolicyOverlay>,
+    project_policy_overlay_errors: Vec<(PathBuf, String)>,
 }
 
 pub fn bundled_skills_enabled_from_stack(config_layer_stack: &ConfigLayerStack) -> bool {
@@ -275,6 +298,7 @@ fn config_skills_cache_key(
     roots: &[SkillRoot],
     skill_config_rules: &SkillConfigRules,
     agent_filter_defaults: SkillAgentFilterDefaults,
+    project_policy_overlays: &ProjectSkillPolicyOverlaySet,
 ) -> ConfigSkillsCacheKey {
     ConfigSkillsCacheKey {
         roots: roots
@@ -291,6 +315,12 @@ fn config_skills_cache_key(
             .collect(),
         skill_config_rules: skill_config_rules.clone(),
         agent_filter_defaults,
+        project_policy_overlays: project_policy_overlays.overlays.clone(),
+        project_policy_overlay_errors: project_policy_overlays
+            .errors
+            .iter()
+            .map(|error| (error.path.clone(), error.message.clone()))
+            .collect(),
     }
 }
 
@@ -532,6 +562,10 @@ fn finalize_loaded_skill_outcome(
     disabled_paths: HashSet<PathBuf>,
 ) -> SkillLoadOutcome {
     outcome.disabled_paths = disabled_paths;
+    refresh_loaded_skill_indexes(outcome)
+}
+
+fn refresh_loaded_skill_indexes(mut outcome: SkillLoadOutcome) -> SkillLoadOutcome {
     let (by_scripts_dir, by_doc_path) =
         build_implicit_skill_path_indexes(outcome.allowed_skills_for_implicit_invocation());
     outcome.implicit_skills_by_scripts_dir = Arc::new(by_scripts_dir);

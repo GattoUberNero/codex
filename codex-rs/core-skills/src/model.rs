@@ -63,11 +63,15 @@ impl SkillMetadata {
             SkillAgentFilterMode::Off | SkillAgentFilterMode::AllowAll => true,
             SkillAgentFilterMode::DenyAll => false,
             SkillAgentFilterMode::Whitelist => match normalized_identity.as_deref() {
-                Some(identity) => filter_list.iter().any(|entry| entry == identity),
+                Some(identity) => filter_list
+                    .iter()
+                    .any(|entry| agent_filter_entry_matches(entry, identity)),
                 None => false,
             },
             SkillAgentFilterMode::Blacklist => match normalized_identity.as_deref() {
-                Some(identity) => !filter_list.iter().any(|entry| entry == identity),
+                Some(identity) => !filter_list
+                    .iter()
+                    .any(|entry| agent_filter_entry_matches(entry, identity)),
                 None => true,
             },
         }
@@ -308,6 +312,22 @@ fn normalize_agent_identity_token(raw: &str) -> Option<String> {
     if token.is_empty() { None } else { Some(token) }
 }
 
+fn agent_filter_entry_matches(entry: &str, normalized_identity: &str) -> bool {
+    let Some(normalized_entry) = normalize_agent_identity_token(entry) else {
+        return false;
+    };
+    match normalized_entry.as_str() {
+        "*" | "all-agents" => true,
+        "all-sub-agents" | "all-subagents" => normalized_identity != MAIN_SKILL_AGENT_IDENTITY,
+        _ => {
+            normalized_entry
+                .strip_suffix('*')
+                .is_some_and(|prefix| !prefix.is_empty() && normalized_identity.starts_with(prefix))
+                || normalized_entry == normalized_identity
+        }
+    }
+}
+
 pub fn filter_skill_load_outcome_for_product(
     mut outcome: SkillLoadOutcome,
     restriction_product: Option<Product>,
@@ -467,6 +487,19 @@ mod tests {
     }
 
     #[test]
+    fn agent_filter_entry_matching_normalizes_rule_entries() {
+        assert!(agent_filter_entry_matches(" Worker-* ", "worker-senior"));
+        assert!(agent_filter_entry_matches(
+            "ALL-SUB-AGENTS",
+            "reviewer-baby"
+        ));
+        assert!(!agent_filter_entry_matches(
+            "ALL-SUB-AGENTS",
+            MAIN_SKILL_AGENT_IDENTITY
+        ));
+    }
+
+    #[test]
     fn filter_for_agent_identity_keeps_only_whitelisted_skills() {
         let allowed = skill_with_policy(
             "/tmp/allowed/SKILL.md",
@@ -536,6 +569,128 @@ mod tests {
         assert_eq!(
             filtered.skills[0].path_to_skills_md,
             allowed.path_to_skills_md
+        );
+    }
+
+    #[test]
+    fn filter_for_agent_identity_supports_wildcard_aliases() {
+        let worker_skill = skill_with_policy(
+            "/tmp/worker/SKILL.md",
+            Some(SkillAgentFilterMode::Whitelist),
+            /*allow_agent_whitelist*/ None,
+            Some(vec!["worker-*"]),
+        );
+        let reviewer_skill = skill_with_policy(
+            "/tmp/reviewer/SKILL.md",
+            Some(SkillAgentFilterMode::Whitelist),
+            /*allow_agent_whitelist*/ None,
+            Some(vec!["reviewer-*"]),
+        );
+        let outcome = SkillLoadOutcome {
+            skills: vec![worker_skill.clone(), reviewer_skill],
+            errors: Vec::new(),
+            disabled_paths: HashSet::new(),
+            agent_filter_defaults: SkillAgentFilterDefaults::default(),
+            explicit_skill_paths: HashSet::new(),
+            implicit_skills_by_scripts_dir: Arc::new(HashMap::new()),
+            implicit_skills_by_doc_path: Arc::new(HashMap::new()),
+        };
+
+        let filtered = outcome.filter_for_agent_identity("worker-senior");
+        assert_eq!(filtered.skills, vec![worker_skill]);
+    }
+
+    #[test]
+    fn filter_for_agent_identity_applies_blacklist_wildcard_aliases() {
+        let blocked_worker = skill_with_policy(
+            "/tmp/blocked-worker/SKILL.md",
+            Some(SkillAgentFilterMode::Blacklist),
+            /*allow_agent_whitelist*/ None,
+            Some(vec!["worker-*"]),
+        );
+        let blocked_all = skill_with_policy(
+            "/tmp/blocked-all/SKILL.md",
+            Some(SkillAgentFilterMode::Blacklist),
+            /*allow_agent_whitelist*/ None,
+            Some(vec!["all-agents"]),
+        );
+        let allowed = skill_with_policy(
+            "/tmp/allowed/SKILL.md",
+            Some(SkillAgentFilterMode::Blacklist),
+            /*allow_agent_whitelist*/ None,
+            Some(vec!["reviewer-*"]),
+        );
+        let outcome = SkillLoadOutcome {
+            skills: vec![blocked_worker, blocked_all, allowed.clone()],
+            errors: Vec::new(),
+            disabled_paths: HashSet::new(),
+            agent_filter_defaults: SkillAgentFilterDefaults::default(),
+            explicit_skill_paths: HashSet::new(),
+            implicit_skills_by_scripts_dir: Arc::new(HashMap::new()),
+            implicit_skills_by_doc_path: Arc::new(HashMap::new()),
+        };
+
+        let filtered = outcome.filter_for_agent_identity("worker-senior");
+        assert_eq!(filtered.skills, vec![allowed]);
+    }
+
+    #[test]
+    fn filter_for_agent_identity_supports_all_sub_agents_alias() {
+        let subagent_skill = skill_with_policy(
+            "/tmp/subagent/SKILL.md",
+            Some(SkillAgentFilterMode::Whitelist),
+            /*allow_agent_whitelist*/ None,
+            Some(vec!["all-sub-agents"]),
+        );
+        let outcome = SkillLoadOutcome {
+            skills: vec![subagent_skill.clone()],
+            errors: Vec::new(),
+            disabled_paths: HashSet::new(),
+            agent_filter_defaults: SkillAgentFilterDefaults::default(),
+            explicit_skill_paths: HashSet::new(),
+            implicit_skills_by_scripts_dir: Arc::new(HashMap::new()),
+            implicit_skills_by_doc_path: Arc::new(HashMap::new()),
+        };
+
+        assert_eq!(
+            outcome.filter_for_agent_identity("worker-senior").skills,
+            vec![subagent_skill]
+        );
+        assert!(
+            outcome
+                .filter_for_agent_identity(MAIN_SKILL_AGENT_IDENTITY)
+                .skills
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn filter_for_agent_identity_supports_all_agents_alias() {
+        let skill = skill_with_policy(
+            "/tmp/all-agents/SKILL.md",
+            Some(SkillAgentFilterMode::Whitelist),
+            /*allow_agent_whitelist*/ None,
+            Some(vec!["all-agents"]),
+        );
+        let outcome = SkillLoadOutcome {
+            skills: vec![skill.clone()],
+            errors: Vec::new(),
+            disabled_paths: HashSet::new(),
+            agent_filter_defaults: SkillAgentFilterDefaults::default(),
+            explicit_skill_paths: HashSet::new(),
+            implicit_skills_by_scripts_dir: Arc::new(HashMap::new()),
+            implicit_skills_by_doc_path: Arc::new(HashMap::new()),
+        };
+
+        assert_eq!(
+            outcome
+                .filter_for_agent_identity(MAIN_SKILL_AGENT_IDENTITY)
+                .skills,
+            vec![skill.clone()]
+        );
+        assert_eq!(
+            outcome.filter_for_agent_identity("reviewer-baby").skills,
+            vec![skill]
         );
     }
 

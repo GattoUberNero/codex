@@ -49,6 +49,16 @@ struct SkillFrontmatter {
 struct SkillFrontmatterMetadata {
     #[serde(default, rename = "short-description")]
     short_description: Option<String>,
+    #[serde(default, rename = "agent-filter-mode", alias = "agent_filter_mode")]
+    agent_filter_mode: Option<SkillAgentFilterMode>,
+    #[serde(
+        default,
+        rename = "allow-agent-whitelist",
+        alias = "allow_agent_whitelist"
+    )]
+    allow_agent_whitelist: Option<bool>,
+    #[serde(default, rename = "allowed-agent-types", alias = "allowed_agent_types")]
+    allowed_agent_types: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -554,10 +564,12 @@ fn parse_skill_file(path: &Path, scope: SkillScope) -> Result<SkillMetadata, Ski
     let LoadedSkillMetadata {
         interface,
         dependencies,
-        policy,
+        policy: metadata_policy,
         permission_profile,
         managed_network_override,
     } = load_skill_metadata(path);
+    let frontmatter_policy = resolve_frontmatter_policy(&parsed.metadata)?;
+    let policy = merge_skill_policy(metadata_policy, frontmatter_policy);
 
     validate_len(&name, MAX_NAME_LEN, "name")?;
     validate_len(&description, MAX_DESCRIPTION_LEN, "description")?;
@@ -743,6 +755,99 @@ fn resolve_policy(policy: Option<Policy>) -> Option<SkillPolicy> {
         allow_agent_whitelist: policy.allow_agent_whitelist,
         allowed_agent_types: policy.allowed_agent_types,
     })
+}
+
+fn resolve_frontmatter_policy(
+    metadata: &SkillFrontmatterMetadata,
+) -> Result<Option<SkillPolicy>, SkillParseError> {
+    if metadata.agent_filter_mode.is_none()
+        && metadata.allow_agent_whitelist.is_none()
+        && metadata.allowed_agent_types.is_none()
+    {
+        return Ok(None);
+    }
+
+    if metadata.agent_filter_mode.is_some() && metadata.allow_agent_whitelist.is_some() {
+        return Err(SkillParseError::InvalidField {
+            field: "metadata.allow-agent-whitelist",
+            reason: "conflicts with metadata.agent-filter-mode".to_string(),
+        });
+    }
+
+    let allowed_agent_types = metadata
+        .allowed_agent_types
+        .as_deref()
+        .map(normalize_agent_types)
+        .transpose()?;
+    let has_non_empty_allowed_types = allowed_agent_types
+        .as_ref()
+        .is_some_and(|types| !types.is_empty());
+    if metadata.agent_filter_mode == Some(SkillAgentFilterMode::Whitelist)
+        && !has_non_empty_allowed_types
+    {
+        return Err(SkillParseError::InvalidField {
+            field: "metadata.allowed-agent-types",
+            reason: "must be non-empty when metadata.agent-filter-mode=whitelist".to_string(),
+        });
+    }
+    if metadata.allow_agent_whitelist == Some(true) && !has_non_empty_allowed_types {
+        return Err(SkillParseError::InvalidField {
+            field: "metadata.allowed-agent-types",
+            reason: "must be non-empty when metadata.allow-agent-whitelist=true".to_string(),
+        });
+    }
+
+    let agent_filter_mode = metadata.agent_filter_mode.or_else(|| {
+        metadata.allow_agent_whitelist.map(|allow_whitelist| {
+            if allow_whitelist {
+                SkillAgentFilterMode::Whitelist
+            } else {
+                SkillAgentFilterMode::Off
+            }
+        })
+    });
+
+    Ok(Some(SkillPolicy {
+        allow_implicit_invocation: None,
+        products: vec![],
+        agent_filter_mode,
+        allow_agent_whitelist: metadata.allow_agent_whitelist,
+        allowed_agent_types,
+    }))
+}
+
+fn merge_skill_policy(
+    metadata_policy: Option<SkillPolicy>,
+    frontmatter_policy: Option<SkillPolicy>,
+) -> Option<SkillPolicy> {
+    match (metadata_policy, frontmatter_policy) {
+        (None, None) => None,
+        (Some(policy), None) => Some(policy),
+        (None, Some(policy)) => Some(policy),
+        (Some(base), Some(overlay)) => Some(SkillPolicy {
+            allow_implicit_invocation: base.allow_implicit_invocation,
+            products: base.products,
+            agent_filter_mode: overlay.agent_filter_mode.or(base.agent_filter_mode),
+            allow_agent_whitelist: overlay.allow_agent_whitelist.or(base.allow_agent_whitelist),
+            allowed_agent_types: overlay.allowed_agent_types.or(base.allowed_agent_types),
+        }),
+    }
+}
+
+fn normalize_agent_types(raw_types: &[String]) -> Result<Vec<String>, SkillParseError> {
+    let mut unique = HashSet::new();
+    let mut normalized = Vec::new();
+    for raw in raw_types {
+        let value = sanitize_single_line(raw).trim().to_ascii_lowercase();
+        if value.is_empty() {
+            continue;
+        }
+        validate_len(&value, MAX_NAME_LEN, "metadata.allowed-agent-types")?;
+        if unique.insert(value.clone()) {
+            normalized.push(value);
+        }
+    }
+    Ok(normalized)
 }
 
 fn resolve_dependency_tool(tool: DependencyTool) -> Option<SkillToolDependency> {

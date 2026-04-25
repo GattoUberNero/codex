@@ -6216,6 +6216,7 @@ impl CodexMessageProcessor {
         };
         let skills_manager = self.thread_manager.skills_manager();
         let plugins_manager = self.thread_manager.plugins_manager();
+        let session_source = self.thread_manager.session_source();
         let cli_overrides = self.current_cli_overrides();
         let mut data = Vec::new();
         for cwd in cwds {
@@ -6272,7 +6273,8 @@ impl CodexMessageProcessor {
             );
             let outcome = skills_manager
                 .skills_for_cwd_with_extra_user_roots(&skills_input, force_reload, extra_roots)
-                .await;
+                .await
+                .filter_for_session_source(&session_source);
             let errors = errors_to_info(&outcome.errors);
             let skills = skills_to_info(&outcome.skills, &outcome.disabled_paths);
             data.push(codex_app_server_protocol::SkillsListEntry {

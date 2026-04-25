@@ -7338,6 +7338,10 @@ Use the exact auto protocol contract below in your final assistant response:\n\n
         let plugins_manager = &sess.services.plugins_manager;
         let config = sess.get_config().await;
         let codex_home = sess.codex_home().await;
+        let session_source = {
+            let state = sess.state.lock().await;
+            state.session_configuration.session_source.clone()
+        };
         let mut skills = Vec::new();
         let empty_cli_overrides: &[(String, toml::Value)] = &[];
         for cwd in cwds {
@@ -7393,7 +7397,8 @@ Use the exact auto protocol contract below in your final assistant response:\n\n
             );
             let outcome = skills_manager
                 .skills_for_cwd(&skills_input, force_reload)
-                .await;
+                .await
+                .filter_for_session_source(&session_source);
             let errors = super::errors_to_info(&outcome.errors);
             let skills_metadata = super::skills_to_info(&outcome.skills, &outcome.disabled_paths);
             skills.push(SkillsListEntry {

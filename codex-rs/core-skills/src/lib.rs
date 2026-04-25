@@ -6,6 +6,7 @@ pub mod loader;
 pub mod manager;
 mod mention_counts;
 pub mod model;
+mod policy_overlays;
 pub mod remote;
 pub mod render;
 pub mod system;

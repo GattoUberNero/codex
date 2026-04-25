@@ -614,6 +614,257 @@ policy:
 }
 
 #[tokio::test]
+async fn loads_agent_filter_policy_from_skill_frontmatter() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let skill_path = write_raw_skill_at(
+        &codex_home.path().join("skills"),
+        "demo",
+        r#"name: policy-frontmatter
+description: from frontmatter
+metadata:
+  agent-filter-mode: whitelist
+  allowed-agent-types:
+    - Architect
+    - explorer
+    - explorer
+"#,
+    );
+
+    let cfg = make_config(&codex_home).await;
+    let outcome = load_skills_for_test(&cfg);
+
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(
+        outcome.skills,
+        vec![SkillMetadata {
+            name: "policy-frontmatter".to_string(),
+            description: "from frontmatter".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: Some(SkillPolicy {
+                allow_implicit_invocation: None,
+                products: vec![],
+                agent_filter_mode: Some(SkillAgentFilterMode::Whitelist),
+                allow_agent_whitelist: None,
+                allowed_agent_types: Some(vec!["architect".to_string(), "explorer".to_string()]),
+            }),
+            permission_profile: None,
+            managed_network_override: None,
+            path_to_skills_md: normalized(&skill_path),
+            scope: SkillScope::User,
+        }]
+    );
+    assert_eq!(
+        outcome.filter_for_agent_identity("architect").skills,
+        outcome.skills
+    );
+    assert!(
+        outcome
+            .filter_for_agent_identity("reviewer")
+            .skills
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn frontmatter_agent_filter_overlays_openai_yaml_policy() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let skill_path = write_raw_skill_at(
+        &codex_home.path().join("skills"),
+        "demo",
+        r#"name: merged-policy
+description: from both policy sources
+metadata:
+  agent-filter-mode: deny-all
+"#,
+    );
+    let skill_dir = skill_path.parent().expect("skill dir");
+    write_skill_metadata_at(
+        skill_dir,
+        r#"
+policy:
+  allow_implicit_invocation: false
+  products:
+    - codex
+  agent_filter_mode: allow-all
+"#,
+    );
+
+    let cfg = make_config(&codex_home).await;
+    let outcome = load_skills_for_test(&cfg);
+
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(
+        outcome.skills[0].policy,
+        Some(SkillPolicy {
+            allow_implicit_invocation: Some(false),
+            products: vec![Product::Codex],
+            agent_filter_mode: Some(SkillAgentFilterMode::DenyAll),
+            allow_agent_whitelist: None,
+            allowed_agent_types: None,
+        })
+    );
+    assert!(outcome.allowed_skills_for_implicit_invocation().is_empty());
+}
+
+#[tokio::test]
+async fn openai_yaml_agent_filter_entries_are_matched_case_insensitively() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let skill_path = write_raw_skill_at(
+        &codex_home.path().join("skills"),
+        "demo",
+        r#"name: openai-policy
+description: from openai yaml
+"#,
+    );
+    let skill_dir = skill_path.parent().expect("skill dir");
+    write_skill_metadata_at(
+        skill_dir,
+        r#"
+policy:
+  agent_filter_mode: whitelist
+  allowed_agent_types:
+    - Worker-*
+    - ALL-SUB-AGENTS
+"#,
+    );
+
+    let cfg = make_config(&codex_home).await;
+    let outcome = load_skills_for_test(&cfg);
+
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(
+        outcome
+            .filter_for_agent_identity("worker-senior")
+            .skills
+            .len(),
+        1
+    );
+    assert_eq!(
+        outcome
+            .filter_for_agent_identity("reviewer-baby")
+            .skills
+            .len(),
+        1
+    );
+    assert!(
+        outcome
+            .filter_for_agent_identity("architect")
+            .skills
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn loads_legacy_agent_whitelist_from_skill_frontmatter() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let skill_path = write_raw_skill_at(
+        &codex_home.path().join("skills"),
+        "demo",
+        r#"name: legacy-frontmatter
+description: from legacy frontmatter
+metadata:
+  allow-agent-whitelist: true
+  allowed-agent-types:
+    - architect
+"#,
+    );
+
+    let cfg = make_config(&codex_home).await;
+    let outcome = load_skills_for_test(&cfg);
+
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(
+        outcome.skills[0].policy,
+        Some(SkillPolicy {
+            allow_implicit_invocation: None,
+            products: vec![],
+            agent_filter_mode: Some(SkillAgentFilterMode::Whitelist),
+            allow_agent_whitelist: Some(true),
+            allowed_agent_types: Some(vec!["architect".to_string()]),
+        })
+    );
+    assert_eq!(
+        outcome.skills[0].path_to_skills_md,
+        normalized(skill_path.as_path())
+    );
+}
+
+#[tokio::test]
+async fn rejects_frontmatter_whitelist_without_allowed_agent_types() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    write_raw_skill_at(
+        &codex_home.path().join("skills"),
+        "demo",
+        r#"name: invalid-policy
+description: invalid frontmatter
+metadata:
+  agent-filter-mode: whitelist
+"#,
+    );
+
+    let cfg = make_config(&codex_home).await;
+    let outcome = load_skills_for_test(&cfg);
+
+    assert!(outcome.skills.is_empty());
+    assert_eq!(outcome.errors.len(), 1);
+    assert!(
+        outcome.errors[0]
+            .message
+            .contains("metadata.allowed-agent-types"),
+        "unexpected error: {}",
+        outcome.errors[0].message
+    );
+}
+
+#[tokio::test]
+async fn rejects_conflicting_frontmatter_agent_filter_forms() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    write_raw_skill_at(
+        &codex_home.path().join("skills"),
+        "demo",
+        r#"name: conflicting-policy
+description: invalid frontmatter
+metadata:
+  agent-filter-mode: whitelist
+  allow-agent-whitelist: true
+  allowed-agent-types:
+    - architect
+"#,
+    );
+
+    let cfg = make_config(&codex_home).await;
+    let outcome = load_skills_for_test(&cfg);
+
+    assert!(outcome.skills.is_empty());
+    assert_eq!(outcome.errors.len(), 1);
+    assert!(
+        outcome.errors[0]
+            .message
+            .contains("metadata.allow-agent-whitelist"),
+        "unexpected error: {}",
+        outcome.errors[0].message
+    );
+}
+
+#[tokio::test]
 async fn accepts_icon_paths_under_assets_dir() {
     let codex_home = tempfile::tempdir().expect("tempdir");
     let skill_path = write_skill(&codex_home, "demo", "ui-skill", "from json");
