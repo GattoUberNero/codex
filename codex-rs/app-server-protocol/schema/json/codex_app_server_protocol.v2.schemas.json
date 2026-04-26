@@ -2567,6 +2567,7 @@
     },
     "CollabWaitOutcome": {
       "enum": [
+        "completionAlreadyAvailable",
         "completionObserved",
         "activityObserved",
         "listenWindowEnded"

@@ -119,8 +119,11 @@ impl ToolHandler for Handler {
                 }
             }
 
-            let statuses = if !initial_final_statuses.is_empty() {
-                initial_final_statuses
+            let (statuses, wait_outcome) = if !initial_final_statuses.is_empty() {
+                (
+                    initial_final_statuses,
+                    CollabWaitOutcome::CompletionAlreadyAvailable,
+                )
             } else {
                 let mut futures = FuturesUnordered::new();
                 for (id, rx) in status_rxs.into_iter() {
@@ -148,7 +151,12 @@ impl ToolHandler for Handler {
                         }
                     }
                 }
-                results
+                let wait_outcome = if results.is_empty() {
+                    CollabWaitOutcome::ListenWindowEnded
+                } else {
+                    CollabWaitOutcome::CompletionObserved
+                };
+                (results, wait_outcome)
             };
 
             let timed_out = statuses.is_empty();
@@ -159,11 +167,6 @@ impl ToolHandler for Handler {
                 current_statuses.clone()
             } else {
                 observed_statuses_by_id
-            };
-            let wait_outcome = if timed_out {
-                CollabWaitOutcome::ListenWindowEnded
-            } else {
-                CollabWaitOutcome::CompletionObserved
             };
             let agent_statuses = build_wait_agent_statuses(&statuses_by_id, &receiver_agents);
             let pending = build_wait_agent_pending(&current_statuses, &receiver_agents);
@@ -245,6 +248,15 @@ impl WaitAgentResult {
     fn from_outcome(wait_outcome: CollabWaitOutcome, pending: Vec<WaitPendingAgent>) -> Self {
         let pending_count = pending.len();
         let message = match wait_outcome {
+            CollabWaitOutcome::CompletionAlreadyAvailable if pending_count == 0 => {
+                "Completion was already available before this wait call.".to_string()
+            }
+            CollabWaitOutcome::CompletionAlreadyAvailable if pending_count == 1 => {
+                "Completion already available; 1 target remains pending.".to_string()
+            }
+            CollabWaitOutcome::CompletionAlreadyAvailable => {
+                format!("Completion already available; {pending_count} targets remain pending.")
+            }
             CollabWaitOutcome::CompletionObserved if pending_count == 0 => {
                 "Observed completion.".to_string()
             }

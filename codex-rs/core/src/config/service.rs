@@ -617,7 +617,7 @@ fn toml_value_to_value(value: &TomlValue) -> anyhow::Result<toml_edit::Value> {
 fn validate_config(value: &TomlValue) -> Result<(), String> {
     let config: ConfigToml = value.clone().try_into().map_err(|err| err.to_string())?;
     config
-        .get_config_profile(None)
+        .get_config_profile(/*override_profile*/ None)
         .map_err(|err| err.to_string())?;
     super::validate_all_model_catalog_sources(&config).map_err(|err| err.to_string())?;
     Ok(())

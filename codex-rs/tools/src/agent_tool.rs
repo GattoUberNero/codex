@@ -636,6 +636,7 @@ fn collab_wait_outcome_output_schema() -> Value {
         "type": "string",
         "description": "Outcome of this wait observation window.",
         "enum": [
+            "completion_already_available",
             "completion_observed",
             "activity_observed",
             "listen_window_ended"

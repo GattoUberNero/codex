@@ -356,6 +356,15 @@ pub(crate) fn waiting_end(ev: CollabWaitingEndEvent) -> PlainHistoryCell {
     let pending_count = pending_wait_target_count(&statuses, &agent_statuses);
     let details = wait_complete_lines(wait_outcome, &statuses, &agent_statuses);
     let title = match wait_outcome {
+        Some(CollabWaitOutcome::CompletionAlreadyAvailable) if pending_count == 0 => {
+            title_text("Completion already available")
+        }
+        Some(CollabWaitOutcome::CompletionAlreadyAvailable) if pending_count == 1 => {
+            title_text("Completion already available; 1 target still pending")
+        }
+        Some(CollabWaitOutcome::CompletionAlreadyAvailable) => title_text(format!(
+            "Completion already available; {pending_count} targets still pending"
+        )),
         Some(CollabWaitOutcome::CompletionObserved) if pending_count == 0 => {
             title_text("Observed completion")
         }

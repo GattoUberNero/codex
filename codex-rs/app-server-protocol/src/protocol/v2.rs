@@ -5066,6 +5066,7 @@ pub enum DynamicToolCallStatus {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub enum CollabWaitOutcome {
+    CompletionAlreadyAvailable,
     CompletionObserved,
     ActivityObserved,
     ListenWindowEnded,
@@ -5074,6 +5075,9 @@ pub enum CollabWaitOutcome {
 impl From<codex_protocol::protocol::CollabWaitOutcome> for CollabWaitOutcome {
     fn from(value: codex_protocol::protocol::CollabWaitOutcome) -> Self {
         match value {
+            codex_protocol::protocol::CollabWaitOutcome::CompletionAlreadyAvailable => {
+                CollabWaitOutcome::CompletionAlreadyAvailable
+            }
             codex_protocol::protocol::CollabWaitOutcome::CompletionObserved => {
                 CollabWaitOutcome::CompletionObserved
             }

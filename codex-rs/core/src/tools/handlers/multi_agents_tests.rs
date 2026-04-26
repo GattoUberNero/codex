@@ -3455,7 +3455,7 @@ async fn wait_agent_returns_not_found_for_missing_agents() {
             ]),
             pending: Vec::new(),
             timed_out: false,
-            wait_outcome: CollabWaitOutcome::CompletionObserved,
+            wait_outcome: CollabWaitOutcome::CompletionAlreadyAvailable,
         }
     );
     assert_eq!(success, None);
@@ -3551,7 +3551,7 @@ fn wait_agent_effective_timeout_multiplies_requested_timeout() {
 }
 
 #[tokio::test]
-async fn wait_agent_returns_final_status_without_timeout() {
+async fn wait_agent_reports_already_available_final_status() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
@@ -3595,6 +3595,61 @@ async fn wait_agent_returns_final_status_without_timeout() {
             status: HashMap::from([(agent_id.to_string(), AgentStatus::Shutdown)]),
             pending: Vec::new(),
             timed_out: false,
+            wait_outcome: CollabWaitOutcome::CompletionAlreadyAvailable,
+        }
+    );
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn wait_agent_reports_completion_observed_during_wait_window() {
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let config = turn.config.as_ref().clone();
+    let thread = manager.start_thread(config).await.expect("start thread");
+    let agent_id = thread.thread_id;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let wait_task = tokio::spawn({
+        let session = session.clone();
+        let turn = turn.clone();
+        async move {
+            WaitAgentHandler
+                .handle(invocation(
+                    session,
+                    turn,
+                    "wait_agent",
+                    function_payload(json!({
+                        "targets": [agent_id.to_string()],
+                        "timeout_ms": 1000
+                    })),
+                ))
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let _ = thread
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+
+    let output = wait_task
+        .await
+        .expect("wait task should join")
+        .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert_eq!(
+        result,
+        wait::WaitAgentResult {
+            status: HashMap::from([(agent_id.to_string(), AgentStatus::Shutdown)]),
+            pending: Vec::new(),
+            timed_out: false,
             wait_outcome: CollabWaitOutcome::CompletionObserved,
         }
     );
@@ -3602,7 +3657,7 @@ async fn wait_agent_returns_final_status_without_timeout() {
 }
 
 #[tokio::test]
-async fn wait_agent_reports_pending_targets_after_first_completion() {
+async fn wait_agent_reports_pending_targets_after_already_available_completion() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
@@ -3657,7 +3712,7 @@ async fn wait_agent_reports_pending_targets_after_first_completion() {
                 state: AgentStatus::PendingInit,
             }],
             timed_out: false,
-            wait_outcome: CollabWaitOutcome::CompletionObserved,
+            wait_outcome: CollabWaitOutcome::CompletionAlreadyAvailable,
         }
     );
     assert_eq!(success, None);
@@ -3670,7 +3725,7 @@ async fn wait_agent_reports_pending_targets_after_first_completion() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_wait_agent_observes_completion_for_task_name_target() {
+async fn multi_agent_v2_wait_agent_reports_already_available_completion_for_task_name_target() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     let root = manager
@@ -3743,6 +3798,74 @@ async fn multi_agent_v2_wait_agent_observes_completion_for_task_name_target() {
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "Completion was already available before this wait call.".to_string(),
+            pending: Vec::new(),
+            timed_out: false,
+            wait_outcome: CollabWaitOutcome::CompletionAlreadyAvailable,
+        }
+    );
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_observes_completion_during_wait_window() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    let worker = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("worker thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    turn.config = Arc::new(config);
+    let agent_id = worker.thread_id;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let wait_task = tokio::spawn({
+        let session = session.clone();
+        let turn = turn.clone();
+        async move {
+            WaitAgentHandlerV2
+                .handle(invocation(
+                    session,
+                    turn,
+                    "wait_agent",
+                    function_payload(json!({
+                        "targets": [agent_id.to_string()],
+                        "timeout_ms": 1000
+                    })),
+                ))
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let _ = worker
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+
+    let output = wait_task
+        .await
+        .expect("wait task should join")
+        .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert_eq!(
+        result,
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Observed completion.".to_string(),
             pending: Vec::new(),
             timed_out: false,
@@ -3753,7 +3876,7 @@ async fn multi_agent_v2_wait_agent_observes_completion_for_task_name_target() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_wait_agent_reports_pending_targets_after_first_completion() {
+async fn multi_agent_v2_wait_agent_reports_pending_targets_after_already_available_completion() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     let root = manager
@@ -3818,13 +3941,13 @@ async fn multi_agent_v2_wait_agent_reports_pending_targets_after_first_completio
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Observed first completion; 1 target remains pending.".to_string(),
+            message: "Completion already available; 1 target remains pending.".to_string(),
             pending: vec![WaitPendingAgent {
                 id: active_agent_id.to_string(),
                 state: AgentStatus::PendingInit,
             }],
             timed_out: false,
-            wait_outcome: CollabWaitOutcome::CompletionObserved,
+            wait_outcome: CollabWaitOutcome::CompletionAlreadyAvailable,
         }
     );
     assert_eq!(success, None);

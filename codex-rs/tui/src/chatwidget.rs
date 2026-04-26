@@ -1770,6 +1770,9 @@ fn app_server_collab_wait_outcome_to_core(
     wait_outcome: AppServerCollabWaitOutcome,
 ) -> codex_protocol::protocol::CollabWaitOutcome {
     match wait_outcome {
+        AppServerCollabWaitOutcome::CompletionAlreadyAvailable => {
+            codex_protocol::protocol::CollabWaitOutcome::CompletionAlreadyAvailable
+        }
         AppServerCollabWaitOutcome::CompletionObserved => {
             codex_protocol::protocol::CollabWaitOutcome::CompletionObserved
         }

@@ -82,12 +82,16 @@ Do wyniku `wait_agent` oraz do `CollabWaitingEndEvent` nalezy dodac jawne pole o
 
 Proponowany enum wire-level:
 
+- `completion_already_available`
 - `completion_observed`
 - `activity_observed`
 - `listen_window_ended`
 
 Semantyka:
 
+- `completion_already_available`
+  - co najmniej jeden target byl juz w stanie finalnym przed startem tego wywolania `wait_agent`;
+  - to nie jest nowa finalizacja zaobserwowana podczas biezacego okna nasluchu;
 - `completion_observed`
   - podczas tego wywolania `wait_agent` zaobserwowano co najmniej jeden status finalny;
 - `activity_observed`
@@ -106,7 +110,8 @@ Dla kompatybilnosci wstecznej `timed_out` moze pozostac.
 Jednak:
 
 - `timed_out = true` musi odpowiadac `wait_outcome = listen_window_ended`,
-- `timed_out = false` musi odpowiadac `wait_outcome = completion_observed` albo `activity_observed`.
+- `timed_out = false` musi odpowiadac `wait_outcome = completion_already_available`,
+  `completion_observed` albo `activity_observed`.
 
 Nowe pole `wait_outcome` staje sie kanoniczne dla UI i dla dalszych decyzji runtime.
 `timed_out` pozostaje polem kompatybilnosci.
@@ -121,6 +126,11 @@ jest zbyt sugestywny i powinien zostac zastapiony komunikatem obserwacyjnym.
 
 Proponowane komunikaty:
 
+- dla `completion_already_available`:
+  - gdy nie ma pozostalych targetow pending:
+    - `Completion was already available before this wait call.`
+  - gdy pozostaja pending targety:
+    - `Completion already available; N target(s) remain pending.`
 - dla `completion_observed`:
   - gdy nie ma pozostalych targetow pending:
     - `Observed completion.`
@@ -207,6 +217,11 @@ TUI nie moze uzywac stalego tytulu `Finished waiting`.
 
 Nowe renderowanie:
 
+- dla `completion_already_available`
+  - gdy nie ma pending targetow:
+    - tytul: `Completion already available`
+  - gdy pozostaja pending targety:
+    - tytul: `Completion already available; N target(s) still pending`
 - dla `completion_observed`
   - gdy nie ma pending targetow:
     - tytul: `Observed completion`

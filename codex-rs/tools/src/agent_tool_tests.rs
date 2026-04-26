@@ -476,6 +476,7 @@ fn wait_agent_tool_v2_uses_task_targets_and_summary_output() {
     assert_eq!(
         output_schema["properties"]["wait_outcome"]["enum"],
         json!([
+            "completion_already_available",
             "completion_observed",
             "activity_observed",
             "listen_window_ended"
