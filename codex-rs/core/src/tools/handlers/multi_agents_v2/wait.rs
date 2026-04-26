@@ -68,6 +68,7 @@ impl ToolHandler for Handler {
                 });
             }
 
+            let mut status_rxs = Vec::with_capacity(receiver_thread_ids.len());
             session
                 .send_event(
                     &turn,
@@ -81,19 +82,18 @@ impl ToolHandler for Handler {
                 )
                 .await;
 
-            let mut status_rxs = Vec::with_capacity(receiver_thread_ids.len());
-            let mut initial_final_statuses = Vec::new();
+            let mut initial_terminal_statuses = Vec::new();
             for id in &receiver_thread_ids {
                 match session.services.agent_control.subscribe_status(*id).await {
                     Ok(rx) => {
                         let status = rx.borrow().clone();
                         if is_final(&status) {
-                            initial_final_statuses.push((*id, status));
+                            initial_terminal_statuses.push((*id, status));
                         }
                         status_rxs.push((*id, rx));
                     }
                     Err(CodexErr::ThreadNotFound(_)) => {
-                        initial_final_statuses.push((*id, AgentStatus::NotFound));
+                        initial_terminal_statuses.push((*id, AgentStatus::NotFound));
                     }
                     Err(err) => {
                         let mut statuses = HashMap::with_capacity(1);
@@ -119,9 +119,9 @@ impl ToolHandler for Handler {
                 }
             }
 
-            let (statuses, wait_outcome) = if !initial_final_statuses.is_empty() {
+            let (statuses, wait_outcome) = if !initial_terminal_statuses.is_empty() {
                 (
-                    initial_final_statuses,
+                    initial_terminal_statuses,
                     CollabWaitOutcome::CompletionAlreadyAvailable,
                 )
             } else {
@@ -249,26 +249,29 @@ impl WaitAgentResult {
         let pending_count = pending.len();
         let message = match wait_outcome {
             CollabWaitOutcome::CompletionAlreadyAvailable if pending_count == 0 => {
-                "Completion was already available before this wait call.".to_string()
+                "A final status was already available when waiting began.".to_string()
             }
             CollabWaitOutcome::CompletionAlreadyAvailable if pending_count == 1 => {
-                "Completion already available; 1 target remains pending.".to_string()
+                "A final status was already available when waiting began; 1 target remains pending."
+                    .to_string()
             }
             CollabWaitOutcome::CompletionAlreadyAvailable => {
-                format!("Completion already available; {pending_count} targets remain pending.")
+                format!(
+                    "A final status was already available when waiting began; {pending_count} targets remain pending."
+                )
             }
             CollabWaitOutcome::CompletionObserved if pending_count == 0 => {
-                "Observed completion.".to_string()
+                "Observed a final status.".to_string()
             }
             CollabWaitOutcome::CompletionObserved if pending_count == 1 => {
-                "Observed first completion; 1 target remains pending.".to_string()
+                "Observed first final status; 1 target remains pending.".to_string()
             }
             CollabWaitOutcome::CompletionObserved => {
-                format!("Observed first completion; {pending_count} targets remain pending.")
+                format!("Observed first final status; {pending_count} targets remain pending.")
             }
             CollabWaitOutcome::ActivityObserved => "Observed activity.".to_string(),
             CollabWaitOutcome::ListenWindowEnded => {
-                "Listen window ended; no completion observed yet. Agents may still be running."
+                "Listen window ended; no final status observed yet. Agents may still be running."
                     .to_string()
             }
         };

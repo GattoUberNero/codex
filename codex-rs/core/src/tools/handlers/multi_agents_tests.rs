@@ -4,12 +4,14 @@ use crate::CodexAuth;
 use crate::ThreadManager;
 use crate::built_in_model_providers;
 use crate::codex::make_session_and_context;
+use crate::codex::make_session_and_context_with_rx;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
 use crate::config::SpawnDelegationReportProfile;
 use crate::config::types::ShellEnvironmentPolicy;
 use crate::function_tool::FunctionCallError;
 use crate::protocol::AgentStatus;
 use crate::protocol::AskForApproval;
+use crate::protocol::Event;
 use crate::protocol::EventMsg;
 use crate::protocol::FileSystemSandboxPolicy;
 use crate::protocol::NeroAutoRuntimeConfig;
@@ -219,6 +221,27 @@ where
         }
         other => panic!("expected function output, got {other:?}"),
     }
+}
+
+async fn wait_for_collab_waiting_begin(rx: &async_channel::Receiver<Event>) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = tokio::time::timeout(remaining, rx.recv())
+            .await
+            .expect("timeout waiting for event")
+            .expect("event");
+        if matches!(event.msg, EventMsg::CollabWaitingBegin(_)) {
+            // The begin event is emitted just before the wait handler enters its
+            // initial status-subscription loop. Give that loop a brief window to
+            // settle so tests that trigger terminal status changes immediately after
+            // observing begin exercise the "observed during wait" path instead of
+            // racing into the initial-snapshot branch.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            return;
+        }
+    }
+    panic!("expected CollabWaitingBegin event");
 }
 
 #[derive(Debug, Deserialize)]
@@ -3603,14 +3626,15 @@ async fn wait_agent_reports_already_available_final_status() {
 
 #[tokio::test]
 async fn wait_agent_reports_completion_observed_during_wait_window() {
-    let (mut session, turn) = make_session_and_context().await;
+    let (mut session, turn, rx) = make_session_and_context_with_rx().await;
     let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
+    Arc::get_mut(&mut session)
+        .expect("session should be unique")
+        .services
+        .agent_control = manager.agent_control();
     let config = turn.config.as_ref().clone();
     let thread = manager.start_thread(config).await.expect("start thread");
     let agent_id = thread.thread_id;
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
 
     let wait_task = tokio::spawn({
         let session = session.clone();
@@ -3629,7 +3653,7 @@ async fn wait_agent_reports_completion_observed_during_wait_window() {
                 .await
         }
     });
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    wait_for_collab_waiting_begin(&rx).await;
 
     let _ = thread
         .thread
@@ -3798,7 +3822,7 @@ async fn multi_agent_v2_wait_agent_reports_already_available_completion_for_task
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Completion was already available before this wait call.".to_string(),
+            message: "A final status was already available when waiting began.".to_string(),
             pending: Vec::new(),
             timed_out: false,
             wait_outcome: CollabWaitOutcome::CompletionAlreadyAvailable,
@@ -3809,7 +3833,7 @@ async fn multi_agent_v2_wait_agent_reports_already_available_completion_for_task
 
 #[tokio::test]
 async fn multi_agent_v2_wait_agent_observes_completion_during_wait_window() {
-    let (mut session, mut turn) = make_session_and_context().await;
+    let (mut session, mut turn, rx) = make_session_and_context_with_rx().await;
     let manager = thread_manager();
     let root = manager
         .start_thread((*turn.config).clone())
@@ -3819,17 +3843,18 @@ async fn multi_agent_v2_wait_agent_observes_completion_during_wait_window() {
         .start_thread((*turn.config).clone())
         .await
         .expect("worker thread should start");
-    session.services.agent_control = manager.agent_control();
-    session.conversation_id = root.thread_id;
+    let session_mut = Arc::get_mut(&mut session).expect("session should be unique");
+    session_mut.services.agent_control = manager.agent_control();
+    session_mut.conversation_id = root.thread_id;
     let mut config = (*turn.config).clone();
     config
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
-    turn.config = Arc::new(config);
+    Arc::get_mut(&mut turn)
+        .expect("turn should be unique")
+        .config = Arc::new(config);
     let agent_id = worker.thread_id;
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
 
     let wait_task = tokio::spawn({
         let session = session.clone();
@@ -3848,7 +3873,7 @@ async fn multi_agent_v2_wait_agent_observes_completion_during_wait_window() {
                 .await
         }
     });
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    wait_for_collab_waiting_begin(&rx).await;
 
     let _ = worker
         .thread
@@ -3866,7 +3891,7 @@ async fn multi_agent_v2_wait_agent_observes_completion_during_wait_window() {
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Observed completion.".to_string(),
+            message: "Observed a final status.".to_string(),
             pending: Vec::new(),
             timed_out: false,
             wait_outcome: CollabWaitOutcome::CompletionObserved,
@@ -3941,7 +3966,9 @@ async fn multi_agent_v2_wait_agent_reports_pending_targets_after_already_availab
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Completion already available; 1 target remains pending.".to_string(),
+            message:
+                "A final status was already available when waiting began; 1 target remains pending."
+                    .to_string(),
             pending: vec![WaitPendingAgent {
                 id: active_agent_id.to_string(),
                 state: AgentStatus::PendingInit,

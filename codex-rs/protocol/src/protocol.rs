@@ -1612,13 +1612,13 @@ impl From<CollabResumeEndEvent> for EventMsg {
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
 pub enum CollabWaitOutcome {
-    /// A target was already in a final status before this wait call started.
+    /// A target was already in a wait-satisfying final status when the wait began listening.
     CompletionAlreadyAvailable,
-    /// Observed at least one final completion status during this wait call.
+    /// Observed at least one wait-satisfying final status during this wait call.
     CompletionObserved,
-    /// Observed mailbox or coordination activity, but not a final completion status.
+    /// Observed mailbox or coordination activity, but not a wait-satisfying final status.
     ActivityObserved,
-    /// The listening window ended before observing completion.
+    /// The listening window ended before observing a wait-satisfying final status.
     ListenWindowEnded,
 }
 

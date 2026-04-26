@@ -322,13 +322,13 @@ pub(crate) fn waiting_begin(ev: CollabWaitingBeginEvent) -> PlainHistoryCell {
 
     let title = match receiver_agents.as_slice() {
         [receiver] => title_with_agent(
-            "Listening for completion from",
+            "Listening for final status from",
             agent_label_from_ref(receiver),
             /*spawn_request*/ None,
         ),
         [] => title_text("Listening for agent activity"),
         _ => title_text(format!(
-            "Listening for first completion from {} agents",
+            "Listening for first final status from {} agents",
             receiver_agents.len()
         )),
     };
@@ -357,22 +357,22 @@ pub(crate) fn waiting_end(ev: CollabWaitingEndEvent) -> PlainHistoryCell {
     let details = wait_complete_lines(wait_outcome, &statuses, &agent_statuses);
     let title = match wait_outcome {
         Some(CollabWaitOutcome::CompletionAlreadyAvailable) if pending_count == 0 => {
-            title_text("Completion already available")
+            title_text("Final status already available")
         }
         Some(CollabWaitOutcome::CompletionAlreadyAvailable) if pending_count == 1 => {
-            title_text("Completion already available; 1 target still pending")
+            title_text("Final status already available; 1 target still pending")
         }
         Some(CollabWaitOutcome::CompletionAlreadyAvailable) => title_text(format!(
-            "Completion already available; {pending_count} targets still pending"
+            "Final status already available; {pending_count} targets still pending"
         )),
         Some(CollabWaitOutcome::CompletionObserved) if pending_count == 0 => {
-            title_text("Observed completion")
+            title_text("Observed final status")
         }
         Some(CollabWaitOutcome::CompletionObserved) if pending_count == 1 => {
-            title_text("First completion observed; 1 target still pending")
+            title_text("First final status observed; 1 target still pending")
         }
         Some(CollabWaitOutcome::CompletionObserved) => title_text(format!(
-            "First completion observed; {pending_count} targets still pending"
+            "First final status observed; {pending_count} targets still pending"
         )),
         Some(CollabWaitOutcome::ActivityObserved) => title_text("Observed activity"),
         Some(CollabWaitOutcome::ListenWindowEnded) => title_text("Listen window ended"),
@@ -829,7 +829,7 @@ fn wait_complete_lines(
     if statuses.is_empty() && agent_statuses.is_empty() {
         return match wait_outcome {
             Some(CollabWaitOutcome::ListenWindowEnded) => vec![
-                Line::from("No completion observed yet"),
+                Line::from("No final status observed yet"),
                 Line::from("Agents may still be running"),
             ],
             Some(CollabWaitOutcome::ActivityObserved) => {
@@ -1092,6 +1092,39 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n\n");
         assert_snapshot!("collab_agent_transcript", snapshot);
+    }
+
+    #[test]
+    fn wait_end_uses_final_status_wording_for_already_available_results() {
+        let sender_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000021")
+            .expect("valid sender thread id");
+        let receiver_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000022")
+            .expect("valid receiver thread id");
+        let mut statuses = HashMap::new();
+        statuses.insert(receiver_thread_id, AgentStatus::NotFound);
+
+        let cell = waiting_end(CollabWaitingEndEvent {
+            sender_thread_id,
+            call_id: "call-wait-ready".to_string(),
+            wait_outcome: Some(CollabWaitOutcome::CompletionAlreadyAvailable),
+            agent_statuses: vec![CollabAgentStatusEntry {
+                thread_id: receiver_thread_id,
+                agent_nickname: Some("Robie".to_string()),
+                agent_role: Some("explorer".to_string()),
+                status: AgentStatus::NotFound,
+            }],
+            statuses,
+        });
+
+        let rendered = cell_to_text(&cell);
+        assert!(
+            rendered.contains("Final status already available"),
+            "expected final-status wording, got {rendered:?}"
+        );
+        assert!(
+            rendered.contains("Not found"),
+            "expected underlying status details, got {rendered:?}"
+        );
     }
 
     #[test]

@@ -12,9 +12,9 @@ expression: snapshot
 • Sent input to Robie [explorer]
   └ Please continue and return the answer only.
 
-• Listening for completion from Robie [explorer]
+• Listening for final status from Robie [explorer]
 
-• Observed completion
+• Observed final status
   └ Robie [explorer]: Completed - 39916800
     Bob [worker]: Error - tool timeout
 

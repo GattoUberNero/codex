@@ -78,18 +78,18 @@ impl ToolHandler for Handler {
             .await;
 
         let mut status_rxs = Vec::with_capacity(receiver_thread_ids.len());
-        let mut initial_final_statuses = Vec::new();
+        let mut initial_terminal_statuses = Vec::new();
         for id in &receiver_thread_ids {
             match session.services.agent_control.subscribe_status(*id).await {
                 Ok(rx) => {
                     let status = rx.borrow().clone();
                     if is_final(&status) {
-                        initial_final_statuses.push((*id, status));
+                        initial_terminal_statuses.push((*id, status));
                     }
                     status_rxs.push((*id, rx));
                 }
                 Err(CodexErr::ThreadNotFound(_)) => {
-                    initial_final_statuses.push((*id, AgentStatus::NotFound));
+                    initial_terminal_statuses.push((*id, AgentStatus::NotFound));
                 }
                 Err(err) => {
                     let mut statuses = HashMap::with_capacity(1);
@@ -115,9 +115,9 @@ impl ToolHandler for Handler {
             }
         }
 
-        let (statuses, wait_outcome) = if !initial_final_statuses.is_empty() {
+        let (statuses, wait_outcome) = if !initial_terminal_statuses.is_empty() {
             (
-                initial_final_statuses,
+                initial_terminal_statuses,
                 CollabWaitOutcome::CompletionAlreadyAvailable,
             )
         } else {

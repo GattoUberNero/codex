@@ -5306,12 +5306,102 @@ async fn live_app_server_collab_wait_items_render_history() {
         .join("\n");
     assert_snapshot!("app_server_collab_wait_items_render_history", combined);
     assert!(
-        combined.contains("First completion observed; 1 target still pending"),
-        "expected explicit first-completion wording, got {combined:?}"
+        combined.contains("First final status observed; 1 target still pending"),
+        "expected explicit first-final-status wording, got {combined:?}"
     );
     assert!(
         !combined.contains("Finished waiting"),
         "expected old finished-waiting wording to be gone, got {combined:?}"
+    );
+}
+
+#[tokio::test]
+async fn live_app_server_collab_wait_items_render_already_available_history() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000000011").expect("valid thread id");
+    let receiver_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b958ce5dc111").expect("valid thread id");
+    chat.set_collab_agent_metadata(
+        receiver_thread_id,
+        Some("Robie".to_string()),
+        Some("explorer".to_string()),
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::ItemStarted(ItemStartedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "wait-2".to_string(),
+                tool: AppServerCollabAgentTool::Wait,
+                status: AppServerCollabAgentToolCallStatus::InProgress,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![receiver_thread_id.to_string()],
+                prompt: None,
+                requested_model: None,
+                requested_reasoning_effort: None,
+                model: None,
+                reasoning_effort: None,
+                effective_model: None,
+                effective_reasoning_effort: None,
+                context_inheritance_requested: None,
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
+                delegation_report: None,
+                wait_outcome: None,
+                agents_states: HashMap::new(),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "wait-2".to_string(),
+                tool: AppServerCollabAgentTool::Wait,
+                status: AppServerCollabAgentToolCallStatus::Failed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![receiver_thread_id.to_string()],
+                prompt: None,
+                requested_model: None,
+                requested_reasoning_effort: None,
+                model: None,
+                reasoning_effort: None,
+                effective_model: None,
+                effective_reasoning_effort: None,
+                context_inheritance_requested: None,
+                context_inheritance_effective: None,
+                context_inheritance_telemetry: None,
+                delegation_report: None,
+                wait_outcome: Some(AppServerCollabWaitOutcome::CompletionAlreadyAvailable),
+                agents_states: HashMap::from([(
+                    receiver_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::NotFound,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let combined = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        combined.contains("Final status already available"),
+        "expected already-available wording, got {combined:?}"
+    );
+    assert!(
+        combined.contains("Not found"),
+        "expected underlying status details, got {combined:?}"
     );
 }
 

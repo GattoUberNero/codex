@@ -270,7 +270,7 @@ pub fn create_resume_agent_tool() -> ToolSpec {
 pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "wait_agent".to_string(),
-        description: "Listen for the first targeted agent to reach a final status. This returns as soon as one target reaches a final status; it does not wait for all listed targets. Completed statuses may include the agent's final message. Returns an explicit wait outcome and any still-active pending targets when the listen window ends before completion is observed. Runtime may extend the requested timeout to reduce busy polling."
+        description: "Listen for the first targeted agent to reach a final status. This returns as soon as one target reaches a final status; it does not wait for all listed targets. Completed statuses may include the agent's final message. Returns an explicit wait outcome and any still-active pending targets when the listen window ends before a final status is observed. Runtime may extend the requested timeout to reduce busy polling."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -282,7 +282,7 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
 pub fn create_wait_agent_tool_v2(options: WaitAgentTimeoutOptions) -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "wait_agent".to_string(),
-        description: "Listen for the first targeted agent to reach a final status. This returns as soon as one target reaches a final status; it does not wait for all listed targets. Returns a brief wait summary instead of the agent's final content. If no targets are provided, waits for any collaboration activity. Returns an explicit wait outcome and any still-active pending targets when the listen window ends before completion is observed. Runtime may extend the requested timeout to reduce busy polling."
+        description: "Listen for the first targeted agent to reach a final status. This returns as soon as one target reaches a final status; it does not wait for all listed targets. Returns a brief wait summary instead of the agent's final content. If no targets are provided, waits for any collaboration activity. Returns an explicit wait outcome and any still-active pending targets when the listen window ends before a final status is observed. Runtime may extend the requested timeout to reduce busy polling."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -574,13 +574,13 @@ fn wait_output_schema_v1() -> Value {
         "properties": {
             "status": {
                 "type": "object",
-                "description": "Completion-observed statuses keyed by agent id; empty when the listen window ends without observed completion.",
+                "description": "Observed final statuses keyed by agent id. When the listen window ends without a final status, this contains the current statuses for the tracked targets.",
                 "additionalProperties": agent_status_output_schema()
             },
             "pending": wait_pending_output_schema(),
             "timed_out": {
                 "type": "boolean",
-                "description": "Whether the listen window ended before completion was observed."
+                "description": "Whether the listen window ended before a final status was observed."
             },
             "wait_outcome": collab_wait_outcome_output_schema()
         },
@@ -600,7 +600,7 @@ fn wait_output_schema_v2() -> Value {
             "pending": wait_pending_output_schema(),
             "timed_out": {
                 "type": "boolean",
-                "description": "Whether the listen window ended before completion was observed."
+                "description": "Whether the listen window ended before a final status was observed."
             },
             "wait_outcome": collab_wait_outcome_output_schema()
         },
