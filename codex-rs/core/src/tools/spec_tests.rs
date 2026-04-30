@@ -1361,8 +1361,8 @@ fn image_generation_tools_require_feature_and_supported_model() {
     let mut unsupported_model_info = supported_model_info.clone();
     unsupported_model_info.input_modalities = vec![InputModality::Text];
     let default_features = Features::with_defaults();
-    let mut image_generation_features = default_features.clone();
-    image_generation_features.enable(Feature::ImageGeneration);
+    let mut image_generation_disabled_features = default_features.clone();
+    image_generation_disabled_features.disable(Feature::ImageGeneration);
 
     let available_models = Vec::new();
     let default_tools_config = ToolsConfig::new(&ToolsConfigParams {
@@ -1381,31 +1381,32 @@ fn image_generation_tools_require_feature_and_supported_model() {
         &[],
     )
     .build();
-    assert!(
-        !default_tools
-            .iter()
-            .any(|tool| tool.spec.name() == "image_generation"),
-        "image_generation should be disabled by default"
-    );
+    assert_contains_tool_names(&default_tools, &["image_generation"]);
 
-    let supported_tools_config = ToolsConfig::new(&ToolsConfigParams {
+    let disabled_tools_config = ToolsConfig::new(&ToolsConfigParams {
         model_info: &supported_model_info,
         available_models: &available_models,
-        features: &image_generation_features,
+        features: &image_generation_disabled_features,
         web_search_mode: Some(WebSearchMode::Cached),
         session_source: SessionSource::Cli,
         sandbox_policy: &SandboxPolicy::DangerFullAccess,
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
     });
-    let (supported_tools, _) = build_specs(
-        &supported_tools_config,
+    let (disabled_tools, _) = build_specs(
+        &disabled_tools_config,
         /*mcp_tools*/ None,
         /*app_tools*/ None,
         &[],
     )
     .build();
-    assert_contains_tool_names(&supported_tools, &["image_generation"]);
-    let image_generation_tool = find_tool(&supported_tools, "image_generation");
+    assert!(
+        !disabled_tools
+            .iter()
+            .any(|tool| tool.spec.name() == "image_generation"),
+        "image_generation should respect an explicit feature disable"
+    );
+
+    let image_generation_tool = find_tool(&default_tools, "image_generation");
     assert_eq!(
         serde_json::to_value(&image_generation_tool.spec).expect("serialize image tool"),
         serde_json::json!({
@@ -1417,7 +1418,7 @@ fn image_generation_tools_require_feature_and_supported_model() {
     let tools_config = ToolsConfig::new(&ToolsConfigParams {
         model_info: &unsupported_model_info,
         available_models: &available_models,
-        features: &image_generation_features,
+        features: &default_features,
         web_search_mode: Some(WebSearchMode::Cached),
         session_source: SessionSource::Cli,
         sandbox_policy: &SandboxPolicy::DangerFullAccess,
