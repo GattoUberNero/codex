@@ -19,8 +19,36 @@ Zaprojektowac kontrolowany update, ktory pozwoli CFM i NeroBar korzystac z natyw
 - Lokalny app-server emituje plan: `turn/plan/updated` oraz eksperymentalne `item/plan/delta`.
 - Lokalny thread history zna itemy `imageView` i `imageGeneration`.
 - Lokalny fork ma Nero `multiFileReaderCall`; to jest zdolnosc forkowa, nie nalezy jej traktowac jako upstreamowego standardu.
-- Lokalny app-server nie ma obecnie potwierdzonego `thread/turns/list` ani `thread/inject_items`.
+- Lokalny app-server ma teraz backport `thread/turns/list`; `thread/inject_items` pozostaje poza zakresem, bo jest mutatywne.
 - `persistExtendedHistory` istnieje jako rozszerzenie dla bogatszego `thread/read`, ale nie zastepuje endpointu listujacego tury.
+
+## Zamrozony kontrakt app-server dla CFM/NeroBar
+
+Ten kontrakt jest minimalnym zestawem, na ktorym wolno budowac pierwsza samodzielna aplikacje operatorska. Jezeli UI potrzebuje informacji z ponizszej tabeli, ma uzywac app-server, a nie parsowac terminal, rollout JSONL po stronie przegladarki, ani hook text.
+
+| Obszar | Kanal | Status | Rola w UI |
+| --- | --- | --- | --- |
+| Sesje | `thread/list` | lokalny v2 | Lista sesji/rolloutow z filtrem cwd, source, archive i search. |
+| Sesje aktywne | `thread/loaded/list` | lokalny v2 | Szybka informacja, ktore watki zyja w obecnym app-server. |
+| Snapshot watku | `thread/read` | lokalny v2 | Pelny snapshot watku; `includeTurns` tylko do malego odczytu albo fallbacku diagnostycznego. |
+| Historia tur | `thread/turns/list` | backport v2, commit `2a10276b4a` | Stronicowany odczyt tur bez resume i bez terminala; domyslnie newest-first. |
+| Pliki | `fs/readDirectory` | lokalny v2 | Repo tree i katalogi workspace readera. |
+| Pliki | `fs/readFile` | lokalny v2 | Podglad plikow/dokumentow; dane przychodza jako base64. |
+| Pliki | `fs/watch` / `fs/unwatch` | lokalny v2 | Odwiezenie otwartego pliku albo katalogu, nie globalny watcher calego repo. |
+| Plan modelu | `turn/plan/updated` | lokalny notify | Stan roboczego planu modelu; nie jest zrodlem prawdy CFM Campaign. |
+| Plan delty | `item/plan/delta` | lokalny experimental notify | Strumien plan-mode; uzywac jako preview, nie jako finalny kanon. |
+| Artefakty obrazow | `ThreadItem::ImageView` | lokalny thread history item | Wyswietlanie obrazow otwartych przez model. |
+| Generacja obrazow | `ThreadItem::ImageGeneration` | lokalny thread history item | Wyswietlanie wyniku generacji; `savedPath` ma priorytet, jezeli istnieje. |
+| Narzedzia forkowe | `ThreadItem::MultiFileReaderCall` | Nero-only | Pokaz historii narzedzia, ale nie fundament workspace readera. |
+| Hooki | `hooks/list` | upstream alpha/main kandydat | Potencjalnie wartosciowe pozniej dla panelu hookow, ale odlozone poza pierwszy slice. |
+
+Zasady uzycia:
+
+- `thread/turns/list` cursor jest opaque i moze stac sie niewazny po rewrite/trim/rollback historii. UI ma wtedy odswiezyc pierwsza strone, a nie zgadywac indeksy.
+- `fs/readFile` i `fs/readDirectory` przyjmuja sciezki absolutne; adapter UI musi walidowac je wzgledem aktualnego project root, zanim wysle request.
+- `turn/plan/updated` i `item/plan/delta` sa informacyjne. CFM Campaign state pozostaje w canonical campaign docs.
+- `ThreadItem::ImageGeneration.savedPath` jest preferowany do preview; surowy wynik jest tylko fallbackiem prezentacyjnym.
+- `hooks/list` z alpha/main nie jest importowany teraz, bo nie jest konieczny do workspace readera ani historii tur.
 
 ## Granice zmiany
 
