@@ -317,6 +317,10 @@ client_request_definitions! {
         params: v2::ThreadReadParams,
         response: v2::ThreadReadResponse,
     },
+    ThreadTurnsList => "thread/turns/list" {
+        params: v2::ThreadTurnsListParams,
+        response: v2::ThreadTurnsListResponse,
+    },
     ThreadSessionAutoRead => "thread/sessionAuto/read" {
         params: v2::ThreadSessionAutoReadParams,
         response: v2::ThreadSessionAutoReadResponse,

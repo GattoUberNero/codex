@@ -138,6 +138,7 @@ Example with notification opt-out:
 - `thread/list` — page through stored rollouts; supports cursor-based pagination and optional `modelProviders`, `sourceKinds`, `archived`, `cwd`, and `searchTerm` filters. Each returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded.
 - `thread/loaded/list` — list the thread ids currently loaded in memory.
 - `thread/read` — read a stored thread by id without resuming it; optionally include turns via `includeTurns`. The returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded.
+- `thread/turns/list` — page a stored thread's turns without resuming it; defaults to newest-first and returns cursors for older and newer turn windows.
 - `thread/sessionAuto/read` — read the current runtime `session-auto` state for a thread through app-server v2, including CAS `version`, effective/default/applied values, and the current authority mode returned by the local app-server authority lane.
 - `thread/sessionAuto/inputActivity` — notify a loaded, confirmed main-session thread that the user changed composer draft input so runtime-owned delayed nero-auto follow-ups can cancel before the next submitted turn.
 - `thread/sessionAuto/update` — update the runtime `session-auto` state for a thread via app-server v2 using `expectedVersion` compare-and-swap semantics; returns the refreshed state on success and the current state on conflicts when available.
@@ -363,6 +364,23 @@ Use `thread/read` to fetch a stored thread by id without resuming it. Pass `incl
 { "method": "thread/read", "id": 23, "params": { "threadId": "thr_123", "includeTurns": true } }
 { "id": 23, "result": {
     "thread": { "id": "thr_123", "status": { "type": "notLoaded" }, "turns": [ ... ] }
+} }
+```
+
+### Example: List thread turns
+
+Use `thread/turns/list` to page a stored thread's turn history without resuming it. By default, results are sorted descending so clients can start at the present and fetch older turns with `nextCursor`. The response also includes `backwardsCursor`; pass it as `cursor` on a later request with `sortDirection: "asc"` to fetch turns newer than the first item from the earlier page.
+
+```json
+{ "method": "thread/turns/list", "id": 24, "params": {
+    "threadId": "thr_123",
+    "limit": 50,
+    "sortDirection": "desc"
+} }
+{ "id": 24, "result": {
+    "data": [ ... ],
+    "nextCursor": "older-turns-cursor-or-null",
+    "backwardsCursor": "newer-turns-cursor-or-null"
 } }
 ```
 

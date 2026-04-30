@@ -79,6 +79,7 @@ use codex_app_server_protocol::ThreadSessionAutoUpdateParams;
 use codex_app_server_protocol::ThreadSetNameParams;
 use codex_app_server_protocol::ThreadShellCommandParams;
 use codex_app_server_protocol::ThreadStartParams;
+use codex_app_server_protocol::ThreadTurnsListParams;
 use codex_app_server_protocol::ThreadUnarchiveParams;
 use codex_app_server_protocol::ThreadUnsubscribeParams;
 use codex_app_server_protocol::TurnCompletedNotification;
@@ -466,6 +467,15 @@ impl McpProcess {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("thread/read", params).await
+    }
+
+    /// Send a `thread/turns/list` JSON-RPC request.
+    pub async fn send_thread_turns_list_request(
+        &mut self,
+        params: ThreadTurnsListParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("thread/turns/list", params).await
     }
 
     /// Send a `thread/sessionAuto/read` JSON-RPC request.

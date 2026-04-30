@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use anyhow::Result;
 use app_test_support::McpProcess;
 use app_test_support::create_fake_rollout_with_text_elements;
@@ -7,6 +8,7 @@ use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SessionSource;
+use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadListResponse;
@@ -20,6 +22,8 @@ use codex_app_server_protocol::ThreadSetNameResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadStatus;
+use codex_app_server_protocol::ThreadTurnsListParams;
+use codex_app_server_protocol::ThreadTurnsListResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
@@ -29,6 +33,8 @@ use codex_protocol::user_input::TextElement;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
+use serde_json::json;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -148,6 +154,89 @@ async fn thread_read_can_include_turns() -> Result<()> {
         other => panic!("expected user message item, got {other:?}"),
     }
     assert_eq!(thread.status, ThreadStatus::NotLoaded);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_turns_list_can_page_backward_and_forward() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let filename_ts = "2025-01-05T12-00-00";
+    let conversation_id = create_fake_rollout_with_text_elements(
+        codex_home.path(),
+        filename_ts,
+        "2025-01-05T12:00:00Z",
+        "first",
+        vec![],
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    let rollout_path =
+        app_test_support::rollout_path(codex_home.path(), filename_ts, &conversation_id);
+    append_user_message(rollout_path.as_path(), "2025-01-05T12:01:00Z", "second")?;
+    append_user_message(rollout_path.as_path(), "2025-01-05T12:02:00Z", "third")?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let read_id = mcp
+        .send_thread_turns_list_request(ThreadTurnsListParams {
+            thread_id: conversation_id.clone(),
+            cursor: None,
+            limit: Some(2),
+            sort_direction: Some(SortDirection::Desc),
+        })
+        .await?;
+    let read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    let ThreadTurnsListResponse {
+        data,
+        next_cursor,
+        backwards_cursor,
+    } = to_response::<ThreadTurnsListResponse>(read_resp)?;
+    assert_eq!(turn_user_texts(&data), vec!["third", "second"]);
+    let next_cursor = next_cursor.context("expected nextCursor for older turns")?;
+    let backwards_cursor = backwards_cursor.context("expected backwardsCursor for newest turn")?;
+
+    let read_id = mcp
+        .send_thread_turns_list_request(ThreadTurnsListParams {
+            thread_id: conversation_id.clone(),
+            cursor: Some(next_cursor),
+            limit: Some(10),
+            sort_direction: Some(SortDirection::Desc),
+        })
+        .await?;
+    let read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    let ThreadTurnsListResponse { data, .. } = to_response::<ThreadTurnsListResponse>(read_resp)?;
+    assert_eq!(turn_user_texts(&data), vec!["first"]);
+
+    append_user_message(rollout_path.as_path(), "2025-01-05T12:03:00Z", "fourth")?;
+
+    let read_id = mcp
+        .send_thread_turns_list_request(ThreadTurnsListParams {
+            thread_id: conversation_id,
+            cursor: Some(backwards_cursor),
+            limit: Some(10),
+            sort_direction: Some(SortDirection::Asc),
+        })
+        .await?;
+    let read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    let ThreadTurnsListResponse { data, .. } = to_response::<ThreadTurnsListResponse>(read_resp)?;
+    assert_eq!(turn_user_texts(&data), vec!["third", "fourth"]);
 
     Ok(())
 }
@@ -472,6 +561,55 @@ async fn thread_read_reports_system_error_idle_flag_after_failed_turn() -> Resul
     assert_eq!(thread.status, ThreadStatus::SystemError,);
 
     Ok(())
+}
+
+fn append_user_message(path: &Path, timestamp: &str, text: &str) -> Result<()> {
+    let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+    writeln!(
+        file,
+        "{}",
+        json!({
+            "timestamp": timestamp,
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}]
+            }
+        })
+    )?;
+    writeln!(
+        file,
+        "{}",
+        json!({
+            "timestamp": timestamp,
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": text,
+                "text_elements": [],
+                "local_images": []
+            }
+        })
+    )?;
+    Ok(())
+}
+
+fn turn_user_texts(turns: &[codex_app_server_protocol::Turn]) -> Vec<String> {
+    turns
+        .iter()
+        .flat_map(|turn| turn.items.iter())
+        .filter_map(|item| match item {
+            ThreadItem::UserMessage { content, .. } => content.iter().find_map(|input| {
+                if let UserInput::Text { text, .. } = input {
+                    Some(text.clone())
+                } else {
+                    None
+                }
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 // Helper to create a config.toml pointing at the mock model server.
