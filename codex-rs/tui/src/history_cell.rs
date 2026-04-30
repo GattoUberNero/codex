@@ -1867,6 +1867,72 @@ struct NeroHookTuiBlockStatusPayload {
     text: String,
 }
 
+fn nero_hook_inline_spans(text: &str, base_style: Style) -> Vec<Span<'static>> {
+    let code_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let mut spans = Vec::new();
+    let mut rest = text;
+
+    while let Some(start) = rest.find('`') {
+        if start > 0 {
+            spans.push(Span::from(rest[..start].to_string()).style(base_style));
+        }
+        let after_tick = &rest[start + 1..];
+        if let Some(end) = after_tick.find('`') {
+            let token_end = start + 1 + end + 1;
+            spans.push(Span::from(rest[start..token_end].to_string()).style(code_style));
+            rest = &rest[token_end..];
+        } else {
+            spans.push(Span::from(rest[start..].to_string()).style(base_style));
+            rest = "";
+            break;
+        }
+    }
+
+    if !rest.is_empty() {
+        spans.push(Span::from(rest.to_string()).style(base_style));
+    }
+    spans
+}
+
+fn nero_hook_inline_line(text: &str, base_style: Style) -> Line<'static> {
+    Line::from(nero_hook_inline_spans(text, base_style))
+}
+
+fn nero_hook_label_colon_index(line: &str) -> Option<usize> {
+    let trimmed_start = line.len().saturating_sub(line.trim_start().len());
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with("- ") {
+        return trimmed.find(':').map(|idx| trimmed_start + idx);
+    }
+    let local_idx = trimmed.find(':')?;
+    let label = &trimmed[..local_idx];
+    if label.is_empty()
+        || !label
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.')
+    {
+        return None;
+    }
+    Some(trimmed_start + local_idx)
+}
+
+fn nero_hook_labeled_line(line: &str, colon_idx: usize) -> Line<'static> {
+    let label_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let value_style = Style::default().white();
+    let label = &line[..=colon_idx];
+    let value = &line[colon_idx + 1..];
+    let mut spans = vec![Span::from(label.to_string()).style(label_style)];
+    spans.extend(nero_hook_inline_spans(value, value_style));
+    Line::from(spans)
+}
+
 #[derive(Debug)]
 pub(crate) struct NeroHookBlockCell {
     content: String,
@@ -1918,26 +1984,14 @@ impl HistoryCell for NeroHookBlockCell {
                         return Line::from(line.to_string())
                             .style(Style::default().yellow().add_modifier(Modifier::BOLD));
                     }
-                    if trimmed.starts_with("- ")
-                        && line.contains(":")
-                        && let Some(idx) = line.find(':')
-                    {
-                        let label = &line[..=idx];
-                        let value = &line[idx + 1..];
-                        return Line::from(vec![
-                            Span::from(label.to_string()).style(
-                                Style::default()
-                                    .fg(Color::Cyan)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::from(value.to_string()).style(Style::default().white()),
-                        ]);
+                    if let Some(idx) = nero_hook_label_colon_index(line) {
+                        return nero_hook_labeled_line(line, idx);
                     }
                     if trimmed.chars().all(|c| c == '-') {
                         return Line::from(line.to_string())
                             .style(Style::default().yellow().add_modifier(Modifier::DIM));
                     }
-                    Line::from(line.to_string()).style(Style::default().white())
+                    nero_hook_inline_line(line, Style::default().white())
                 }),
                 RtOptions::new(inner_width)
                     .initial_indent("  ".into())
@@ -3352,6 +3406,30 @@ plugins = true
 
     fn render_transcript(cell: &dyn HistoryCell) -> Vec<String> {
         render_lines(&cell.transcript_lines(u16::MAX))
+    }
+
+    #[test]
+    fn nero_hook_labeled_line_highlights_labels_and_backticks() {
+        let line = "  gate: `proc-C3` current";
+        let idx = nero_hook_label_colon_index(line).expect("label colon should be detected");
+        let rendered = nero_hook_labeled_line(line, idx);
+
+        assert_eq!(rendered.spans[0].content, "  gate:");
+        assert_eq!(rendered.spans[0].style.fg, Some(Color::Cyan));
+        assert!(
+            rendered.spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+        assert_eq!(rendered.spans[2].content, "`proc-C3`");
+        assert_eq!(rendered.spans[2].style.fg, Some(Color::Cyan));
+        assert!(
+            rendered.spans[2]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
     }
 
     fn image_block(data: &str) -> serde_json::Value {
