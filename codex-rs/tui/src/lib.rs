@@ -502,8 +502,22 @@ async fn lookup_session_target_by_name_with_app_server(
     }
 }
 
+async fn lookup_session_target_by_name_from_index(
+    config: &Config,
+    name: &str,
+) -> color_eyre::Result<Option<resume_picker::SessionTarget>> {
+    let Some(thread_id) = codex_core::find_thread_id_by_name(&config.codex_home, name).await?
+    else {
+        return Ok(None);
+    };
+    let path =
+        codex_core::find_thread_path_by_id_str(&config.codex_home, &thread_id.to_string()).await?;
+    Ok(Some(resume_picker::SessionTarget { path, thread_id }))
+}
+
 async fn lookup_session_target_with_app_server(
     app_server: &mut AppServerSession,
+    config: &Config,
     id_or_name: &str,
 ) -> color_eyre::Result<Option<resume_picker::SessionTarget>> {
     if Uuid::parse_str(id_or_name).is_ok() {
@@ -532,6 +546,12 @@ async fn lookup_session_target_with_app_server(
                 Ok(None)
             }
         };
+    }
+
+    if !app_server.is_remote()
+        && let Some(target) = lookup_session_target_by_name_from_index(config, id_or_name).await?
+    {
+        return Ok(Some(target));
     }
 
     lookup_session_target_by_name_with_app_server(app_server, id_or_name).await
@@ -1084,7 +1104,7 @@ async fn run_ratatui_app(
             thread_name: None,
             update_action: None,
             exit_reason: ExitReason::Fatal(format!(
-                "No saved session found with ID {id_str}. Run `codex {action}` without an ID to choose from existing sessions."
+                "No saved session found with ID or thread name {id_str}. Run `codex {action}` without an ID to choose from existing sessions."
             )),
         })
     };
@@ -1118,7 +1138,7 @@ async fn run_ratatui_app(
             let Some(app_server) = session_lookup_app_server.as_mut() else {
                 unreachable!("session lookup app server should be initialized for --fork <id>");
             };
-            match lookup_session_target_with_app_server(app_server, id_str).await? {
+            match lookup_session_target_with_app_server(app_server, &config, id_str).await? {
                 Some(target_session) => resume_picker::SessionSelection::Fork(target_session),
                 None => {
                     shutdown_app_server_if_present(session_lookup_app_server.take()).await;
@@ -1170,7 +1190,7 @@ async fn run_ratatui_app(
         let Some(app_server) = session_lookup_app_server.as_mut() else {
             unreachable!("session lookup app server should be initialized for --resume <id>");
         };
-        match lookup_session_target_with_app_server(app_server, id_str).await? {
+        match lookup_session_target_with_app_server(app_server, &config, id_str).await? {
             Some(target_session) => resume_picker::SessionSelection::Resume(target_session),
             None => {
                 shutdown_app_server_if_present(session_lookup_app_server.take()).await;
@@ -1920,6 +1940,28 @@ mod tests {
         assert_eq!(target.thread_id, thread_id);
 
         app_server.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lookup_session_target_by_name_uses_session_index_directly() -> color_eyre::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let config = build_config(&temp_dir).await?;
+        let thread_id = ThreadId::new();
+        let rollout_path = temp_dir
+            .path()
+            .join("sessions/2025/02/01")
+            .join(format!("rollout-2025-02-01T10-00-00-{thread_id}.jsonl"));
+        let rollout_dir = rollout_path.parent().expect("rollout parent");
+        std::fs::create_dir_all(rollout_dir)?;
+        std::fs::write(&rollout_path, "")?;
+
+        codex_core::append_thread_name(&config.codex_home, thread_id, "saved-session").await?;
+
+        let target = lookup_session_target_by_name_from_index(&config, "saved-session").await?;
+        let target = target.expect("session index lookup should find the saved thread");
+        assert_eq!(target.path, Some(rollout_path));
+        assert_eq!(target.thread_id, thread_id);
         Ok(())
     }
 
